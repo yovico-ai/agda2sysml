@@ -23,6 +23,10 @@ their proof boundaries. These contracts govern implementation. A disagreement
 between written requirements and the formal model must be resolved explicitly;
 neither may be silently weakened to match an implementation shortcut.
 
+[Mapping version 2](docs/project-mapping-v2.md) extends the original profile for
+parameterized and inferred configurations. The [CLI contract](docs/cli.md)
+defines commands, exit status, and artifact behavior. Version 1 remains supported.
+
 This initial scope includes structure extraction, two behavioral encodings,
 contract presentation, source traceability, and coverage reporting. Interactive
 rendering, hosting, application code generation, and automated correction of an
@@ -295,9 +299,10 @@ The first generator implementation is acceptable when:
 - The formal aggregate type-checks safely, and the adapter and emitter
   correspondence obligations have explicit evidence or stated limitations.
 
-Exact CLI spelling, serialized inventory schema, diagram layout, the first
-concrete SysML validator release, and the full target expression subset remain
-implementation-design decisions to specify before those interfaces are built.
+The validator is the official SysML Pilot Implementation release 2026-03 with
+its matching SysML 2.0 libraries, invoked through a headless Java adapter.
+Diagram layout remains outside generator scope. Target expression rules must
+carry correspondence obligations before they count as semantic translations.
 
 ## References
 

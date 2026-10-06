@@ -47,6 +47,9 @@ Writing or passing a check here does not imply a SysML emitter has been tested.
 | [DecisionTree](Agda2SysML/DecisionTree.agda) | For every finite decision tree and input, normalized rule selection yields exactly the original outcome | Predicates and effects are total semantic functions; extracting them from compiler terms and rendering them into SysML remain obligations |
 | [Relations](Agda2SysML/Relations.agda) | Constructor-style rules and generated semantic edges permit exactly the same source/target pairs | Witnesses and premises are retained abstractly; target edges are not parsed SysML |
 | [Coverage](Agda2SysML/Coverage.agda) | A report retains its entire supplied inventory; strict completion accepts fully translated reports and rejects every report containing a textual entry | Inventory discovery, dependency closure, and per-entry translation evidence must be justified separately |
+| [Obligations](Agda2SysML/Obligations.agda) | Completion discharges every requirement by its kind; retained proof text cannot discharge executable behavior | The producer must justify its classification and the underlying evidence predicates |
+| [Provenance](Agda2SysML/Provenance.agda) | Located transformations preserve origins and compose | Compiler source spans must be correctly supplied |
+| [Terms](Agda2SysML/Terms.agda) | Reindexing preserves dependent typing, interpretation, and binder structure at arbitrary universe levels | The local-reference interpretation and compiler lowering need correspondence evidence |
 
 The foundational module supplies small total list, Boolean, equality, and
 decision definitions. The laws are universally quantified. There are no
