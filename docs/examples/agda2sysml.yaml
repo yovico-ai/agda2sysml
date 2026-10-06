@@ -1,0 +1,52 @@
+mapping-version: 1
+
+project:
+  name: Example
+  agda-library: example.agda-lib
+  roots:
+    - Example
+
+models:
+  review:
+    module: Example.Review
+    title: Review lifecycle
+    state:
+      type: World
+    commands:
+      type: Command
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: command
+        before: w
+      result:
+        type: Outcome
+        state-projection: outcomeWorld
+        variants:
+          applied: accepted
+          unchanged: unchanged
+          refused: refused
+    contracts:
+      invariants:
+        - worldWellFormed
+      theorems:
+        - Example.Review.Properties.step-preserves-world
+        - Example.Review.Properties.refusal-preserves-world
+
+  workflow:
+    module: Example.Workflow
+    title: Workflow lifecycle
+    state:
+      type: Configuration
+    transition:
+      encoding: relation
+      symbol: "_⟶_"
+      indices:
+        before: 0
+        after: 1
+    contracts:
+      invariants:
+        - admissible
+      theorems:
+        - Example.Workflow.Properties.transition-preserves-admissibility

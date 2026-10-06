@@ -17,8 +17,16 @@ original definitions.
 
 ## Status
 
-The project is at its initial setup stage. A generator, supported Agda subset,
-SysML version, and usage instructions have not yet been implemented or defined.
+The initial written and formal specifications are available for review:
+
+- [Project specification](SPECIFICATION.md)
+- [Project mapping format](docs/project-mapping.md)
+- [Formal laws and verification instructions](spec/README.md)
+
+The proposed generator uses Haskell and targets SysML 2.0. Its implementation,
+compiler adapter, and SysML emitter are not yet available. The Agda core proves
+the transformation and coverage laws described in the formal specification;
+it does not establish end-to-end compiler correctness.
 
 ## License
 
