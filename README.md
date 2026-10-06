@@ -28,6 +28,13 @@ compiler adapter, and SysML emitter are not yet available. The Agda core proves
 the transformation and coverage laws described in the formal specification;
 it does not establish end-to-end compiler correctness.
 
+## Development
+
+With Nix flakes enabled, run `nix develop` from the repository root for the
+pinned Agda, GHC, and Cabal environment. Run `nix flake check` to type-check the
+complete formal specification in an isolated build without cached interfaces.
+See the [formal specification instructions](spec/README.md) for interactive work.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

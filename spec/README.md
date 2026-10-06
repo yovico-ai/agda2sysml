@@ -7,17 +7,32 @@ the aggregate imports every formal module.
 
 ## Checking the specification
 
-Use Agda 2.8.0. The specification depends only on Agda's builtin modules; no
-standard library or third-party Agda library is required. From this directory,
-run:
+The root `flake.nix` and `flake.lock` pin an environment containing Agda 2.8.0,
+GHC, and Cabal. The specification depends only on Agda's builtin modules; no
+standard library or third-party Agda library is required. With Nix flakes
+enabled, run from the repository root:
+
+```text
+nix flake check
+```
+
+The `spec` check type-checks the aggregate in an isolated build. Only Agda source
+and the library descriptor enter that build; local interface caches are excluded.
+The flake provides outputs for x86_64 and aarch64 on Linux and macOS. Checks run
+on the current host platform by default.
+
+For development, run `nix develop` from the repository root, then enter `spec/`
+and run:
 
 ```text
 agda Agda2SysML.agda
 ```
 
 For interactive proof development, run `agda --interaction-json` from this same
-directory and load the module being edited. The library descriptor declares
-this directory as its include path. Generated interface files are ignored.
+directory inside the development shell and load the module being edited. The
+library descriptor declares this directory as its include path. Generated
+interface files are ignored. A separately installed Agda 2.8.0 can also run the
+aggregate directly.
 
 The aggregate command is the complete formal gate for this initial repository.
 There is no generator implementation, CI workflow, or runtime test suite yet.
