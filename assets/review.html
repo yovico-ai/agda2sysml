@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agda specification review</title>
+<style>
+:root{font:16px/1.5 system-ui,sans-serif;color:#202c38;background:#f5f7fa}
+body{margin:0}header{padding:1.4rem 2rem;background:#183548;color:white}h1{margin:0;font-size:1.5rem}
+header p{margin:.5rem 0 0;color:#e0ebf2}.controls{padding:1rem 2rem;display:flex;gap:1rem;flex-wrap:wrap;background:white;border-bottom:1px solid #d9e1e8}
+input,select{font:inherit;padding:.5rem;border:1px solid #a8b6c1;border-radius:4px}input{min-width:20rem}
+main{display:grid;grid-template-columns:minmax(18rem,30%) 1fr;min-height:75vh}nav{background:white;padding:1rem;overflow:auto;max-height:85vh}
+nav button{display:block;width:100%;text-align:left;border:0;background:none;padding:.7rem .5rem;cursor:pointer;border-bottom:1px solid #edf0f3;font:inherit;overflow-wrap:anywhere}
+nav button:hover,nav button.selected{background:#e7f0f6}nav small{display:block;color:#586d7d}
+article{padding:1.5rem 2rem;min-width:0}h2{font-size:1.25rem;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;border:1px solid #dce4eb;padding:1rem;font:13px/1.6 ui-monospace,monospace}
+.badge{display:inline-block;padding:.15rem .6rem;border-radius:4px;background:#e3edf3;font-size:.85rem}.missing{background:#fff0d5;color:#674400}li{margin:.4rem 0}a{color:#236388}.empty{color:#667783}
+@media(max-width:800px){main{display:block}nav{max-height:35vh}article{padding:1rem}input{min-width:12rem}}
+</style>
+<header><h1 id="project">Specification review</h1><p id="summary"></p></header>
+<div class="controls">
+<input id="search" type="search" aria-label="Search declarations" placeholder="Search names, source, or diagnostics">
+<select id="module" aria-label="Module"><option value="">All modules</option></select>
+<select id="status" aria-label="Representation"><option value="">All declarations</option><option value="native">Has native SysML</option><option value="contract">Retained proof contracts</option><option value="missing">Needs translation</option></select>
+<span id="count"></span>
+</div>
+<main><nav id="list" aria-label="Declarations"></nav><article id="detail"><p>Select a declaration to inspect its source and representation.</p></article></main>
+<script type="application/json" id="payload">@@PAYLOAD@@</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('payload').textContent);
+const $=id=>document.getElementById(id), entries=data.declarations;
+const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
+const missing=e=>e.declaration.requirements.some(r=>r.status==='textual');
+const native=e=>e.declaration.nativeTargets.length>0;
+const label=e=>missing(e)?'Needs translation':native(e)?'Native SysML':e.declaration.contract?'Retained proof contract':'Retained source';
+$('project').textContent=String(data.project)+' — specification review';
+$('summary').textContent=(data.complete?'Complete mapped scope':'Partial semantic translation')+' · Validated SysML · '+entries.length+' project declarations. Retained source and proof contracts do not claim executable translation.';
+for(const name of [...new Set(entries.map(e=>e.declaration.module))].sort()){const o=node('option',name);o.value=name;$('module').append(o);}
+let selected=null;
+function show(e){
+ selected=e;const d=e.declaration,box=$('detail');box.replaceChildren();
+ box.append(node('h2',d.name),node('span',label(e),'badge'+(missing(e)?' missing':'')),node('p',d.module+' · '+d.kind));
+ const links=node('p');for(const [text,file] of [['SysML','model.sysml'],['Correspondence','correspondence.json'],['Checked inventory','inventory.json']]){const a=node('a',text);a.href=file;links.append(a,document.createTextNode('  '));}box.append(links);
+ const ul=node('ul');for(const r of d.requirements){ul.append(node('li',r.kind+': '+r.status+(r.reason?' — '+r.reason:'')));}box.append(ul);
+ box.append(node('h3','Checked Agda source'),node('p',d.source.library+':'+d.source.path));
+ box.append(node('pre',d.sourceExcerpt||'No direct declaration anchor. Its checked signature remains in inventory.json.'));
+ box.append(node('h3','Generated SysML'));
+ if(e.nativeText.length){for(const text of e.nativeText)box.append(node('pre',text));}
+ else if(d.nativeTargets.length){box.append(node('pre',d.nativeTargets.join('\n')));}
+ else box.append(node('p',d.contract?'The proof contract is retained as source; it is not an executable calculation.':'This declaration has no native representation in this bundle.','empty'));
+ location.hash=encodeURIComponent(d.symbol);draw();
+}
+function draw(){
+ const query=$('search').value.toLowerCase(),module=$('module').value,status=$('status').value;
+ const shown=entries.filter(e=>(!module||e.declaration.module===module)&&(!status||(status==='native'?native(e):status==='contract'?e.declaration.contract:missing(e)))&&(!query||(e.declaration.name+' '+e.declaration.sourceExcerpt+' '+e.declaration.requirements.map(r=>r.reason||'').join(' ')).toLowerCase().includes(query)));
+ $('count').textContent=shown.length+' shown';const list=$('list');list.replaceChildren();
+ for(const e of shown){const b=node('button',e.declaration.name,e===selected?'selected':'');b.append(node('small',label(e)));b.onclick=()=>show(e);list.append(b);}
+ if(!shown.length)list.append(node('p','No declarations match these filters.','empty'));
+}
+for(const id of ['search','module','status'])$(id).addEventListener('input',draw);
+draw();if(location.hash){try{const e=entries.find(e=>e.declaration.symbol===decodeURIComponent(location.hash.slice(1)));if(e)show(e);}catch{}}
+</script>
+</html>

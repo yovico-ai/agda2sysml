@@ -1,0 +1,156 @@
+cabal-version: 3.0
+name: agda2sysml
+version: 0.1.0.0
+synopsis: Generate traceable SysML from checked Agda specifications
+license: MIT
+license-file: LICENSE
+build-type: Simple
+extra-source-files: test/TargetEvaluation.java test/review.cjs test/emitted_model.py test/open_parameters.py test/dependent_evidence.py test/recursive_core.py assets/review.html
+
+common defaults
+  default-language: GHC2021
+  ghc-options: -Wall
+  build-depends:
+    base >=4.20 && <4.21,
+    Agda ==2.8.0,
+    aeson,
+    bytestring,
+    containers,
+    conduit,
+    cryptohash-sha256,
+    deepseq,
+    directory,
+    filepath,
+    libyaml,
+    mtl,
+    optparse-applicative,
+    process,
+    resourcet,
+    regex-tdfa,
+    scientific,
+    text,
+    template-haskell,
+    temporary,
+    unordered-containers,
+    vector
+
+executable agda2sysml
+  import: defaults
+  hs-source-dirs: app, src
+  main-is: Main.hs
+  other-modules:
+    Agda2SysML.Compiler
+    Agda2SysML.Source
+    Agda2SysML.SourceCatalog
+    Agda2SysML.SourceAlignment
+    Agda2SysML.Encoding
+    Agda2SysML.Mapping
+    Agda2SysML.Merge
+    Agda2SysML.Workflow
+    Agda2SysML.Review
+    Agda2SysML.Sharing
+    Agda2SysML.Inventory
+    Agda2SysML.Derivation
+    Agda2SysML.Diagnostic
+    Agda2SysML.Target
+    Agda2SysML.Presentation
+    Agda2SysML.FiniteTarget
+    Agda2SysML.RelationTarget
+    Agda2SysML.AlgebraicTarget
+    Agda2SysML.Specialize
+    Agda2SysML.Reduction
+  ghc-options: -threaded -rtsopts -with-rtsopts=-A64m
+
+test-suite mapping
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: MappingTests.hs
+  other-modules: Agda2SysML.Mapping
+
+test-suite sharing
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: SharingTests.hs
+  other-modules: Agda2SysML.Sharing
+  build-depends: QuickCheck, vector
+
+test-suite merging
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: MergeTests.hs
+  other-modules: Agda2SysML.Merge
+
+test-suite finite-target
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: FiniteTargetTests.hs
+  other-modules:
+    Agda2SysML.SourceCatalog
+    Agda2SysML.Derivation
+    Agda2SysML.Diagnostic
+    Agda2SysML.Target
+    Agda2SysML.Presentation
+    Agda2SysML.FiniteTarget
+    Agda2SysML.RelationTarget
+    Agda2SysML.AlgebraicTarget
+    Agda2SysML.Specialize
+    Agda2SysML.Reduction
+    Agda2SysML.Inventory
+    Agda2SysML.Sharing
+    Agda2SysML.Mapping
+
+test-suite algebraic-target
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: AlgebraicTargetTests.hs
+  other-modules:
+    Agda2SysML.SourceCatalog
+    Agda2SysML.Derivation
+    Agda2SysML.Diagnostic
+    Agda2SysML.Target
+    Agda2SysML.Presentation
+    Agda2SysML.FiniteTarget
+    Agda2SysML.RelationTarget
+    Agda2SysML.AlgebraicTarget
+    Agda2SysML.Specialize
+    Agda2SysML.Reduction
+    Agda2SysML.Inventory
+    Agda2SysML.Sharing
+    Agda2SysML.Mapping
+
+test-suite source-catalog
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: SourceCatalogTests.hs
+  other-modules:
+    Agda2SysML.Source
+    Agda2SysML.SourceCatalog
+    Agda2SysML.Sharing
+
+test-suite derivations
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: DerivationTests.hs
+  other-modules:
+    Agda2SysML.Derivation
+    Agda2SysML.SourceCatalog
+    Agda2SysML.Inventory
+    Agda2SysML.Sharing
+    Agda2SysML.Mapping
+
+test-suite source-alignment
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test, src
+  main-is: SourceAlignmentTests.hs
+  other-modules:
+    Agda2SysML.SourceAlignment
+    Agda2SysML.SourceCatalog
+    Agda2SysML.Sharing

@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Dependent constructor payloads
+  agda-library: contracts.agda-lib
+  roots: [DependentPayload]
+models:
+  state:
+    module: DependentPayload
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readEvent, readMatched, readOrdinary, readRaised]
+      theorems: [copy-preserves, matching-preserves, envelope-copy, keep-preserves, set-event, set-ordinary, set-raised]

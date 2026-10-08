@@ -1,0 +1,19 @@
+mapping-version: 2
+project:
+  name: Independent typed registers
+  agda-library: contracts.agda-lib
+  roots: [Parameterized]
+models:
+  registers:
+    module: Parameterized
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      theorems: [retain-preserves, replace-contents, box-roundtrip, choose-first, choose-second, flag-preserves-colour, colour-preserves-flag, keep-preserves]

@@ -1,0 +1,15 @@
+mapping-version: 2
+project:
+  name: Boolean implication
+  agda-library: contracts.agda-lib
+  roots: [Implication]
+models:
+  implication:
+    module: Implication
+    state: {type: Bool}
+    transition:
+      encoding: relation
+      symbol: Implies
+      indices: {before: 0, after: 1}
+    contracts:
+      theorems: [reflexive, transitive]

@@ -1,5 +1,11 @@
 # Formal specification
 
+`DeclarationSelection` governs the default library profile. Every project
+declaration receives a nonempty set of roles, selection preserves all inventory
+members and roles, and local annotations preserve the default requirements.
+Compiler classification and native rendering remain adapter obligations;
+documentary source never supplies behavioral evidence.
+
 The Agda core specifies general resolution, validation, transformation, and
 coverage laws for agda2sysml. It is part of the
 [project specification](../SPECIFICATION.md). All modules use `--safe`, and
@@ -34,9 +40,9 @@ library descriptor declares this directory as its include path. Generated
 interface files are ignored. A separately installed Agda 2.8.0 can also run the
 aggregate directly.
 
-The aggregate command is the complete formal gate for this initial repository.
-There is no generator implementation, CI workflow, or runtime test suite yet.
-Writing or passing a check here does not imply a SysML emitter has been tested.
+The aggregate command is the formal gate. The Nix check also runs the Haskell
+and CLI integration suites and the independent target evaluator. Passing the
+formal gate alone does not imply that a SysML emitter has been tested.
 
 ## Proof coverage
 
@@ -50,6 +56,13 @@ Writing or passing a check here does not imply a SysML emitter has been tested.
 | [Obligations](Agda2SysML/Obligations.agda) | Completion discharges every requirement by its kind; retained proof text cannot discharge executable behavior | The producer must justify its classification and the underlying evidence predicates |
 | [Provenance](Agda2SysML/Provenance.agda) | Located transformations preserve origins and compose | Compiler source spans must be correctly supplied |
 | [Terms](Agda2SysML/Terms.agda) | Reindexing preserves dependent typing, interpretation, and binder structure at arbitrary universe levels | The local-reference interpretation and compiler lowering need correspondence evidence |
+| [Sharing](Agda2SysML/Sharing.agda) | A reference has a unique value, and expansion reconstructs the original tree | The writer must establish lookup evidence through exact equality and emit an acyclic, complete node table |
+| [BooleanLowering](Agda2SysML/BooleanLowering.agda) | Finite Boolean constructor cases preserve their value under every environment substitution, including removal of matched arguments | The adapter must admit exactly this case-tree shape; SysML literal, input and conditional meanings remain rendering obligations |
+| [FiniteLowering](Agda2SysML/FiniteLowering.agda) | Exhaustive finite constructor cases preserve every input substitution; native ordered equality tests select the same branch | Concrete enum identities and textual rendering must satisfy the finite carrier correspondence |
+| [DependentFamilies](Agda2SysML/DependentFamilies.agda) | Every dependent family is equivalent to the fibres of its own indexed carrier, in both directions and without K | Native domain types and index constraints must implement that carrier and its projection; arbitrary proof erasure is not justified |
+| [AlgebraicValues](Agda2SysML/AlgebraicValues.agda) | Typed products and admissible sums preserve fields, payload binding, round trips, distinct constructors, tag preservation, inactive-slot absence, and dispatch | Checked schemas and native field multiplicities must implement the abstract carriers |
+| [FirstOrder](Agda2SysML/FirstOrder.agda) | Every function in a finite program preserves evaluation under lowering, including ordered nested calls | Bodies can call only preceding definitions; compiler extraction and native invocation must implement the typed expressions, with separate preservation evidence for primitive operations |
+| [Specialization](Agda2SysML/Specialization.agda) | Type substitution preserves interpretation for arbitrary families; closed instantiation preserves values in both directions and transports first-order operations | Concrete-use discovery, checked binder interpretation, identity generation, and native lowering must instantiate these laws; open parameters and dependent value indices are outside the rule |
 
 The foundational module supplies small total list, Boolean, equality, and
 decision definitions. The laws are universally quantified. There are no
@@ -120,3 +133,184 @@ These are not discharged by the present core proofs. Future formal extensions
 must state general laws over their intended domain and stay safely checkable.
 Concrete extraction and serialization regressions belong in the implementation
 suite when it is introduced.
+
+`AlgebraicValues` quantifies over arbitrary typed field schemas and field
+meanings. It proves record field and complete product preservation, payload
+binding expansion, both round trips for a tagged sum constrained to exactly
+its selected payload, encoding injectivity, constructor distinction, and
+dispatch preservation for arbitrary branch functions. Native field cardinality,
+exact-type constraints, and checked compiler telescope order instantiate these
+laws; the Agda proof does not parse or execute SysML.
+
+`FiniteLowering` generalizes exhaustive nullary constructor cases to every finite
+domain size. Its lowering law quantifies over arbitrary input substitutions;
+`native-select-preserves` justifies ordered equality tests with an exhaustive
+last branch. These laws do not admit payload constructors or dependent indices.
+
+`FirstOrder` gives source and native expressions separate typed argument lists
+and function tables. Expression and argument preservation compose through calls
+and operations with an explicit preservation law. `Program` allows references
+only to earlier definitions, excluding recursion and signature-only entries.
+`program-preserves` establishes agreement for every function and every argument
+tuple. This theorem covers the acyclic subgraph. `RecursiveCalls` supplies the
+separate accessibility-induction law for admitted recursive components. Neither
+law verifies the Haskell traversal or emitted textual syntax.
+
+`UniverseLevels` proves substitution and closed resolution for arbitrary level
+expressions built from parameters, constants, successor, and maximum. Its
+runtime model proves environment reconstruction and lookup preservation after
+removing resolved static level binders. Compiler extraction, unique inference,
+and universe checking must establish this model's premises; these proofs do
+not verify the Haskell solver or admit runtime level values.
+
+`IndexedValues` models constructor-specific payloads and result indices for an
+arbitrary family. It proves carrier/fibre round trips, preservation of constructor
+indices, dependent operations, and dispatch observations. The implementation
+admits only finite index domains and supported checked index expressions;
+formal quantification over more general families does not expand that compiler
+boundary. Native index fields must satisfy the constructor equation, and each
+fibre use must satisfy the required index equality.
+
+`DependentRecords` extends the family/fibre correspondence to records whose
+members depend on arbitrary preceding field tuples. It proves both round trips,
+unchanged prefix values, dependent field preservation, and operation preservation.
+The accepted compiler fragment restricts the projected indices to finite domains.
+
+`SpecializedFamilies` composes static interpretation equality with native fibre
+encoding inside dependent records. It quantifies over arbitrary static keys,
+index domains, preceding field tuples, dependent members, and operations, proving
+both round trips, unchanged runtime indices, and operation preservation. Static
+substitution/resolution supplies its equality premise; compiler extraction and
+substitution are still implementation boundaries.
+
+`DependentSums` extends dependent payload correspondence to arbitrary constructor
+tags with their own preceding payload tuples and member families. Its universal
+laws preserve both value directions, tags, member indices, dispatch, arbitrary
+result-index observations, and operations. They compose with optional-slot and
+indexed-family laws; admission of checked telescopes, case substitutions, and
+guarded native constraints remains an implementation obligation.
+
+
+`ComputedIndices` uses the typed acyclic `FirstOrder` program to prove native
+index evaluation. Its general expression-substitution theorem justifies helper
+argument replacement; comparison requires equality of justified normal forms,
+and branch refinement transports a dependent member only along an established
+equality. The executable adapter is still responsible for correctly extracting
+terms and applying the supported reductions.
+
+
+`RelationBindings` separates the complete witness telescope from its lexical
+variable context. General laws preserve lookup, absolute witness positions,
+endpoint evaluation, and endpoint equations in both directions for every
+binding/nonbinding layout. This supplies the binding correspondence needed
+when the relation adapter instantiates `Relations` from checked constructors.
+
+`Diagnostics` defines the three translation refusal categories. Its general
+reason-mapping laws preserve required identities, discharged counts, completeness in both
+directions, and strict refusal. Located explanations retain their source and
+model links under classification. Assigning the correct category to a checked
+compiler boundary remains an executable-adapter obligation.
+
+`SourceOccurrences` separates structural identity from location, ownership, and
+shared payloads. General laws preserve catalog identities under relocation,
+retain ownership, prevent repacking from merging distinct occurrences, and
+require a unique candidate for resolved ownership. Concrete parser recovery
+and byte-coordinate conversion remain implementation obligations.
+
+### Derivation and rendering laws
+
+`Agda2SysML.Derivations` models ordered checked/rule origins independently of
+semantic values. It proves origin retention under combination and substitution,
+rendered-byte preservation under annotation changes, correctness of document
+byte measurement, and preservation of interval identity and bounds under shifts.
+These general laws do not verify compiler extraction, concrete binder
+substitution, specialization, UTF-8 encoding, or the Haskell renderer. Those
+adapter obligations are checked by the derivation and public CLI suites. The
+model supplies no compiler-extraction evidence.
+
+`SourceAlignment.Direct` defines a relation between resolved first-order source
+terms and checked terms under an explicit binder environment. It proves that
+renaming checked binders transports alignment, and that selecting an exact
+result requires a unique existing alignment proof; ambiguous evidence cannot
+be selected. The adapter must establish the relation's premises from compiler
+highlighting, pattern origins, and checked terms. These laws do not certify
+Agda elaboration, parser recovery, or the Haskell matcher. The signature
+transport law additionally proves that arbitrary rebasing preserves resolved
+references when every moved index denotes the same telescope slot. Its unused
+binder corollary covers insertion of an `Abs` slot in place of `NoAbs`, provided
+all prior references are shifted. Concrete signature extraction, metadata
+omission, and whole-telescope comparison remain adapter obligations.
+
+The `Derivations.Trace.Readiness` laws quantify over arbitrary checked-source
+alignment evidence. Composition retains readiness of both input histories;
+adding checked evidence cannot discharge an existing generated boundary.
+Fresh nodes obtain their first checked origin at construction. These laws do
+not prove Agda extraction or the serialized clause-replay certificates; adapter
+and public-contract regressions check those boundaries.
+
+`SourceAlignment.Projection` models the bounded constructor-signature bridge
+between a source prefix field application and a checked postfix projection.
+For every admitted canonical field, resolved receiver, and runtime environment,
+the bridge preserves the projected value. Arbitrary receiver rebasing also
+preserves it when moved indices denote the same value. Proper-field registry
+validation, exact elimination shape, source catalog paths, and restriction to
+constructor signatures remain adapter obligations. No bare receiver occurrence
+is claimed where the checked tree stores only a projected term.
+
+`AlgebraicValues.tabulate-inputs` proves that reading every typed input position
+reconstructs the entire payload, including separate positions with equal types.
+`constructor-helper-preserves` composes that law with constructor encoding for
+arbitrary schemas, selected constructors, and payload values. Concrete Agda
+telescope extraction (including `Abs`/`NoAbs`), checked-domain provenance paths,
+and the existing dependent-family admission conditions remain adapter obligations.
+The law does not discharge generated index-contract provenance.
+
+`DependentRecords.Record.InputContract` makes the carrier-index equality
+explicit after forgetting a dependent input's fibre evidence. The general laws
+prove that the equality is necessary, restores the fibre without changing its
+payload, round-trips every admissible input, and refuses any raw input whose
+indices cannot agree. These laws quantify over arbitrary prefixes, index
+families, and members under `--safe --without-K`. The bounded adapter rule
+derives constructor input contracts whose expected index is a resolved earlier
+input or one proper field projection of that input; source occurrence paths,
+family layout admission, index positions, and `Abs`/`NoAbs` resolution remain
+adapter obligations.
+
+`DependentRecords.ProjectedInput` proves that pointwise receiver preservation
+preserves every projected index. It transports the input contract in both
+directions, restores admissible inputs without changing their payloads, and
+refuses projected-index mismatches. The laws quantify over arbitrary prefixes,
+record receivers, projections, index families, and members. Canonical field
+identity, proper-projection metadata, concrete receiver signatures, and the
+single-elimination restriction remain adapter obligations. These laws do not
+certify Agda extraction or imply alignment of an invented bare receiver node.
+
+
+`IndexedValues.Family.ResultContract` states the equality required to treat a
+native carrier as a value of an expected result fibre. The general laws prove
+that admission preserves the carrier, a constructor's result-index equality
+establishes the emitted assertion, the assertion reflects that same equality,
+and a mismatching result index refuses admission. They quantify over arbitrary
+indices, tags, dependent payloads, and expected results under `--safe --without-K`.
+The adapter must separately validate the actual constructor body, terminal type,
+canonical finite values, index positions, and binder resolution. A fresh result
+assertion does not discharge independent provenance boundaries in result values.
+
+
+The direct numeric and collection rules are specified in `NaturalValues`,
+`SequenceValues`, and `RecursiveCalls`. `DefinitionalReduction` covers the
+computational projection and closure laws without proof irrelevance.
+`DecisionTree.fallback-preserves` covers nested match fallback, and
+`DependencyScope` proves sufficiency of the computational footprint after a
+semantics-preserving reduction. `Obligations` distinguishes retained reduction
+sources from executable behavior evidence. Adapter admission, termination
+certificate use, capture avoidance, and target rendering remain implementation
+obligations, exercised by the Haskell and native validation suites.
+
+
+`RecursiveValues` proves finite constructor-tree/forest correspondence, metadata
+preservation and strict decrease along every child edge. `NaturalIndices` proves
+finite ordinal bounds and indexed vector length. `CapturedIndices` proves lookup
+preservation for both injections into a captured-prefix/runtime environment.
+These general laws support the actual `BooleanLowering` core; concrete emitted
+results and constraints are verified in the implementation suite.

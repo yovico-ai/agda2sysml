@@ -1,0 +1,1911 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-07",
+  "implementationTree": "a552b29c9cbb52dca80fb91e62200535abfefb2b",
+  "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+  "method": "generate --diagnostic for every contracts/*.yaml; successful complete bundles satisfy the semantic strict gate, while provenance is separately measured; repeat-counted across artifacts",
+  "commandTemplate": "agda2sysml generate --mapping contracts/NAME.yaml --output OUTPUT/NAME --diagnostic",
+  "mappings": [
+    {
+      "mapping": "contracts/computed-index.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 146,
+        "inspectedDefinitions": 146,
+        "requiredDefinitions": 59,
+        "requiredObligations": 146,
+        "specializedDefinitions": 12
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 9,
+        "native.algebraic-value": 18,
+        "native.boolean": 3,
+        "native.boolean-cases": 1,
+        "native.concrete-instantiations": 14,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 8,
+        "source.proof": 45,
+        "source.statement": 43,
+        "static.universe-level": 2
+      },
+      "targetOccurrences": 234,
+      "targetSourcePrecision": {
+        "derived": 59,
+        "unavailable": 175
+      },
+      "targetCheckedPrecision": {
+        "derived": 201,
+        "unavailable": 33
+      },
+      "targetSourcePrecisionByRole": {
+        "boolean-expression": {
+          "derived": 4
+        },
+        "calculation": {
+          "derived": 6,
+          "unavailable": 20
+        },
+        "call": {
+          "derived": 4,
+          "unavailable": 14
+        },
+        "conditional": {
+          "derived": 1,
+          "unavailable": 3
+        },
+        "constructed-field": {
+          "derived": 16,
+          "unavailable": 32
+        },
+        "construction": {
+          "derived": 4,
+          "unavailable": 13
+        },
+        "equality": {
+          "derived": 1,
+          "unavailable": 3
+        },
+        "generated-structure-boundary": {
+          "unavailable": 7
+        },
+        "index-contract": {
+          "derived": 1,
+          "unavailable": 2
+        },
+        "index-contract-boundary": {
+          "unavailable": 11
+        },
+        "input": {
+          "derived": 12,
+          "unavailable": 31
+        },
+        "projection": {
+          "unavailable": 20
+        },
+        "value": {
+          "derived": 10,
+          "unavailable": 19
+        }
+      },
+      "checkedOccurrences": 137,
+      "checkedSourcePrecision": {
+        "derived": 39,
+        "unavailable": 98
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 86,
+          "aligned": 19,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 31,
+            "source-anchor-unavailable": 19,
+            "source-case-transformation-unavailable": 1,
+            "source-function-transformation-unavailable": 16
+          }
+        },
+        "signatures": {
+          "entries": 115,
+          "aligned": 32,
+          "unavailableReasons": {
+            "source-expression-unavailable": 37,
+            "source-occurrence-ambiguous": 4,
+            "source-signature-anchor-unavailable": 27,
+            "source-signature-binder-unavailable": 6,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-modality-unavailable": 4,
+            "source-term-mismatch": 4
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 6
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 74
+        },
+        {
+          "rule": "native.index-contract",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 21
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "3bf8110ac181360e25650eccb1bed857360a9f2435004bce5510795d2fc7172e",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "9fb5137d0f5055553095d78d929558f2a606faf7ab0d76288ab81f65eaf50573",
+        "model.sysml": "1376e58eff3de7d438c7a06e771ae4a26c7880d8892ab07f50dfaa7769c33292"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 25,
+          "discharged": 25
+        },
+        "proof-source": {
+          "required": 45,
+          "discharged": 45
+        },
+        "statement": {
+          "required": 43,
+          "discharged": 43
+        },
+        "structure": {
+          "required": 33,
+          "discharged": 33
+        }
+      }
+    },
+    {
+      "mapping": "contracts/dependent-payload.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 207,
+        "inspectedDefinitions": 175,
+        "requiredDefinitions": 89,
+        "requiredObligations": 207,
+        "specializedDefinitions": 21
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 13,
+        "native.algebraic-value": 39,
+        "native.boolean": 3,
+        "native.concrete-instantiations": 13,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 9,
+        "source.proof": 63,
+        "source.statement": 60,
+        "static.universe-level": 4
+      },
+      "targetOccurrences": 734,
+      "targetSourcePrecision": {
+        "derived": 250,
+        "unavailable": 484
+      },
+      "targetCheckedPrecision": {
+        "derived": 689,
+        "unavailable": 45
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 10,
+          "unavailable": 32
+        },
+        "call": {
+          "unavailable": 13
+        },
+        "conditional": {
+          "derived": 3,
+          "unavailable": 15
+        },
+        "constructed-field": {
+          "derived": 98,
+          "unavailable": 106
+        },
+        "construction": {
+          "derived": 13,
+          "unavailable": 25
+        },
+        "equality": {
+          "derived": 3,
+          "unavailable": 15
+        },
+        "generated-structure-boundary": {
+          "unavailable": 12
+        },
+        "index-contract": {
+          "derived": 7,
+          "unavailable": 12
+        },
+        "index-contract-boundary": {
+          "unavailable": 14
+        },
+        "input": {
+          "derived": 27,
+          "unavailable": 85
+        },
+        "projection": {
+          "derived": 12,
+          "unavailable": 72
+        },
+        "value": {
+          "derived": 77,
+          "unavailable": 83
+        }
+      },
+      "checkedOccurrences": 266,
+      "checkedSourcePrecision": {
+        "derived": 59,
+        "unavailable": 207
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 102,
+          "aligned": 22,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 40,
+            "source-anchor-unavailable": 22,
+            "source-case-transformation-unavailable": 4,
+            "source-function-transformation-unavailable": 13,
+            "source-with-rewrite-unavailable": 1
+          }
+        },
+        "signatures": {
+          "entries": 139,
+          "aligned": 42,
+          "unavailableReasons": {
+            "source-expression-unavailable": 50,
+            "source-occurrence-ambiguous": 6,
+            "source-signature-anchor-unavailable": 30,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-modality-unavailable": 6,
+            "source-signature-projection-unavailable": 1,
+            "source-term-mismatch": 3
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 11
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 110
+        },
+        {
+          "rule": "native.index-contract",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 25
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "ba3fac6055de2659c299fe5c7f514590892afa0773206ea1142f76a5a5c065c6",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "12260654178895f66f68dbc744265eeba758b146482c44e5c2a8f204fbe35b55",
+        "model.sysml": "cadd4cbbab25279c0fbdbe0f5f9e10aeb41479e3a677567f77ca5024ee31e5cb"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 26,
+          "discharged": 26
+        },
+        "proof-source": {
+          "required": 63,
+          "discharged": 63
+        },
+        "statement": {
+          "required": 60,
+          "discharged": 60
+        },
+        "structure": {
+          "required": 58,
+          "discharged": 58
+        }
+      }
+    },
+    {
+      "mapping": "contracts/dependent-record.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 111,
+        "inspectedDefinitions": 69,
+        "requiredDefinitions": 41,
+        "requiredObligations": 111,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 9,
+        "native.algebraic-value": 15,
+        "native.boolean": 3,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 4,
+        "source.proof": 39,
+        "source.statement": 38
+      },
+      "targetOccurrences": 222,
+      "targetSourcePrecision": {
+        "derived": 103,
+        "unavailable": 119
+      },
+      "targetCheckedPrecision": {
+        "derived": 193,
+        "unavailable": 29
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 4,
+          "unavailable": 16
+        },
+        "call": {
+          "derived": 2,
+          "unavailable": 4
+        },
+        "conditional": {
+          "derived": 2,
+          "unavailable": 1
+        },
+        "constructed-field": {
+          "derived": 38,
+          "unavailable": 20
+        },
+        "construction": {
+          "derived": 9,
+          "unavailable": 6
+        },
+        "equality": {
+          "derived": 2,
+          "unavailable": 1
+        },
+        "generated-structure-boundary": {
+          "unavailable": 5
+        },
+        "index-contract": {
+          "derived": 3,
+          "unavailable": 2
+        },
+        "index-contract-boundary": {
+          "unavailable": 7
+        },
+        "input": {
+          "derived": 10,
+          "unavailable": 29
+        },
+        "projection": {
+          "derived": 4,
+          "unavailable": 21
+        },
+        "value": {
+          "derived": 29,
+          "unavailable": 7
+        }
+      },
+      "checkedOccurrences": 108,
+      "checkedSourcePrecision": {
+        "derived": 23,
+        "exact": 18,
+        "unavailable": 67
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 34,
+          "aligned": 10,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 12,
+            "source-anchor-unavailable": 7,
+            "source-case-transformation-unavailable": 3,
+            "source-function-transformation-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 49,
+          "aligned": 16,
+          "unavailableReasons": {
+            "source-expression-unavailable": 15,
+            "source-occurrence-ambiguous": 6,
+            "source-signature-anchor-unavailable": 9,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-projection-unavailable": 1,
+            "source-term-mismatch": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 4
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 48
+        },
+        {
+          "rule": "native.index-contract",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 13
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "2a9204c8fefc872e2595f16147f102d122a4068ab74ea79a6631f3a25eeac671",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "35c0978bbee1909a454781f1af9168d23d90b8b8943955c950832cb67cae5a0d",
+        "model.sysml": "977e91e9ed7fd71574eef7ecad3b71409a60fee83c470444962a5c8845219dd1"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 13,
+          "discharged": 13
+        },
+        "proof-source": {
+          "required": 39,
+          "discharged": 39
+        },
+        "statement": {
+          "required": 38,
+          "discharged": 38
+        },
+        "structure": {
+          "required": 21,
+          "discharged": 21
+        }
+      }
+    },
+    {
+      "mapping": "contracts/guarded.yaml",
+      "exitCode": 2,
+      "complete": false,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 41,
+        "inspectedDefinitions": 30,
+        "requiredDefinitions": 21,
+        "requiredObligations": 53,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.boolean": 3,
+        "source.proof": 20,
+        "source.statement": 18
+      },
+      "targetOccurrences": 0,
+      "targetSourcePrecision": {},
+      "targetCheckedPrecision": {},
+      "targetSourcePrecisionByRole": {},
+      "checkedOccurrences": 0,
+      "checkedSourcePrecision": {},
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 4,
+          "aligned": 0,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 1,
+            "source-with-rewrite-unavailable": 3
+          }
+        },
+        "signatures": {
+          "entries": 12,
+          "aligned": 0,
+          "unavailableReasons": {
+            "source-expression-unavailable": 1,
+            "source-occurrence-ambiguous": 6,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-modality-unavailable": 4
+          }
+        }
+      },
+      "unresolvedObligations": [
+        {
+          "symbol": "Agda.Primitive.Level#NameId 18 (ModuleNameHash 10880583612240331187)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Agda.Primitive.LevelUniv#NameId 16 (ModuleNameHash 10880583612240331187)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.Command#NameId 10 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "Field/input/result needs an admitted carrier"
+        },
+        {
+          "symbol": "Guarded.Command.change#NameId 14 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.Command.hold#NameId 12 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.Outcome#NameId 18 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "Field/input/result needs an admitted carrier"
+        },
+        {
+          "symbol": "Guarded.Outcome.applied#NameId 22 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.Outcome.refused#NameId 26 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.Outcome.unchanged#NameId 24 (ModuleNameHash 8336140190266323232)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Guarded.outcomeState#NameId 30 (ModuleNameHash 8336140190266323232)",
+          "kind": "behavior",
+          "code": "unsupported-target-representation",
+          "reason": "The native Boolean rule requires Boolean inputs; Result needs a different domain rule; Field/input/result needs an admitted carrier"
+        },
+        {
+          "symbol": "Guarded.step#NameId 42 (ModuleNameHash 8336140190266323232)",
+          "kind": "behavior",
+          "code": "unsupported-target-representation",
+          "reason": "The native Boolean rule requires Boolean inputs; Result needs a different domain rule; Field/input/result needs an admitted carrier"
+        },
+        {
+          "symbol": "Guarded.with-48#NameId 50 (ModuleNameHash 8336140190266323232)",
+          "kind": "behavior",
+          "code": "unsupported-target-representation",
+          "reason": "The calculation has no uniquely anchored source definition; No uniquely anchored source definition; Field/input/result needs an admitted carrier"
+        }
+      ],
+      "diagnosticCodes": {
+        "unsupported-target-representation": 12
+      },
+      "nestedBoundaryOccurrences": [],
+      "artifactDigests": {
+        "correspondence.json": "6b480ef65bb4cdf9e1f0b4dbd808572339eac9c278684e0dd2596b9354804243",
+        "diagnostics.json": "0a8e38c7ef4b833134e3130bbcfc6851e7f21822c21182fa6e66e0090ac734d5",
+        "inventory.json": "49ecf4a60c88e75f249fc1a6c7a4606b666761822e3115eb7d8d89f4271e4730",
+        "model.sysml": "05470cd2097356cf5dfd5ba9888963396117715de96aaf4a55fd039d9640c88b"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 3,
+          "discharged": 0
+        },
+        "proof-source": {
+          "required": 20,
+          "discharged": 20
+        },
+        "statement": {
+          "required": 18,
+          "discharged": 18
+        },
+        "structure": {
+          "required": 12,
+          "discharged": 3
+        }
+      }
+    },
+    {
+      "mapping": "contracts/implication.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 23,
+        "inspectedDefinitions": 19,
+        "requiredDefinitions": 8,
+        "requiredObligations": 23,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.boolean": 3,
+        "native.finite-relation": 4,
+        "source.proof": 8,
+        "source.statement": 8
+      },
+      "targetOccurrences": 12,
+      "targetSourcePrecision": {
+        "derived": 10,
+        "unavailable": 2
+      },
+      "targetCheckedPrecision": {
+        "derived": 11,
+        "unavailable": 1
+      },
+      "targetSourcePrecisionByRole": {
+        "endpoint-equality": {
+          "derived": 4
+        },
+        "relation-constraint": {
+          "derived": 2,
+          "unavailable": 1
+        },
+        "relation-endpoint": {
+          "derived": 4
+        },
+        "relation-existence-boundary": {
+          "unavailable": 1
+        }
+      },
+      "checkedOccurrences": 7,
+      "checkedSourcePrecision": {
+        "derived": 6,
+        "unavailable": 1
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 2,
+          "aligned": 1,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 1
+          }
+        },
+        "signatures": {
+          "entries": 6,
+          "aligned": 3,
+          "unavailableReasons": {
+            "source-expression-unavailable": 1,
+            "source-occurrence-ambiguous": 2
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.relation-existence",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 2
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "32f3cba629be0565ea2f2f29f3cc766603d4ecb301e60cae01fc2df644a68682",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "6f5cc24747ac45e3d72473f860fb3ca063c9c3ed3d7cc61cfbe4bb6b085f727e",
+        "model.sysml": "f7a973d4d5c30712d8eab798fcdfbd58304f356ae651d9fd8ce33382f1ea53e3"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 1,
+          "discharged": 1
+        },
+        "proof-source": {
+          "required": 8,
+          "discharged": 8
+        },
+        "statement": {
+          "required": 8,
+          "discharged": 8
+        },
+        "structure": {
+          "required": 6,
+          "discharged": 6
+        }
+      }
+    },
+    {
+      "mapping": "contracts/indexed.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 99,
+        "inspectedDefinitions": 46,
+        "requiredDefinitions": 37,
+        "requiredObligations": 99,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 7,
+        "native.algebraic-value": 13,
+        "native.boolean": 3,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 4,
+        "source.proof": 33,
+        "source.statement": 36
+      },
+      "targetOccurrences": 180,
+      "targetSourcePrecision": {
+        "derived": 63,
+        "unavailable": 117
+      },
+      "targetCheckedPrecision": {
+        "derived": 151,
+        "unavailable": 29
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 5,
+          "unavailable": 12
+        },
+        "call": {
+          "unavailable": 6
+        },
+        "conditional": {
+          "unavailable": 2
+        },
+        "constructed-field": {
+          "derived": 24,
+          "unavailable": 20
+        },
+        "construction": {
+          "derived": 6,
+          "unavailable": 6
+        },
+        "equality": {
+          "unavailable": 2
+        },
+        "generated-structure-boundary": {
+          "unavailable": 5
+        },
+        "index-contract": {
+          "derived": 3
+        },
+        "index-contract-boundary": {
+          "unavailable": 12
+        },
+        "input": {
+          "derived": 7,
+          "unavailable": 20
+        },
+        "projection": {
+          "derived": 1,
+          "unavailable": 16
+        },
+        "value": {
+          "derived": 17,
+          "unavailable": 16
+        }
+      },
+      "checkedOccurrences": 88,
+      "checkedSourcePrecision": {
+        "derived": 23,
+        "exact": 3,
+        "unavailable": 62
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 17,
+          "aligned": 5,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 7,
+            "source-anchor-unavailable": 3,
+            "source-function-transformation-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 28,
+          "aligned": 10,
+          "unavailableReasons": {
+            "source-expression-unavailable": 8,
+            "source-occurrence-ambiguous": 4,
+            "source-signature-anchor-unavailable": 4,
+            "source-signature-carrier-unavailable": 1,
+            "source-term-mismatch": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 4
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 41
+        },
+        {
+          "rule": "native.index-contract",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 20
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "ac5319a1613a1f1ace713af6eab2f2e2203efbfa5d156e20e929f728f28d03ee",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "9212c50ad6b99efc10bb7b47824522c6aa91c5cebf65154124886c12ae19a1d0",
+        "model.sysml": "bc33a8002e8adde7a05e7abc55da57d31c441d8f4912545043674fb1911732ad"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 11,
+          "discharged": 11
+        },
+        "proof-source": {
+          "required": 33,
+          "discharged": 33
+        },
+        "statement": {
+          "required": 36,
+          "discharged": 36
+        },
+        "structure": {
+          "required": 19,
+          "discharged": 19
+        }
+      }
+    },
+    {
+      "mapping": "contracts/parameterized.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 110,
+        "inspectedDefinitions": 45,
+        "requiredDefinitions": 54,
+        "requiredObligations": 110,
+        "specializedDefinitions": 18
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 8,
+        "native.algebraic-value": 20,
+        "native.boolean": 3,
+        "native.concrete-instantiations": 9,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 1,
+        "source.proof": 30,
+        "source.statement": 36
+      },
+      "targetOccurrences": 151,
+      "targetSourcePrecision": {
+        "derived": 2,
+        "unavailable": 149
+      },
+      "targetCheckedPrecision": {
+        "derived": 136,
+        "unavailable": 15
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "unavailable": 19
+        },
+        "call": {
+          "unavailable": 6
+        },
+        "conditional": {
+          "unavailable": 4
+        },
+        "constructed-field": {
+          "derived": 1,
+          "unavailable": 30
+        },
+        "construction": {
+          "unavailable": 14
+        },
+        "equality": {
+          "unavailable": 4
+        },
+        "generated-structure-boundary": {
+          "unavailable": 7
+        },
+        "input": {
+          "unavailable": 31
+        },
+        "projection": {
+          "unavailable": 16
+        },
+        "value": {
+          "derived": 1,
+          "unavailable": 18
+        }
+      },
+      "checkedOccurrences": 79,
+      "checkedSourcePrecision": {
+        "derived": 2,
+        "unavailable": 77
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 15,
+          "aligned": 3,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 6,
+            "source-anchor-unavailable": 3,
+            "source-function-transformation-unavailable": 3
+          }
+        },
+        "signatures": {
+          "entries": 27,
+          "aligned": 4,
+          "unavailableReasons": {
+            "source-expression-unavailable": 8,
+            "source-occurrence-ambiguous": 4,
+            "source-signature-anchor-unavailable": 5,
+            "source-signature-binder-unavailable": 3,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-modality-unavailable": 2
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 6
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 27
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "e837fdd26605d69b241117648be2b8d9c4389d75dba0d8f361a0b4e0b40d60a8",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "c012420df6e6b2dae35562ffd65724a5e4c2c4fc3652c2c9297db82523b042b7",
+        "model.sysml": "92c0e5616757a555f13c4b1100b6e41e7807275b4af967e8508a122b554f6c5d"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 12,
+          "discharged": 12
+        },
+        "proof-source": {
+          "required": 30,
+          "discharged": 30
+        },
+        "statement": {
+          "required": 36,
+          "discharged": 36
+        },
+        "structure": {
+          "required": 32,
+          "discharged": 32
+        }
+      }
+    },
+    {
+      "mapping": "contracts/register-workflow.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 56,
+        "inspectedDefinitions": 37,
+        "requiredDefinitions": 22,
+        "requiredObligations": 56,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 3,
+        "native.algebraic-value": 9,
+        "native.boolean": 3,
+        "native.first-order-calls": 1,
+        "source.proof": 18,
+        "source.statement": 22
+      },
+      "targetOccurrences": 93,
+      "targetSourcePrecision": {
+        "derived": 46,
+        "unavailable": 47
+      },
+      "targetCheckedPrecision": {
+        "derived": 85,
+        "unavailable": 8
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 5,
+          "unavailable": 4
+        },
+        "call": {
+          "derived": 2
+        },
+        "conditional": {
+          "unavailable": 3
+        },
+        "constructed-field": {
+          "derived": 16,
+          "unavailable": 6
+        },
+        "construction": {
+          "derived": 4,
+          "unavailable": 3
+        },
+        "equality": {
+          "unavailable": 3
+        },
+        "generated-structure-boundary": {
+          "unavailable": 2
+        },
+        "input": {
+          "derived": 6,
+          "unavailable": 13
+        },
+        "projection": {
+          "unavailable": 10
+        },
+        "value": {
+          "derived": 13,
+          "unavailable": 3
+        }
+      },
+      "checkedOccurrences": 37,
+      "checkedSourcePrecision": {
+        "derived": 10,
+        "exact": 5,
+        "unavailable": 22
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 14,
+          "aligned": 9,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 1,
+            "source-anchor-unavailable": 2,
+            "source-case-transformation-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 22,
+          "aligned": 7,
+          "unavailableReasons": {
+            "source-expression-unavailable": 9,
+            "source-occurrence-ambiguous": 2,
+            "source-signature-anchor-unavailable": 3,
+            "source-signature-carrier-unavailable": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 2
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 17
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "d7128f27a679127120eb173e4b46e74a70384a46bd1c269290fff8f61b52afe9",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "2fa570076e4cdd37748266031d092c06df670fc022765dd6710b578e5ae210cd",
+        "model.sysml": "9b9759620f835fa05292f06aee0de973a4b9ebdcd2f7745a8c2c88be06001f70"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 4,
+          "discharged": 4
+        },
+        "proof-source": {
+          "required": 18,
+          "discharged": 18
+        },
+        "statement": {
+          "required": 22,
+          "discharged": 22
+        },
+        "structure": {
+          "required": 12,
+          "discharged": 12
+        }
+      }
+    },
+    {
+      "mapping": "contracts/register.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 58,
+        "inspectedDefinitions": 32,
+        "requiredDefinitions": 23,
+        "requiredObligations": 58,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 4,
+        "native.algebraic-value": 9,
+        "native.boolean": 3,
+        "source.proof": 19,
+        "source.statement": 23
+      },
+      "targetOccurrences": 95,
+      "targetSourcePrecision": {
+        "derived": 40,
+        "unavailable": 55
+      },
+      "targetCheckedPrecision": {
+        "derived": 87,
+        "unavailable": 8
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 4,
+          "unavailable": 5
+        },
+        "conditional": {
+          "unavailable": 3
+        },
+        "constructed-field": {
+          "derived": 16,
+          "unavailable": 8
+        },
+        "construction": {
+          "derived": 4,
+          "unavailable": 4
+        },
+        "equality": {
+          "unavailable": 3
+        },
+        "generated-structure-boundary": {
+          "unavailable": 2
+        },
+        "input": {
+          "derived": 3,
+          "unavailable": 15
+        },
+        "projection": {
+          "unavailable": 12
+        },
+        "value": {
+          "derived": 13,
+          "unavailable": 3
+        }
+      },
+      "checkedOccurrences": 36,
+      "checkedSourcePrecision": {
+        "derived": 9,
+        "unavailable": 27
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 9,
+          "aligned": 4,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 1,
+            "source-anchor-unavailable": 2,
+            "source-case-transformation-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 17,
+          "aligned": 6,
+          "unavailableReasons": {
+            "source-expression-unavailable": 5,
+            "source-occurrence-ambiguous": 2,
+            "source-signature-anchor-unavailable": 3,
+            "source-signature-carrier-unavailable": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 2
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 17
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "0efe009ac67ca181f3ec1568d7d3ead7b51efc45f4e99c18bcbeee3a8eb84a1c",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "49c6ce61d53e78a5a175206d68d3d804d4d5ef153f59bc79db4e2e01e3c3db57",
+        "model.sysml": "8f96fae100174ce76d53026c3802abb79c00f718f92f89b3f9ead11a91740965"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 4,
+          "discharged": 4
+        },
+        "proof-source": {
+          "required": 19,
+          "discharged": 19
+        },
+        "statement": {
+          "required": 23,
+          "discharged": 23
+        },
+        "structure": {
+          "required": 12,
+          "discharged": 12
+        }
+      }
+    },
+    {
+      "mapping": "contracts/relational.yaml",
+      "exitCode": 2,
+      "complete": false,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 13,
+        "inspectedDefinitions": 16,
+        "requiredDefinitions": 7,
+        "requiredObligations": 19,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "source.proof": 6,
+        "source.statement": 7
+      },
+      "targetOccurrences": 0,
+      "targetSourcePrecision": {},
+      "targetCheckedPrecision": {},
+      "targetSourcePrecisionByRole": {},
+      "checkedOccurrences": 0,
+      "checkedSourcePrecision": {},
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 2,
+          "aligned": 0,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 4,
+          "aligned": 0,
+          "unavailableReasons": {
+            "source-expression-unavailable": 4
+          }
+        }
+      },
+      "unresolvedObligations": [
+        {
+          "symbol": "Agda.Primitive.Level#NameId 18 (ModuleNameHash 10880583612240331187)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Agda.Primitive.LevelUniv#NameId 16 (ModuleNameHash 10880583612240331187)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Relational.Step#NameId 12 (ModuleNameHash 6448697608805923593)",
+          "kind": "behavior",
+          "code": "unsupported-target-representation",
+          "reason": "Parameterized relations need a domain-family rule"
+        },
+        {
+          "symbol": "Relational.Step#NameId 12 (ModuleNameHash 6448697608805923593)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Relational.Step.move#NameId 20 (ModuleNameHash 6448697608805923593)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        },
+        {
+          "symbol": "Relational.Step.stay#NameId 16 (ModuleNameHash 6448697608805923593)",
+          "kind": "structure",
+          "code": "unsupported-target-representation",
+          "reason": "No direct target rule discharges this structure requirement"
+        }
+      ],
+      "diagnosticCodes": {
+        "unsupported-target-representation": 6
+      },
+      "nestedBoundaryOccurrences": [],
+      "artifactDigests": {
+        "correspondence.json": "e1d23da787ef6b511d7aeb0dc4831aba5d0fb6e4ab809dcd86c68370216da9c3",
+        "diagnostics.json": "72c91ca06c2471599c1f855cd01a2bc4f3d1518d9b51fd276faeb039d239b1a8",
+        "inventory.json": "d0202dd43ca9b8aef246dec3b1f5b8160794542ab54e0c7e93f107f1c1c666ba",
+        "model.sysml": "05470cd2097356cf5dfd5ba9888963396117715de96aaf4a55fd039d9640c88b"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 1,
+          "discharged": 0
+        },
+        "proof-source": {
+          "required": 6,
+          "discharged": 6
+        },
+        "statement": {
+          "required": 7,
+          "discharged": 7
+        },
+        "structure": {
+          "required": 5,
+          "discharged": 0
+        }
+      }
+    },
+    {
+      "mapping": "contracts/specialized-indexed.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 233,
+        "inspectedDefinitions": 116,
+        "requiredDefinitions": 105,
+        "requiredObligations": 233,
+        "specializedDefinitions": 44
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 23,
+        "native.algebraic-value": 42,
+        "native.boolean": 3,
+        "native.concrete-instantiations": 32,
+        "native.finite-domain": 3,
+        "native.first-order-calls": 8,
+        "source.proof": 60,
+        "source.statement": 58,
+        "static.universe-level": 4
+      },
+      "targetOccurrences": 435,
+      "targetSourcePrecision": {
+        "derived": 12,
+        "unavailable": 423
+      },
+      "targetCheckedPrecision": {
+        "derived": 357,
+        "unavailable": 78
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 2,
+          "unavailable": 45
+        },
+        "call": {
+          "unavailable": 13
+        },
+        "conditional": {
+          "unavailable": 3
+        },
+        "constructed-field": {
+          "derived": 4,
+          "unavailable": 102
+        },
+        "construction": {
+          "derived": 2,
+          "unavailable": 30
+        },
+        "equality": {
+          "unavailable": 3
+        },
+        "generated-structure-boundary": {
+          "unavailable": 12
+        },
+        "index-contract": {
+          "unavailable": 12
+        },
+        "index-contract-boundary": {
+          "unavailable": 15
+        },
+        "input": {
+          "derived": 1,
+          "unavailable": 81
+        },
+        "projection": {
+          "unavailable": 56
+        },
+        "value": {
+          "derived": 3,
+          "unavailable": 51
+        }
+      },
+      "checkedOccurrences": 223,
+      "checkedSourcePrecision": {
+        "derived": 8,
+        "unavailable": 215
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 65,
+          "aligned": 12,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 24,
+            "source-anchor-unavailable": 15,
+            "source-case-transformation-unavailable": 1,
+            "source-function-transformation-unavailable": 13
+          }
+        },
+        "signatures": {
+          "entries": 89,
+          "aligned": 22,
+          "unavailableReasons": {
+            "source-expression-unavailable": 36,
+            "source-occurrence-ambiguous": 4,
+            "source-signature-anchor-unavailable": 21,
+            "source-signature-carrier-unavailable": 1,
+            "source-signature-modality-unavailable": 4,
+            "source-term-mismatch": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 11
+        },
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 135
+        },
+        {
+          "rule": "native.index-contract",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 28
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "f0ba95c819759fa915e7ea11eb8d2e0c83d59ff914a2cfa5125ca26d9e7b4b40",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "b7b26bd0af068c02717e30748e101a5ad5334c4493a5dc6fb7dc16563af46f94",
+        "model.sysml": "84f1e9d8dd16970301d2847507f7886b115d7d8b194d2cd77e5ff89695a7afc0"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 45,
+          "discharged": 45
+        },
+        "proof-source": {
+          "required": 60,
+          "discharged": 60
+        },
+        "statement": {
+          "required": 58,
+          "discharged": 58
+        },
+        "structure": {
+          "required": 70,
+          "discharged": 70
+        }
+      }
+    },
+    {
+      "mapping": "contracts/universe-polymorphic.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 118,
+        "inspectedDefinitions": 43,
+        "requiredDefinitions": 50,
+        "requiredObligations": 118,
+        "specializedDefinitions": 13
+      },
+      "obligationRules": {
+        "native.algebraic-cases": 11,
+        "native.algebraic-value": 16,
+        "native.boolean": 3,
+        "native.concrete-instantiations": 11,
+        "native.first-order-calls": 1,
+        "source.proof": 34,
+        "source.statement": 37,
+        "static.universe-level": 5
+      },
+      "targetOccurrences": 97,
+      "targetSourcePrecision": {
+        "derived": 12,
+        "unavailable": 85
+      },
+      "targetCheckedPrecision": {
+        "derived": 78,
+        "unavailable": 19
+      },
+      "targetSourcePrecisionByRole": {
+        "calculation": {
+          "derived": 2,
+          "unavailable": 16
+        },
+        "call": {
+          "unavailable": 4
+        },
+        "conditional": {
+          "unavailable": 1
+        },
+        "constructed-field": {
+          "derived": 4,
+          "unavailable": 12
+        },
+        "construction": {
+          "derived": 2,
+          "unavailable": 9
+        },
+        "equality": {
+          "unavailable": 1
+        },
+        "generated-structure-boundary": {
+          "unavailable": 5
+        },
+        "input": {
+          "derived": 1,
+          "unavailable": 21
+        },
+        "projection": {
+          "unavailable": 15
+        },
+        "value": {
+          "derived": 3,
+          "unavailable": 1
+        }
+      },
+      "checkedOccurrences": 64,
+      "checkedSourcePrecision": {
+        "derived": 6,
+        "unavailable": 58
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 18,
+          "aligned": 3,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 7,
+            "source-anchor-unavailable": 4,
+            "source-function-transformation-unavailable": 4
+          }
+        },
+        "signatures": {
+          "entries": 26,
+          "aligned": 5,
+          "unavailableReasons": {
+            "source-expression-unavailable": 11,
+            "source-occurrence-ambiguous": 2,
+            "source-signature-anchor-unavailable": 7,
+            "source-signature-carrier-unavailable": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.algebraic-shape",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 5
+        },
+        {
+          "rule": "native.generated-expression",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 35
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "11634225748744b18814136bef19f79507b82a311cbce2878cf3a966ce9ea6ca",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "871b4f4029c565c5fff8ae6148007e99954e0b3c4aa0619475be13d8217a8153",
+        "model.sysml": "7e6537edb168e06dbfae2e077edaef5adc70cecdb2931da3d189077fa2262ca4"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 17,
+          "discharged": 17
+        },
+        "proof-source": {
+          "required": 34,
+          "discharged": 34
+        },
+        "statement": {
+          "required": 37,
+          "discharged": 37
+        },
+        "structure": {
+          "required": 30,
+          "discharged": 30
+        }
+      }
+    },
+    {
+      "mapping": "contracts/witnessed.yaml",
+      "exitCode": 0,
+      "complete": true,
+      "validatorAccepted": true,
+      "coverage": {
+        "dischargedObligations": 41,
+        "inspectedDefinitions": 54,
+        "requiredDefinitions": 18,
+        "requiredObligations": 41,
+        "specializedDefinitions": 0
+      },
+      "obligationRules": {
+        "native.boolean": 3,
+        "native.finite-domain": 3,
+        "native.finite-relation": 5,
+        "source.proof": 12,
+        "source.statement": 18
+      },
+      "targetOccurrences": 18,
+      "targetSourcePrecision": {
+        "derived": 15,
+        "unavailable": 3
+      },
+      "targetCheckedPrecision": {
+        "derived": 16,
+        "unavailable": 2
+      },
+      "targetSourcePrecisionByRole": {
+        "endpoint-equality": {
+          "derived": 6
+        },
+        "generated-structure-boundary": {
+          "unavailable": 1
+        },
+        "relation-constraint": {
+          "derived": 3,
+          "unavailable": 1
+        },
+        "relation-endpoint": {
+          "derived": 6
+        },
+        "relation-existence-boundary": {
+          "unavailable": 1
+        }
+      },
+      "checkedOccurrences": 11,
+      "checkedSourcePrecision": {
+        "derived": 9,
+        "unavailable": 2
+      },
+      "sourceAlignment": {
+        "definitions": {
+          "entries": 21,
+          "aligned": 5,
+          "unavailableReasons": {
+            "source-alignment-unavailable": 11,
+            "source-anchor-unavailable": 3,
+            "source-function-transformation-unavailable": 2
+          }
+        },
+        "signatures": {
+          "entries": 35,
+          "aligned": 13,
+          "unavailableReasons": {
+            "source-expression-unavailable": 12,
+            "source-occurrence-ambiguous": 4,
+            "source-signature-anchor-unavailable": 4,
+            "source-signature-carrier-unavailable": 1,
+            "source-term-mismatch": 1
+          }
+        }
+      },
+      "unresolvedObligations": [],
+      "diagnosticCodes": {},
+      "nestedBoundaryOccurrences": [
+        {
+          "rule": "native.finite-domain",
+          "reason": "structural-subtree-derivation-unavailable",
+          "count": 1
+        },
+        {
+          "rule": "native.relation-existence",
+          "reason": "generated-subtree-origin-unavailable",
+          "count": 2
+        }
+      ],
+      "artifactDigests": {
+        "correspondence.json": "31d6dd943cd2f699602d657b77f1b9e33d59d2c45c7f94a86e927255598b456d",
+        "diagnostics.json": "9ff0c2c87be5781506bc267afa4ca28b4bcb3086a9fb826960107f8903f36f0a",
+        "inventory.json": "3202b9e3433e28e3d05575d84b47a1b72e89ec0025fb74d0fb35ffe36c9b0dec",
+        "model.sysml": "5b8bc1e92f0452e37d42a0fedb5a09d25179968221b35a2dac2b98c7daa0922a"
+      },
+      "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
+      "obligationsByKind": {
+        "behavior": {
+          "required": 1,
+          "discharged": 1
+        },
+        "proof-source": {
+          "required": 12,
+          "discharged": 12
+        },
+        "statement": {
+          "required": 18,
+          "discharged": 18
+        },
+        "structure": {
+          "required": 10,
+          "discharged": 10
+        }
+      }
+    }
+  ],
+  "totals": {
+    "mappings": 13,
+    "completeMappings": 11,
+    "requiredObligations": 1274,
+    "dischargedObligations": 1256,
+    "targetOccurrences": 2271,
+    "sourceDerivedTargetOccurrences": 612,
+    "obligationsByKind": {
+      "behavior": {
+        "required": 163,
+        "discharged": 159
+      },
+      "proof-source": {
+        "required": 387,
+        "discharged": 387
+      },
+      "statement": {
+        "required": 404,
+        "discharged": 404
+      },
+      "structure": {
+        "required": 320,
+        "discharged": 306
+      }
+    },
+    "targetSourcePrecisionByRole": {
+      "boolean-expression": {
+        "derived": 4
+      },
+      "calculation": {
+        "derived": 38,
+        "unavailable": 169
+      },
+      "call": {
+        "derived": 8,
+        "unavailable": 60
+      },
+      "conditional": {
+        "derived": 6,
+        "unavailable": 35
+      },
+      "constructed-field": {
+        "derived": 217,
+        "unavailable": 336
+      },
+      "construction": {
+        "derived": 44,
+        "unavailable": 110
+      },
+      "equality": {
+        "derived": 6,
+        "unavailable": 35
+      },
+      "generated-structure-boundary": {
+        "unavailable": 58
+      },
+      "index-contract": {
+        "derived": 14,
+        "unavailable": 28
+      },
+      "index-contract-boundary": {
+        "unavailable": 59
+      },
+      "input": {
+        "derived": 67,
+        "unavailable": 326
+      },
+      "projection": {
+        "unavailable": 238,
+        "derived": 17
+      },
+      "value": {
+        "derived": 166,
+        "unavailable": 201
+      },
+      "endpoint-equality": {
+        "derived": 10
+      },
+      "relation-constraint": {
+        "derived": 5,
+        "unavailable": 2
+      },
+      "relation-endpoint": {
+        "derived": 10
+      },
+      "relation-existence-boundary": {
+        "unavailable": 2
+      }
+    }
+  },
+  "nativeGate": {
+    "command": "nix flake check --print-build-logs",
+    "exitCode": 0,
+    "haskellSuites": [
+      "algebraic-target",
+      "derivations",
+      "finite-target",
+      "mapping",
+      "merging",
+      "sharing",
+      "source-alignment",
+      "source-catalog"
+    ],
+    "aggregateSpecification": "spec/Agda2SysML.agda",
+    "platform": "x86_64-linux",
+    "logDigest": "1c6db628adcf51151a657fa938664dbfe0363ad4fd6a2fbb33998bc39cf03d42"
+  },
+  "measurementLimitations": [
+    "Mappings are public project-maintained contracts, not a representative sample of arbitrary Agda projects.",
+    "Counts repeat imported definitions and emitted occurrences across bundles.",
+    "Statement and proof-source obligations measure retention, not executable translation.",
+    "Target occurrences are renderer marks, not source lines or every SysML syntax node.",
+    "Zero target occurrences in incomplete mappings provide no provenance denominator.",
+    "Semantic completeness does not require source provenance completeness in the current CLI.",
+    "These ratios are coverage measurements, not fractions of implementation effort or full-corpus acceptance."
+  ]
+}

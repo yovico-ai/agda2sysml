@@ -1,7 +1,9 @@
 # Project mapping version 1
 
-Status: initial configuration contract for review. This format identifies the
-roles of checked Agda definitions. A mapping parser is not yet implemented.
+This implemented configuration format identifies the roles of checked Agda
+definitions. The alpha supports both this version and
+[version 2](project-mapping-v2.md); translation support remains subject to the
+[documented rules](translation-rules.md).
 
 The conventional filename is `agda2sysml.yaml`. The
 [complete illustrative mapping](examples/agda2sysml.yaml) describes a fictional

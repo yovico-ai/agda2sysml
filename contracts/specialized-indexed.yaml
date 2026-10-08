@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Specialized indexed records
+  agda-library: contracts.agda-lib
+  roots: [SpecializedIndexed]
+models:
+  state:
+    module: SpecializedIndexed
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readOrdinary, readRaised, readWrapped, readWrappedTrue]
+      theorems: [copy-preserves, rebuild-preserves, select-preserves, make-preserves, keep-preserves, set-ordinary, set-raised, set-wrapped, set-wrapped-true]

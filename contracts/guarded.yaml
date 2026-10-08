@@ -1,0 +1,25 @@
+mapping-version: 2
+project:
+  name: Guarded transitions
+  agda-library: contracts.agda-lib
+  roots: [Guarded]
+models:
+  guarded:
+    module: Guarded
+    state: {infer: true}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: command
+        before: before
+      result:
+        type: Outcome
+        state-projection: outcomeState
+        variants:
+          applied: accepted
+          unchanged: unchanged
+          refused: refused
+    contracts:
+      theorems: [refusal-preserves, unchanged-preserves]

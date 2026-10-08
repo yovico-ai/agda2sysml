@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Computed finite indices
+  agda-library: contracts.agda-lib
+  roots: [ComputedIndex]
+models:
+  state:
+    module: ComputedIndex
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readOrdinary, readCurrent]
+      theorems: [make-preserves, copy-preserves, packet-preserves, keep-preserves, set-preserves]

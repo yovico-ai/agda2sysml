@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Universe-polymorphic typed registers
+  agda-library: contracts.agda-lib
+  roots: [UniversePolymorphic]
+models:
+  registers:
+    module: UniversePolymorphic
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readOrdinary, readRaised]
+      theorems: [identity-preserves, retain-preserves, enclose-preserves, box-roundtrip, lift-roundtrip, keep-preserves, set-ordinary, set-raised]

@@ -1,0 +1,29 @@
+mapping-version: 2
+project:
+  name: Register updates
+  agda-library: contracts.agda-lib
+  roots: [Register]
+models:
+  register:
+    module: Register
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      theorems: [write-preserves-enabled, enable-preserves-value, retain-preserves, replace-complete]
+  reconstruction:
+    module: Register
+    state: {type: State}
+    transition:
+      encoding: function
+      symbol: rebuild
+      arguments: {before: {position: 0}}
+      result: {state: return}
+    contracts:
+      theorems: [rebuild-preserves]

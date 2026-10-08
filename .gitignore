@@ -1,2 +1,7 @@
 *.agdai
 _build/
+dist-newstyle/
+*.hi
+*.o
+*.class
+__pycache__/

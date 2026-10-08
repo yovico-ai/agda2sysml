@@ -1,0 +1,15 @@
+mapping-version: 2
+project:
+  name: Admissible transitions
+  agda-library: contracts.agda-lib
+  roots: [Relational]
+models:
+  transitions:
+    module: Relational
+    state: {infer: true}
+    transition:
+      encoding: relation
+      symbol: Step
+      indices: {before: 0, after: 1}
+    contracts:
+      theorems: [reflexive, preserves]

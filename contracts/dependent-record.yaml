@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Dependent record fields
+  agda-library: contracts.agda-lib
+  roots: [DependentRecord]
+models:
+  packets:
+    module: DependentRecord
+    state: {type: Packet}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readPermit, readMarker]
+      theorems: [copy-preserves, rebuild-preserves, select-preserves, marker-preserves, keep-preserves, prepare-preserves, activate-preserves]

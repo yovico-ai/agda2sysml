@@ -4,18 +4,22 @@ module Agda2SysML.Obligations where
 open import Agda2SysML.Foundation
 
 data Kind : Set where
-  structure behavior statement proof-source external-assumption : Kind
+  structure behavior statement proof-source reduction-source external-assumption : Kind
 
 -- These predicates are instantiated with source/target correspondence, exact
 -- statement/source retention, and declared assumption provenance respectively.
 module Requirements (Id : Set)
-  (Structural Behavioral Statement ProofSource Assumption : Id → Set) where
+  (Structural Behavioral Statement ProofSource ReducedSource Assumption : Id → Set) where
 
   data Evidence (id : Id) : Kind → Set where
     structural : Structural id → Evidence id structure
     semantic : Behavioral id → Evidence id behavior
     statement-preserved : Statement id → Evidence id statement
     proof-retained : ProofSource id → Evidence id proof-source
+    -- ReducedSource must establish checked semantics-preserving preparation,
+    -- exclusion from the complete prepared dependency graph, and source
+    -- retention. It is not a proof-irrelevance or translation claim for id.
+    reduction-source-retained : ReducedSource id → Evidence id reduction-source
     assumption-declared : Assumption id → Evidence id external-assumption
 
   behavior-requires-semantics : {id : Id} → Evidence id behavior → Behavioral id

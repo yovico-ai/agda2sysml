@@ -1,0 +1,30 @@
+mapping-version: 2
+project:
+  name: Finite natural arithmetic
+  agda-library: ../spec/agda2sysml-spec.agda-lib
+  roots: [Agda2SysML.NaturalValues]
+models:
+  addition:
+    module: Agda2SysML.NaturalValues
+    state: {type: Nat}
+    transition:
+      encoding: function
+      symbol: sourceAdd
+      arguments: {before: {position: 0}}
+      result: {state: return}
+  multiplication:
+    module: Agda2SysML.NaturalValues
+    state: {type: Nat}
+    transition:
+      encoding: function
+      symbol: sourceMultiply
+      arguments: {before: {position: 0}}
+      result: {state: return}
+  subtraction:
+    module: Agda2SysML.NaturalValues
+    state: {type: Nat}
+    transition:
+      encoding: function
+      symbol: sourceSubtract
+      arguments: {before: {position: 0}}
+      result: {state: return}

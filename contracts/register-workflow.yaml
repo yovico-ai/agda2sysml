@@ -1,0 +1,19 @@
+mapping-version: 2
+project:
+  name: Sequential register updates
+  agda-library: contracts.agda-lib
+  roots: [RegisterWorkflow]
+models:
+  sequential:
+    module: RegisterWorkflow
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: sequence
+      arguments:
+        command: {position: 0}
+        before: {position: 2}
+      result: {state: return}
+    contracts:
+      theorems: [retain-left, retain-right, sequence-associative, replace-final]

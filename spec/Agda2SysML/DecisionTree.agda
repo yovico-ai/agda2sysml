@@ -94,3 +94,34 @@ normalization-preserves-contract : {I O : Set} (tree : Tree I O)
   → select (normalize tree) input ≡ just output → Contract input output
 normalization-preserves-contract tree Contract established input output selected =
   subst (Contract input) (normalization-sound tree input output selected) (established input)
+
+-- Compiled pattern matching may backtrack to a fallback outside a nested
+-- split. Keep that fallback in its original input environment.
+data PartialTree (Input Output : Set) : Set where
+  miss : PartialTree Input Output
+  yield : (Input → Output) → PartialTree Input Output
+  test : (Input → Bool) → PartialTree Input Output → PartialTree Input Output
+    → PartialTree Input Output
+
+evaluatePartial : ∀ {I O} → PartialTree I O → I → Maybe O
+evaluatePartial miss input = nothing
+evaluatePartial (yield result) input = just (result input)
+evaluatePartial (test guard positive negative) input with guard input
+... | true = evaluatePartial positive input
+... | false = evaluatePartial negative input
+
+withFallback : ∀ {I O} → PartialTree I O → Tree I O → Tree I O
+withFallback miss fallback = fallback
+withFallback (yield result) fallback = leaf result
+withFallback (test guard positive negative) fallback =
+  branch guard (withFallback positive fallback) (withFallback negative fallback)
+
+fallback-preserves : ∀ {I O} (tree : PartialTree I O)
+  (fallback : Tree I O) (input : I)
+  → just (evaluate (withFallback tree fallback) input)
+    ≡ orElse (evaluatePartial tree input) (just (evaluate fallback input))
+fallback-preserves miss fallback input = refl
+fallback-preserves (yield result) fallback input = refl
+fallback-preserves (test guard positive negative) fallback input with guard input
+... | true = fallback-preserves positive fallback input
+... | false = fallback-preserves negative fallback input

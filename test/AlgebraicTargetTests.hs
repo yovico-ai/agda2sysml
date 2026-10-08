@@ -1,0 +1,1549 @@
+{-# LANGUAGE OverloadedStrings #-}
+module Main where
+
+import Agda2SysML.Inventory
+import qualified Agda2SysML.Mapping as Mapping
+import qualified Agda2SysML.Diagnostic as D
+import qualified Agda2SysML.Derivation as Trace
+import qualified Agda2SysML.AlgebraicTarget as A
+import qualified Agda2SysML.FiniteTarget as F
+import qualified Agda2SysML.Target as T
+import qualified Agda2SysML.Specialize as P
+import qualified Agda2SysML.Reduction as Reduction
+import Control.Monad (forM_, unless)
+import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
+import Data.Either (isLeft)
+import qualified Data.Map.Strict as M
+import qualified Data.Set as S
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import System.Environment (getEnv)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process (callProcess)
+
+-- Compiler-shaped fixtures belong in the implementation suite, not in Agda.
+named :: Text -> Value
+named s = object ["term" .= object ["tag" .= ("definition" :: Text),"symbol" .= s,"eliminations" .= ([] :: [Value])]]
+
+info :: Value
+info = object ["relevance" .= ("relevant" :: Text),"quantity" .= ("unrestricted" :: Text)]
+
+signature :: [Value] -> Value -> Value
+signature [] res = res
+signature (x:xs) res = object ["term" .= object ["tag" .= ("pi" :: Text)
+  ,"domain" .= object ["type" .= x,"info" .= info]
+  ,"codomain" .= object ["body" .= signature xs res,"binds" .= True]]]
+
+set :: Key -> Value -> Value -> Value
+set k v (Object fields) = Object (KM.insert k v fields)
+set _ _ v = v
+
+declaration :: Text -> Text -> Value -> Value
+declaration s kind ty = object ["name" .= s,"displayName" .= s,"kind" .= kind
+  ,"type" .= ty,"abstract" .= False,"parameters" .= (0 :: Int)]
+
+application :: Value -> Value
+application v = object ["tag" .= ("apply" :: Text),"argument" .= object ["value" .= v,"info" .= info]]
+
+constructor :: Text -> [Value] -> Value
+constructor c args = object ["tag" .= ("constructor" :: Text),"symbol" .= c,"eliminations" .= map application args]
+
+variable :: Int -> [Text] -> Value
+variable i fields = object ["tag" .= ("variable" :: Text),"index" .= i
+  ,"eliminations" .= [object ["tag" .= ("project" :: Text),"symbol" .= f] | f <- fields]]
+
+done :: Int -> Value -> Value
+done n term = object ["tag" .= ("done" :: Text),"binders" .= replicate n Null,"body" .= term]
+
+split :: Int -> [(Text,Int,Value)] -> Value
+split i branches = object ["tag" .= ("case" :: Text),"argument" .= object ["value" .= i]
+  ,"copattern" .= False,"eta" .= Null,"literals" .= ([] :: [Value]),"catchall" .= Null
+  ,"lazy" .= False,"fallThrough" .= False,"constructors" .=
+    [object ["symbol" .= c,"branch" .= object ["arity" .= n,"tree" .= tree]] | (c,n,tree) <- branches]]
+
+eta :: Int -> Value -> Value
+eta i tree = set "eta" (object ["constructor" .= ("pair" :: Text),"fields" .= (["flag","tone"] :: [Text])
+  ,"branch" .= object ["arity" .= (2 :: Int),"tree" .= tree]]) (set "lazy" (Bool True) (split i []))
+
+operation :: Text -> [Text] -> Text -> Value -> Value
+operation s ins out tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $
+  declaration s "function" (signature (map named ins) (named out))
+
+-- An independent evaluator of the target expression algebra checks lowering
+-- over all fixture values, including constructions the Pilot cannot execute.
+data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | N deriving (Eq,Show)
+eval :: [Val] -> A.Expression -> Val
+eval = evalWith M.empty
+
+evalWith :: M.Map Text A.Calculation -> [Val] -> A.Expression -> Val
+evalWith _ env (A.Input i) = env !! i
+evalWith _ _ (A.Literal b) = B b
+evalWith _ _ (A.NumberLiteral n) = Z n
+evalWith table env (A.Numeric op x y) = case (evalWith table env x,evalWith table env y) of
+  (Z a,Z b) -> case op of
+    "+" -> Z (a+b)
+    "*" -> Z (a*b)
+    "monus" -> Z (max 0 (a-b))
+    "<" -> B (a<b)
+    "==" -> B (a==b)
+    _ -> error "unknown numeric operation"
+  _ -> error "non-natural numeric argument"
+evalWith table env (A.Sequence xs) = Seq (concatMap flatten (map (evalWith table env) xs))
+  where flatten (Seq vs) = vs
+        flatten v = [v]
+evalWith table env (A.SequenceHead _ xs) = evalWith table env (A.SequenceOp "head" xs)
+evalWith table env (A.SequenceOp op xs) = case evalWith table env xs of
+  Seq values -> case (op,values) of
+    ("head",x:_) -> x
+    ("tail",_:rest) -> Seq rest
+    ("isEmpty",_) -> B (null values)
+    ("size",_) -> Z (toInteger (length values))
+    _ -> error "sequence operation outside admitted domain"
+  _ -> error "non-sequence argument"
+evalWith _ _ (A.Enumeration t c) = E t c
+evalWith table env (A.Construct t fields) = R t (M.fromList [(f,evalWith table env x) | (f,x) <- fields])
+evalWith table env (A.Project x f) = case evalWith table env x of
+  R _ fields -> M.findWithDefault N f fields
+  value -> error ("projection from " ++ show value)
+evalWith table env (A.Equal x y) = B (evalWith table env x == evalWith table env y)
+evalWith table env (A.Conditional p yes no) = case evalWith table env p of
+  B b -> evalWith table env (if b then yes else no)
+  _ -> error "non-Boolean guard"
+evalWith _ _ A.Absent = N
+evalWith table env (A.Call s args) = case M.lookup s table of
+  Nothing -> error ("missing helper " ++ show s)
+  Just calc -> evalWith table (map (evalWith table env) args) (A.body calc)
+
+call :: Text -> [Value] -> [Text] -> Value
+call s args fields = object ["tag" .= ("definition" :: Text),"symbol" .= s
+  ,"eliminations" .= (map application args ++ [object ["tag" .= ("project" :: Text),"symbol" .= f] | f <- fields])]
+
+check :: Bool -> String -> IO ()
+check ok message = unless ok (fail message)
+
+level :: Integer -> Value
+level n = object ["constant" .= n,"maximum" .= ([] :: [Value])]
+
+universeAt :: Value -> Value
+universeAt l = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= object
+  ["tag" .= ("universe" :: Text),"kind" .= ("UType" :: Text),"level" .= l]]]
+
+main :: IO ()
+main = do
+  familyParameterChecks
+  reductionChecks
+  naturalChecks
+  automaticSelectionChecks
+  let universe = universeAt (level 0)
+      tone = set "constructors" (toJSON (["red","blue"] :: [Text])) (declaration "Tone" "datatype" universe)
+      pair = set "induction" (String "Nothing") $ set "constructor" (String "pair") $
+        set "fields" (toJSON (["flag","tone"] :: [Text])) (declaration "Pair" "record" universe)
+      choice = set "constructors" (toJSON (["first","second","none"] :: [Text])) (declaration "Choice" "datatype" universe)
+      projection f typ = set "projection" (object ["proper" .= ("Pair" :: Text),"index" .= (1 :: Int)]) $
+        declaration f "function" (signature [named "Pair"] (named typ))
+      selected = operation "selected" ["Pair","Choice"] "Bool" $
+        split 1 [("first",2,eta 1 (split 3
+                   [("true",0,done 3 (variable 1 [])),("false",0,done 3 (constructor "false" []))]))
+                ,("second",1,split 1 [("red",0,done 1 (variable 0 ["flag"]))
+                                     ,("blue",0,done 1 (constructor "false" []))])
+                ,("none",0,done 1 (variable 0 ["flag"]))]
+      rebuild = operation "rebuild" ["Pair"] "Pair" (eta 0 (done 2 (constructor "pair" [variable 1 [],variable 0 []])))
+      package = operation "packageValue" ["Pair"] "Choice" (done 1 (constructor "first" [variable 0 [],constructor "false" []]))
+      defs = M.fromList [(string (get "name" d),d) | d <-
+        [declaration "Bool" "datatype" universe, declaration "true" "constructor" (named "Bool")
+        ,declaration "false" "constructor" (named "Bool"),tone,pair,choice
+        ,declaration "red" "constructor" (named "Tone"),declaration "blue" "constructor" (named "Tone")
+        ,declaration "pair" "constructor" (signature [named "Bool",named "Tone"] (named "Pair"))
+        ,declaration "first" "constructor" (signature [named "Pair",named "Bool"] (named "Choice"))
+        ,declaration "second" "constructor" (signature [named "Tone"] (named "Choice"))
+        ,declaration "none" "constructor" (named "Choice"),projection "flag" "Bool",projection "tone" "Tone"
+        ,selected,rebuild,package]]
+      needs = S.fromList [(s,if s `elem` ["selected","rebuild","packageValue","flag","tone"] then "behavior" else "structure")
+        | s <- M.keys defs]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text),"false" .= ("false" :: Text)]])
+        defs M.empty (M.singleton "algebraic" needs)
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      (shapes,errors) = A.discover inv finite
+      lower d = either (fail . show) pure (A.function inv finite shapes d)
+      recordValue b c = R "Pair" (M.fromList [("flag",B b),("tone",E "Tone" c)])
+      choiceValue c fields = R "Choice" (M.fromList (("constructor",E "Choice.constructor-tag" c):fields))
+      badCarrier label change = let
+        altered = inv {declarations = M.adjust change "Pair" defs}
+        (accepted,_) = A.discover altered finite
+        in check (not (M.member "Pair" accepted) && not (M.member "Choice" accepted)) label
+  check (M.size shapes == 2 && M.null errors) (show errors)
+  closureChecks inv
+  diagnosticChecks inv finite shapes
+  helperProvenanceChecks
+  inputIndexProvenanceChecks
+  resultIndexProvenanceChecks
+  pick <- lower selected
+  rebuildCalc <- lower rebuild
+  packageCalc <- lower package
+  forM_ [False,True] $ \b -> forM_ ["red","blue"] $ \c -> do
+    let before = recordValue b c
+    check (eval [before] (A.body rebuildCalc) == before) "record reconstruction changed field order/types"
+    let packed = eval [before] (A.body packageCalc)
+    check (packed == choiceValue "first" [("first.payload0",before),("first.payload1",B False),("second.payload0",N)])
+      "constructor lost payload, changed order, or retained inactive data"
+    forM_ [False,True] $ \flag -> forM_ [False,True] $ \gate -> do
+      let cmd = choiceValue "first" [("first.payload0",recordValue flag c),("first.payload1",B gate)]
+      check (eval [before,cmd] (A.body pick) == B (flag && gate)) "nested payload split changed argument binding"
+    forM_ ["red","blue"] $ \color -> check
+      (eval [before,choiceValue "second" [("second.payload0",E "Tone" color)]] (A.body pick) == B (b && color == "red"))
+      "heterogeneous enum payload split changed behavior"
+    check (eval [before,choiceValue "none" []] (A.body pick) == B b) "nullary branch lost remaining input"
+  badCarrier "parameterized carrier admitted" (set "parameters" (Number 1))
+  badCarrier "abstract carrier admitted" (set "abstract" (Bool True))
+  badCarrier "coinductive carrier admitted" (set "induction" (String "Just CoInductive"))
+  badCarrier "missing field admitted" (set "fields" (toJSON (["flag"] :: [Text])))
+  badCarrier "duplicate field admitted" (set "fields" (toJSON (["flag","flag"] :: [Text])))
+  let missing = operation "bad" ["Choice"] "Bool" (split 0 [("none",0,done 0 (constructor "false" []))])
+      arity = operation "bad" ["Pair"] "Pair" (split 0 [("pair",1,done 1 (variable 0 []))])
+      dependent = inv {declarations = M.adjust (set "type" (signature [object ["term" .= variable 0 []]] (named "Pair"))) "pair" defs}
+      recursive = inv {declarations = M.adjust (set "type" (signature [named "Pair",named "Tone"] (named "Pair"))) "pair" defs}
+  check (isLeft (A.function inv finite shapes missing)) "inexhaustive constructor matching admitted"
+  check (isLeft (A.function inv finite shapes arity)) "payload arity mismatch admitted"
+  check (not (M.member "Pair" (fst (A.discover dependent finite)))) "dependent field admitted without correspondence"
+  check (not (M.member "Pair" (fst (A.discover recursive finite)))) "recursive field admitted without correspondence"
+  let helper s ins out term = operation s ins out (done (length ins) term)
+      helpers =
+        [helper "idBool" ["Bool"] "Bool" (variable 0 [])
+        ,helper "idTone" ["Tone"] "Tone" (variable 0 [])
+        ,helper "idPair" ["Pair"] "Pair" (variable 0 [])
+        ,helper "zeroArg" [] "Bool" (constructor "false" [])
+        ,helper "callZero" ["Bool"] "Bool" (call "zeroArg" [] [])
+        ,helper "throughRecord" ["Pair"] "Bool" (call "idPair" [variable 0 []] ["flag"])
+        ,helper "nested" ["Pair"] "Bool" (call "idBool" [call "throughRecord" [variable 0 []] []] [])
+        ,helper "callSelected" ["Choice","Pair"] "Bool" (call "selected" [variable 0 [],variable 1 []] [])
+        ,helper "fromCalls" ["Pair"] "Pair" (constructor "pair"
+          [call "idBool" [variable 0 ["flag"]] [],call "idTone" [variable 0 ["tone"]] []])
+        ,helper "throughConstruction" ["Pair"] "Bool" (call "fromCalls" [variable 0 []] ["flag"])
+        ,set "displayName" (String "idBool") (operation "idBool#other" ["Bool"] "Bool"
+          (split 0 [("true",0,done 0 (constructor "false" [])),("false",0,done 0 (constructor "true" []))]))
+        ,helper "clashCaller" ["Bool"] "Bool" (call "idBool#other" [variable 0 []] [])]
+      extend additions inventory = inventory
+        {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations inventory)
+        ,modelRequirements = M.map (S.union (S.fromList [(string (get "name" d),"behavior") | d <- additions])) (modelRequirements inventory)}
+      callInventory = extend helpers inv
+      checked = A.functions callInventory finite shapes
+      table = M.mapMaybe (either (const Nothing) Just) checked
+      calculate s args = evalWith table args (A.body (table M.! s))
+      rejected message additions names = do
+        let altered = extend additions callInventory
+            results = A.functions altered finite shapes
+        check (all (maybe False isLeft . (`M.lookup` results)) names) message
+        check (not (T.complete (T.generate altered))) (message ++ ": strict generation claimed completion")
+  check (all (either (const False) (const True)) checked) (show checked)
+  forM_ [False,True] $ \b -> forM_ ["red","blue"] $ \c -> do
+    let p = recordValue b c
+        command = choiceValue "none" []
+    check (calculate "nested" [p] == B b) "nested call changed result"
+    check (calculate "callSelected" [command,p] == B b) "heterogeneous call argument order changed"
+    check (calculate "fromCalls" [p] == p) "calls in record fields changed payload"
+    check (calculate "throughConstruction" [p] == B b) "call failed to bind a constructed result in the callee context"
+    check (calculate "callZero" [B b] == B False) "zero-argument invocation lost"
+    check (calculate "clashCaller" [B b] == B (not b)) "display spelling replaced canonical callee identity"
+  rejected "self recursion admitted" [helper "loop" ["Bool"] "Bool" (call "loop" [variable 0 []] [])] ["loop"]
+  rejected "mutual recursion or transitive caller admitted"
+    [helper "a" ["Bool"] "Bool" (call "b" [variable 0 []] [])
+    ,helper "b" ["Bool"] "Bool" (call "a" [variable 0 []] [])
+    ,helper "caller" ["Bool"] "Bool" (call "a" [variable 0 []] [])] ["a","b","caller"]
+  rejected "signature-only helper admitted"
+    [helper "broken" ["Bool"] "Bool" (object ["tag" .= ("lambda" :: Text)])
+    ,helper "caller" ["Bool"] "Bool" (call "broken" [variable 0 []] [])] ["broken","caller"]
+  rejected "missing helper admitted" [helper "missing" ["Bool"] "Bool" (call "absent" [variable 0 []] [])] ["missing"]
+  rejected "partial application admitted" [helper "partial" ["Bool"] "Bool" (call "idBool" [] [])] ["partial"]
+  rejected "overapplication admitted" [helper "over" ["Bool"] "Bool" (call "idBool" [variable 0 [],variable 0 []] [])] ["over"]
+  rejected "wrong argument carrier admitted" [helper "wrong" ["Pair"] "Bool" (call "idBool" [variable 0 []] [])] ["wrong"]
+  parameterizedChecks inv
+  universeChecks inv
+  composedChecks inv
+  indexedChecks inv
+  computedChecks inv
+  let generated = T.generate callInventory
+  check (T.complete generated) (show (T.diagnostics generated))
+  root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
+  java <- getEnv "AGDA2SYSML_TEST_JAVA"
+  withSystemTempDirectory "algebraic-target" $ \directory -> do
+    let file = directory </> "model.sysml"
+        library = root </> "share/agda2sysml-validator/sysml"
+        p = "new 'Pair'('flag'=true,'tone'='Tone'::'red')"
+        cmd tag x y z = "new 'Choice'('constructor'='Choice.constructor-tag'::'" ++ tag
+          ++ "','first.payload0'=" ++ x ++ ",'first.payload1'=" ++ y ++ ",'second.payload0'=" ++ z ++ ")"
+        first = cmd "first" p "true" "null"
+        second = cmd "second" "null" "null" "'Tone'::'blue'"
+        none = cmd "none" "null" "null" "null"
+    Text.writeFile file (T.modelText generated)
+    callProcess (root </> "bin/agda2sysml-validate") [file]
+    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+      ,"test/TargetEvaluation.java",library </> "sysml.library",file
+      ,"'flag'(" ++ p ++ ")","true"
+      ,"'tone'(" ++ p ++ ") == 'Tone'::'red'","true"
+      ,"'selected'(" ++ p ++ "," ++ first ++ ")","true"
+      ,"'selected'(" ++ p ++ "," ++ second ++ ")","false"
+      ,"'selected'(" ++ p ++ "," ++ none ++ ")","true"
+      ,"'Choice.payload-valid'(" ++ first ++ ")","true"
+      ,"'Choice.payload-valid'(" ++ second ++ ")","true"
+      ,"'Choice.payload-valid'(" ++ none ++ ")","true"
+      ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
+      ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"]
+    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+      ,"test/TargetEvaluation.java",library </> "sysml.library",file
+      ,"'nested'(" ++ p ++ ")","true"
+      ,"'throughRecord'(" ++ p ++ ")","true"
+      ,"'callSelected'(" ++ second ++ "," ++ p ++ ")","false"
+      ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
+      ,"'callZero'(true)","false"
+      ,"'clashCaller'(true)","false"
+      ,"'clashCaller'(false)","true"]
+  putStrLn "algebraic carrier, binding, rejection, and native evaluation checks passed"
+
+parameterizedChecks :: Inventory -> IO ()
+parameterizedChecks base = do
+  let sort0 = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= object
+        ["tag" .= ("universe" :: Text),"kind" .= ("UType" :: Text),"level" .= object
+          ["constant" .= (0 :: Int),"maximum" .= ([] :: [Value])]]]]
+      piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      varType i = object ["term" .= variable i []]
+      applied s xs = object ["term" .= call s (map (get "term") xs) []]
+      boxTy t = applied "Box" [t]
+      generic = piType True sort0
+      box = set "parameters" (Number 1) $ set "induction" (String "Nothing")
+        $ set "constructor" (String "box") $ set "fields" (toJSON (["contents"] :: [Text]))
+        $ declaration "Box" "record" (generic sort0)
+      ctor = set "parameters" (Number 1) $ set "family" (String "Box")
+        $ declaration "box" "constructor" (generic (piType False (varType 0) (boxTy (varType 0))))
+      contents = set "projection" (object ["proper" .= ("Box" :: Text),"index" .= (2 :: Int)])
+        $ declaration "contents" "function" (generic (piType False (boxTy (varType 0)) (varType 0)))
+      function s declaredType tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $ declaration s "function" declaredType
+      retain = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)])
+        $ function "genericRetain" (generic (piType False (boxTy (varType 0)) (boxTy (varType 0)))) (done 1 (variable 0 []))
+      wrap = function "genericWrap" (generic (piType False (varType 0) (boxTy (varType 0))))
+        (done 2 (constructor "box" [variable 0 []]))
+      pick = function "genericPick" (generic (piType False (named "Bool")
+        (piType False (varType 0) (piType False (varType 0) (varType 0)))))
+        (split 1 [("true",0,done 3 (variable 1 [])),("false",0,done 3 (variable 0 []))])
+      through s carrierType = function s (piType False (boxTy carrierType) carrierType)
+        (done 1 (call "genericRetain" [variable 0 []] ["contents"]))
+      wrapCaller s carrierType = function s (piType False carrierType (boxTy carrierType))
+        (done 1 (call "genericWrap" [get "term" carrierType,variable 0 []] []))
+      pickCaller = function "pickBool" (piType False (named "Bool") (piType False (named "Bool") (named "Bool")))
+        (done 2 (call "genericPick" [get "term" (named "Bool"),variable 1 [],variable 0 [],constructor "false" []] []))
+      marker = set "parameters" (Number 1) $ set "constructors" (toJSON (["marker"] :: [Text]))
+        $ declaration "Marker" "datatype" (generic sort0)
+      markerCtor = set "parameters" (Number 1) $ set "family" (String "Marker")
+        $ declaration "marker" "constructor" (generic (applied "Marker" [varType 0]))
+      markerFunction s carrierType = function s (piType False (named "Bool") (applied "Marker" [carrierType]))
+        (done 1 (constructor "marker" []))
+      twoParameters = generic . generic
+      eitherTy a b = applied "Either" [a,b]
+      eitherDef = set "parameters" (Number 2) $ set "constructors" (toJSON (["left","right"] :: [Text]))
+        $ declaration "Either" "datatype" (twoParameters sort0)
+      eitherCtor s i = set "parameters" (Number 2) $ set "family" (String "Either")
+        $ declaration s "constructor" (twoParameters (piType False (varType i) (eitherTy (varType 1) (varType 0))))
+      firstOr = function "firstOr" (twoParameters (piType False (varType 1)
+        (piType False (eitherTy (varType 1) (varType 0)) (varType 1))))
+        (split 3 [("left",1,done 4 (variable 0 [])),("right",1,done 4 (variable 1 []))])
+      useEither = function "useEither" (piType False (named "Bool")
+        (piType False (eitherTy (named "Bool") (named "Tone")) (named "Bool")))
+        (done 2 (call "firstOr" [get "term" (named "Bool"),get "term" (named "Tone"),variable 1 [],variable 0 []] []))
+      additions = [box,ctor,contents,retain,wrap,pick,through "readBoolBox" (named "Bool")
+        ,through "readToneBox" (named "Tone"),wrapCaller "wrapBool" (named "Bool")
+        ,wrapCaller "wrapTone" (named "Tone"),through "readNested" (boxTy (named "Bool")),pickCaller
+        ,marker,markerCtor,markerFunction "markBool" (named "Bool"),markerFunction "markTone" (named "Tone")
+        ,eitherDef,eitherCtor "left" 1,eitherCtor "right" 0,firstOr,useEither]
+      defs = M.insert "Bool" (set "constructors" (toJSON (["true","false"] :: [Text])) (declarations base M.! "Bool"))
+        $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      specialized = P.prepare inv
+      expanded = P.inventory specialized
+      finite = M.fromList [(s,dom) | (s,d) <- M.toList (declarations expanded),Right dom <- [F.domain expanded d]]
+      shapes = fst (A.discover expanded finite)
+      table = M.mapMaybe (either (const Nothing) Just) (A.functions expanded finite shapes)
+      calculate s args = evalWith table args (A.body (table M.! s))
+      ty s = P.Named s []
+      key s args = P.typeKey (P.Named s args)
+      boxValue t value = R (key "Box" [t]) (M.singleton (key "contents" [t]) value)
+      generated = T.generate inv
+      bad d message = do
+        let altered = inv {declarations = M.insert (string (get "name" d)) d (declarations inv)}
+        check (not (T.complete (T.generate altered))) message
+  check (M.null (P.failures specialized)) (show (P.failures specialized))
+  check (T.complete generated) (show (T.diagnostics generated))
+  check (key "Marker" [ty "Bool"] /= key "Marker" [ty "Tone"]) "phantom arguments collapsed"
+  check (length [i | i <- P.instances specialized,P.origin i == "Box"] == 3) "nested concrete carrier missing or duplicate"
+  check (length [i | i <- P.instances specialized,P.origin i == "genericRetain"] == 3) "omitted type arguments not recovered"
+  forM_ [False,True] $ \b -> do
+    let boxed = boxValue (ty "Bool") (B b)
+    check (calculate "readBoolBox" [boxed] == B b) "specialized projection-like call changed Boolean value"
+    check (calculate "wrapBool" [B b] == boxed) "specialized construction changed Boolean value"
+    check (calculate "readNested" [boxValue (P.Named "Box" [ty "Bool"]) boxed] == boxed) "nested instantiation changed payload"
+    forM_ [False,True] $ \x -> check (calculate "pickBool" [B b,B x] == B (b && x)) "static binder removal changed case selection"
+    let args = [ty "Bool",ty "Tone"]
+        choiceValue selected payloadValue = R (key "Either" args) (M.fromList
+          [("constructor",E (key "Either" args <> ".constructor-tag") (key selected args))
+          ,(key "left" args <> ".payload0",if selected == "left" then payloadValue else N)
+          ,(key "right" args <> ".payload0",if selected == "right" then payloadValue else N)])
+    check (calculate "useEither" [B b,choiceValue "left" (B (not b))] == B (not b)) "distinct type parameter order changed left payload"
+    check (calculate "useEither" [B b,choiceValue "right" (E "Tone" "red")] == B b) "distinct type parameter order changed right payload"
+  forM_ ["red","blue"] $ \c -> do
+    let value = E "Tone" c
+    check (calculate "readToneBox" [boxValue (ty "Tone") value] == value) "specialized projection changed enumeration value"
+    check (calculate "wrapTone" [value] == boxValue (ty "Tone") value) "specialized constructor merged distinct instantiations"
+  bad (set "compiled" (done 2 (call "genericWrap" [variable 1 [],variable 0 []] [])) wrap) "recursive generic helper admitted"
+  bad (set "type" (generic (piType False (boxTy (varType 0)) (boxTy (varType 0)))) ctor) "recursive generic carrier admitted"
+  bad (set "compiled" (done 1 (call "genericWrap" [get "term" (named "Tone"),variable 0 []] [])) (wrapCaller "wrapBool" (named "Bool")))
+    "inconsistent concrete call arguments admitted"
+  bad (set "projection" (object ["proper" .= ("Tone" :: Text),"index" .= (2 :: Int)]) contents)
+    "wrong generic projection owner admitted"
+  let openRoot = inv {document = set "models" (object ["generic" .= object
+        ["transition" .= object ["entry" .= object ["symbols" .= (["genericWrap"] :: [Text])]]]]) (document inv)}
+  check (not (T.complete (T.generate openRoot))) "concrete uses discharged an open generic root"
+  let openInvariant = inv {document = set "models" (object ["generic" .= object
+        ["invariants" .= [object ["predicate" .= object ["symbols" .= (["genericWrap"] :: [Text])]]]]]) (document inv)}
+  check (not (T.complete (T.generate openInvariant))) "concrete uses discharged an open generic invariant"
+  let needs = required inv
+      without names = S.filter (\(s,_) -> s `notElem` names) needs
+      perModel = inv {modelRequirements = M.fromList
+        [("boolean",without ["wrapTone","readToneBox","readNested","markTone"])
+        ,("tone",without ["wrapBool","readBoolBox","readNested","markBool","pickBool","useEither"])]}
+      models = modelRequirements (P.inventory (P.prepare perModel))
+  check (S.member (key "genericWrap" [ty "Bool"],"behavior") (models M.! "boolean")
+    && not (S.member (key "genericWrap" [ty "Tone"],"behavior") (models M.! "boolean")))
+    "Boolean model acquired another model's helper instance"
+  check (S.member (key "genericWrap" [ty "Tone"],"behavior") (models M.! "tone")
+    && not (S.member (key "genericWrap" [ty "Bool"],"behavior") (models M.! "tone")))
+    "enumeration model acquired another model's helper instance"
+  let sourceLinks = array (get "obligations" (T.correspondence generated))
+  check (all (\o -> M.member (string (get "checkedDefinition" (get "source" o))) (declarations inv)) sourceLinks)
+    "specialization source link points outside checked inventory"
+
+universeChecks :: Inventory -> IO ()
+universeChecks base = do
+  let zero = P.Level (P.LevelExpr 0 M.empty)
+      two = P.Level (P.LevelExpr 2 M.empty)
+      huge = 10 ^ (40 :: Int)
+      levelTerm n = object ["tag" .= ("level" :: Text),"level" .= level n]
+      variableLevel i = object ["constant" .= (0 :: Int),"maximum" .=
+        [object ["offset" .= (0 :: Int),"term" .= variable i []]]]
+      piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      varType i = object ["term" .= variable i []]
+      function s ty tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $ declaration s "function" ty
+      generic = piType True (named "Level#builtin") . piType True (universeAt (variableLevel 0))
+      ident = function "polyIdentity" (generic (piType False (varType 0) (varType 0))) (done 3 (variable 0 []))
+      inferred = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)])
+        $ function "inferredIdentity" (generic (piType False (varType 0) (varType 0))) (done 1 (variable 0 []))
+      pick = function "polyPick" (generic (piType False (named "Bool")
+        (piType False (varType 0) (piType False (varType 0) (varType 0)))))
+        (split 2 [("true",0,done 4 (variable 1 [])),("false",0,done 4 (variable 0 []))])
+      caller s typ l = function s (piType False (named typ) (named typ))
+        (done 1 (call "polyIdentity" [l,get "term" (named typ),variable 0 []] []))
+      inferredCaller = function "inferHigh" (piType False (named "High") (named "High"))
+        (done 1 (call "inferredIdentity" [variable 0 []] []))
+      pickCaller = function "pickLevel" (piType False (named "Bool") (piType False (named "Bool") (named "Bool")))
+        (done 2 (call "polyPick" [levelTerm 0,get "term" (named "Bool"),variable 1 [],variable 0 [],constructor "false" []] []))
+      phantomTy l = object ["term" .= call "Phantom" [l] []]
+      phantom = set "parameters" (Number 1) $ set "constructors" (toJSON (["phantom"] :: [Text]))
+        $ declaration "Phantom" "datatype" (piType True (named "Level#builtin") (universeAt (level 0)))
+      phantomCtor = set "parameters" (Number 1) $ set "family" (String "Phantom")
+        $ declaration "phantom" "constructor" (piType True (named "Level#builtin") (phantomTy (variable 0 [])))
+      mark s l = function s (piType False (named "Bool") (phantomTy l)) (done 1 (constructor "phantom" []))
+      high = set "constructors" (toJSON (["high"] :: [Text])) $ declaration "High" "datatype" (universeAt (level 2))
+      highCtor = set "family" (String "High") $ declaration "high" "constructor" (named "High")
+      suc t = call "suc#builtin" [t] []
+      maxLevel a b = call "max#builtin" [a,b] []
+      primitiveTwo = maxLevel (suc (levelTerm 0)) (suc (suc (call "zero#builtin" [] [])))
+      additions = [ident,inferred,pick,caller "useBool" "Bool" (levelTerm 0),caller "useHigh" "High" primitiveTwo
+        ,inferredCaller,pickCaller,phantom,phantomCtor,mark "markZero" (levelTerm 0),mark "markTwo" primitiveTwo
+        ,mark "markTwoAgain" (levelTerm 2),mark "markHuge" (levelTerm huge),high,highCtor]
+      defs = M.insert "Bool" (set "constructors" (toJSON (["true","false"] :: [Text])) (declarations base M.! "Bool"))
+        $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+      builtins = set "level" (String "Level#builtin") $ set "levelZero" (String "zero#builtin")
+        $ set "levelSuc" (String "suc#builtin") $ set "levelMax" (String "max#builtin") $ get "builtins" (document base)
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {document = set "builtins" builtins (document base),declarations = defs
+        ,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      finite = M.fromList [(s,d) | (s,v) <- M.toList (declarations expanded),Right d <- [F.domain expanded v]]
+      shapes = fst (A.discover expanded finite)
+      table = M.mapMaybe (either (const Nothing) Just) (A.functions expanded finite shapes)
+      calculate s args = evalWith table args (A.body (table M.! s))
+      bad d message = do
+        let changed = inv {declarations = M.insert (string (get "name" d)) d (declarations inv)}
+        check (not (T.complete (T.generate changed))) message
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  check (length [i | i <- P.instances prepared,P.origin i == "Phantom"] == 3)
+    "phantom levels merged or equivalent expressions duplicated"
+  check (any (\i -> P.origin i == "Phantom" && P.arguments i == [P.Level (P.LevelExpr huge M.empty)]) (P.instances prepared))
+    "universe level overflowed a machine integer"
+  check (any (\i -> P.origin i == "inferredIdentity" && P.arguments i == [two,P.Named "High" []]) (P.instances prepared))
+    "omitted level was not recovered from the checked type universe"
+  forM_ [False,True] $ \b -> do
+    check (calculate "useBool" [B b] == B b) "level/type binder removal changed runtime argument"
+    forM_ [False,True] $ \x -> check (calculate "pickLevel" [B b,B x] == B (b && x)) "static levels changed case index"
+  check (calculate "useHigh" [E "High" "high"] == E "High" "high") "nonzero universe changed native value"
+  check (calculate "inferHigh" [E "High" "high"] == E "High" "high") "inferred level changed native value"
+  check (P.readType inv [] primitiveTwo == Right two) "registered zero/successor/maximum not normalized"
+  check (isLeft (P.readType inv [] (levelTerm (-1)))) "negative universe accepted"
+  check (isLeft (P.readType inv [] (object ["tag" .= ("meta" :: Text)]))) "unresolved meta accepted"
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 0)) 2 == Right M.empty)
+    "ambiguous maximum guessed a level"
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 2)) 2 == Right (M.singleton 0 zero))
+    "uniquely determined zero level was not inferred"
+  check (isLeft (P.constrainLevel M.empty (P.LevelExpr 3 M.empty) 2)) "inconsistent level constraint accepted"
+  forM_ [0..4] $ \constant -> forM_ [0..4] $ \offset -> forM_ [0..4] $ \target -> do
+    let solutions = [x | x <- [0..target],max constant (x+offset) == target]
+        solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton 0 offset)) target
+    case solutions of
+      [] -> check (isLeft solved) "unsatisfiable maximum constraint accepted"
+      [x] -> check (solved == Right (M.singleton 0 (P.Level (P.LevelExpr x M.empty)))) "unique level solution lost"
+      _ -> check (solved == Right M.empty) "nonunique maximum constraint guessed a solution"
+  check (isLeft (P.readType inv [] (object ["tag" .= ("level" :: Text),"level" .=
+    object ["constant" .= (0 :: Int),"maximum" .= [object ["offset" .= (-1 :: Int),"term" .= levelTerm 0]]]])))
+    "negative level offset accepted"
+  check (isLeft (P.readType inv [] (maxLevel (levelTerm 0) (object ["tag" .= ("meta" :: Text)]))))
+    "unresolved maximum accepted"
+  bad (caller "useBool" "Bool" (levelTerm 2)) "wrong type universe accepted"
+  bad (caller "useHigh" "High" (call "lsuc" [levelTerm 1] [])) "unregistered same-spelling primitive accepted"
+  bad (caller "useBool" "Bool" (get "term" (named "Bool"))) "type accepted in level position"
+  bad (set "compiled" (done 3 (variable 2 [])) ident) "static level emitted as runtime value"
+  bad (caller "useBool" "Bool" (variable 0 [])) "runtime value accepted as static level"
+  bad (set "type" (piType False (named "Level#builtin") (named "Bool")) (caller "useBool" "Bool" (levelTerm 0)))
+    "runtime Level input accepted"
+  let ambiguous = set "type" (piType True (named "Level#builtin") (piType True (universeAt
+        (object ["constant" .= (2 :: Int),"maximum" .= [object ["offset" .= (0 :: Int),"term" .= variable 0 []]]]))
+        (piType False (varType 0) (varType 0)))) inferred
+  bad ambiguous "ambiguous omitted level accepted"
+
+indexedChecks :: Inventory -> IO ()
+indexedChecks base = do
+  let piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      family s xs = object ["term" .= call s xs []]
+      flagType = family "Evidence"
+      true = constructor "true" []
+      false = constructor "false" []
+      generic = piType True (named "Bool")
+      evidence = set "constructors" (toJSON (["off","on"] :: [Text]))
+        $ declaration "Evidence" "datatype" (generic (universeAt (level 0)))
+      ctor c t indexValue = set "family" (String "Evidence")
+        $ declaration c "constructor" (piType False (named t) (flagType [indexValue]))
+      function s ty tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $ declaration s "function" ty
+      readAny = function "readEvidence" (generic (piType False (flagType [variable 0 []]) (named "Bool")))
+        (split 1 [("off",1,done 2 (variable 0 [])),("on",1,done 2 true)])
+      rebuild = function "rebuildEvidence" (generic (piType False (flagType [variable 0 []]) (flagType [variable 0 []])))
+        (split 1 [("off",1,done 2 (constructor "off" [variable 0 []])),("on",1,done 2 (constructor "on" [variable 0 []]))])
+      retain = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)])
+        $ function "retainEvidence" (generic (piType False (flagType [variable 0 []]) (flagType [variable 0 []]))) (done 1 (variable 0 []))
+      caller = function "readOff" (piType False (flagType [false]) (named "Bool"))
+        (done 1 (call "readEvidence" [false,call "retainEvidence" [variable 0 []] []] []))
+      single = function "readSingle" (piType False (flagType [false]) (named "Bool"))
+        (split 0 [("off",1,done 1 (variable 0 []))])
+      flags = set "constructors" (toJSON (["flagValue"] :: [Text]))
+        $ declaration "Flags" "datatype" (generic (universeAt (level 0)))
+      flagsCtor = set "family" (String "Flags") $ declaration "flagValue" "constructor"
+        (generic (family "Flags" [variable 0 []]))
+      makeFlag = function "makeFlag" (generic (family "Flags" [variable 0 []]))
+        (done 1 (constructor "flagValue" [variable 0 []]))
+      flagRead = function "flagRead" (generic (piType False (family "Flags" [variable 0 []]) (named "Bool")))
+        (split 1 [("flagValue",1,done 2 (variable 1 []))])
+      rebuildFixed = function "rebuildFixed" (piType False (family "Flags" [true]) (family "Flags" [true]))
+        (split 0 [("flagValue",1,done 1 (constructor "flagValue" [variable 0 []]))])
+      bundleFields = ["switch","witness","selectedFlag","flagWitness"] :: [Text]
+      bundle = set "constructor" (String "bundle") $ set "induction" (String "Nothing")
+        $ set "fields" (toJSON bundleFields) $ declaration "Bundle" "record" (universeAt (level 0))
+      bundleCtor = set "family" (String "Bundle") $ declaration "bundle" "constructor"
+        (generic (piType True (flagType [variable 0 []]) (generic (piType False (family "Flags" [variable 0 []]) (named "Bundle")))))
+      projection f typ = set "projection" (object ["proper" .= ("Bundle" :: Text),"index" .= (1 :: Int)])
+        $ declaration f "function" (piType True (named "Bundle") typ)
+      bundleProjections = [projection "switch" (named "Bool"),projection "witness" (flagType [variable 0 ["switch"]])
+        ,projection "selectedFlag" (named "Bool"),projection "flagWitness" (family "Flags" [variable 0 ["selectedFlag"]])]
+      bundleSelect = function "bundleSelect" (piType True (named "Bundle") (flagType [variable 0 ["switch"]]))
+        (done 1 (variable 0 ["witness"]))
+      bundleRead = operation "bundleRead" ["Bundle"] "Bool" (done 1
+        (call "readEvidence" [variable 0 ["switch"],call "bundleSelect" [variable 0 []] []] []))
+      bundleEta = set "eta" (object ["constructor" .= ("bundle" :: Text),"fields" .= bundleFields
+        ,"branch" .= object ["arity" .= (4 :: Int),"tree" .= done 4 (constructor "bundle" (map (\i -> variable i []) [3,2,1,0]))]])
+        (set "lazy" (Bool True) (split 0 []))
+      bundleRebuild = operation "bundleRebuild" ["Bundle"] "Bundle" bundleEta
+      bundleMake = function "bundleMake" (generic (piType True (flagType [variable 0 []]) (generic (named "Bundle"))))
+        (done 3 (constructor "bundle" [variable 2 [],variable 1 [],variable 0 [],constructor "flagValue" [variable 0 []]]))
+      bundleConstructedSelect = function "bundleConstructedSelect" (piType False (named "Bool") (flagType [false]))
+        (done 1 (call "bundleSelect" [constructor "bundle" [false,constructor "off" [variable 0 []],true,constructor "flagValue" [true]]] []))
+      envelope = set "constructor" (String "envelope") $ set "induction" (String "Nothing")
+        $ set "fields" (toJSON (["inner"] :: [Text])) $ declaration "Envelope" "record" (universeAt (level 0))
+      envelopeCtor = set "family" (String "Envelope") $ declaration "envelope" "constructor"
+        (piType False (named "Bundle") (named "Envelope"))
+      inner = set "projection" (object ["proper" .= ("Envelope" :: Text),"index" .= (1 :: Int)])
+        $ declaration "inner" "function" (piType False (named "Envelope") (named "Bundle"))
+      nested = function "nestedSelect" (piType True (named "Envelope") (flagType [variable 0 ["inner","switch"]]))
+        (done 1 (variable 0 ["inner","witness"]))
+      sumBundle = set "constructors" (toJSON (["packedBundle","quietBundle"] :: [Text]))
+        $ declaration "SumBundle" "datatype" (universeAt (level 0))
+      packedBundle = set "family" (String "SumBundle") $ declaration "packedBundle" "constructor"
+        (generic (piType True (flagType [variable 0 []]) (generic
+          (piType False (family "Flags" [variable 0 []]) (named "SumBundle")))))
+      quietBundle = set "family" (String "SumBundle") $ declaration "quietBundle" "constructor"
+        (piType False (named "Bool") (named "SumBundle"))
+      sumTree packed quiet = split 0 [("packedBundle",4,packed),("quietBundle",1,quiet)]
+      sumRebuild = operation "sumRebuild" ["SumBundle"] "SumBundle"
+        (sumTree (done 4 (constructor "packedBundle" (map (\i -> variable i []) [3,2,1,0])))
+          (done 1 (constructor "quietBundle" [variable 0 []])))
+      sumRead = operation "sumRead" ["SumBundle"] "Bool"
+        (sumTree (done 4 (call "readEvidence" [variable 3 [],variable 2 []] [])) (done 1 (variable 0 [])))
+      sumNested = operation "sumNested" ["SumBundle"] "SumBundle"
+        (sumTree (split 1 [("off",1,done 4 (constructor "packedBundle"
+            [variable 3 [],constructor "off" [variable 2 []],variable 1 [],variable 0 []]))
+          ,("on",1,done 4 (constructor "packedBundle"
+            [variable 3 [],constructor "on" [variable 2 []],variable 1 [],variable 0 []]))])
+          (done 1 (constructor "quietBundle" [variable 0 []])))
+      sumPrefix = operation "sumPrefix" ["SumBundle"] "SumBundle"
+        (sumTree (split 0 [("true",0,done 3 (constructor "packedBundle" [true,variable 2 [],variable 1 [],variable 0 []]))
+          ,("false",0,done 3 (constructor "packedBundle" [false,variable 2 [],variable 1 [],variable 0 []]))])
+          (done 1 (constructor "quietBundle" [variable 0 []])))
+      sumMake = function "sumMake" (generic (piType True (flagType [variable 0 []]) (generic
+          (piType False (family "Flags" [variable 0 []]) (named "SumBundle")))))
+        (done 4 (constructor "packedBundle" (map (\i -> variable i []) [3,2,1,0])))
+      additions = [sumBundle,packedBundle,quietBundle,sumRebuild,sumRead,sumNested,sumPrefix,sumMake
+        ,evidence,ctor "off" "Bool" false,ctor "on" "Tone" true,readAny,rebuild,retain,caller,single
+        ,flags,flagsCtor,makeFlag,flagRead,rebuildFixed,bundle,bundleCtor,bundleSelect,bundleRead,bundleRebuild,bundleMake,bundleConstructedSelect
+        ,envelope,envelopeCtor,inner,nested] ++ bundleProjections
+      defs = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      finite = M.fromList [(s,d) | (s,v) <- M.toList defs,Right d <- [F.domain inv v]]
+      (shapes,_) = A.discover inv finite
+      table = M.mapMaybe (either (const Nothing) Just) (A.functions inv finite shapes)
+      calculate s args = evalWith table args (A.body (table M.! s))
+      value c b = R "Evidence" (M.fromList
+        [("constructor",E "Evidence.constructor-tag" c),("Evidence.index0",B (c == "on"))
+        ,("off.payload0",if c == "off" then b else N),("on.payload0",if c == "on" then b else N)])
+      flagged b = R "Flags" (M.fromList [("constructor",E "Flags.constructor-tag" "flagValue")
+        ,("Flags.index0",B b),("flagValue.payload0",B b)])
+      bad d message = do
+        let changed = inv {declarations = M.insert (string (get "name" d)) d (declarations inv)}
+        check (not (T.complete (T.generate changed))) message
+      sumValue tag evidenceValue enabled = R "SumBundle" (M.fromList
+        [("constructor",E "SumBundle.constructor-tag" "packedBundle"),("packedBundle.payload0",B tag)
+        ,("packedBundle.payload1",evidenceValue),("packedBundle.payload2",B enabled)
+        ,("packedBundle.payload3",flagged enabled),("quietBundle.payload0",N)])
+      quietValue datum = R "SumBundle" (M.fromList
+        ([("constructor",E "SumBundle.constructor-tag" "quietBundle"),("quietBundle.payload0",B datum)]
+        ++ [("packedBundle.payload" <> Text.pack (show i),N) | i <- [0..3 :: Int]]))
+      generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check (A.indexTypes (shapes M.! "Evidence") == [A.Boolean]) "finite family lost its index domain"
+  forM_ [False,True] $ \b -> do
+    let off = value "off" (B b)
+    check (calculate "readEvidence" [B False,off] == B b) "indexed dispatch lost Boolean payload"
+    check (calculate "rebuildEvidence" [B False,off] == off) "dependent result reconstruction changed value/index"
+    check (calculate "readOff" [off] == B b) "omitted runtime index was not recovered"
+    check (calculate "readSingle" [off] == B b) "impossible constructor was required in a fixed fibre"
+    check (calculate "makeFlag" [B b] == flagged b) "constructor's variable result index was erased"
+    check (calculate "flagRead" [B b,flagged b] == B b) "branch refinement changed earlier runtime input"
+  check (calculate "rebuildFixed" [flagged True] == flagged True)
+    "fixed fibre did not refine its constructor payload"
+  forM_ ["red","blue"] $ \c -> do
+    let on = value "on" (E "Tone" c)
+    check (calculate "rebuildEvidence" [B True,on] == on) "dependent enumeration payload changed"
+    check (calculate "readEvidence" [B True,on] == B True) "indexed branch selection changed"
+  forM_ ([(False,value "off" (B b),B b) | b <- [False,True]]
+    ++ [(True,value "on" (E "Tone" c),B True) | c <- ["red","blue"]]) $ \(tag,evidenceValue,observed) ->
+    forM_ [False,True] $ \enabled -> do
+      let packetValue = R "Bundle" (M.fromList [("switch",B tag),("witness",evidenceValue)
+            ,("selectedFlag",B enabled),("flagWitness",flagged enabled)])
+      let sumV = sumValue tag evidenceValue enabled
+      forM_ ["sumRebuild","sumNested","sumPrefix"] $ \name ->
+        check (calculate name [sumV] == sumV) "dependent sum matching/reconstruction changed payload or index"
+      check (calculate "sumRead" [sumV] == observed) "dependent constructor helper lost its earlier index"
+      check (calculate "sumMake" [B tag,evidenceValue,B enabled,flagged enabled] == sumV)
+        "ordered dependent sum construction changed fields"
+      check (calculate "bundleSelect" [packetValue] == evidenceValue) "dependent field projection lost its member"
+      check (calculate "bundleRead" [packetValue] == observed) "helper lost receiver-specific index"
+      check (calculate "bundleRebuild" [packetValue] == packetValue) "eta-expanded dependent field types lost their prefix"
+      check (calculate "bundleMake" [B tag,evidenceValue,B enabled] == packetValue) "ordered dependent construction changed fields"
+      check (calculate "nestedSelect" [R "Envelope" (M.singleton "inner" packetValue)] == evidenceValue)
+        "nested projection lost dependent field ownership"
+  forM_ [False,True] $ \b -> check (calculate "bundleConstructedSelect" [B b] == value "off" (B b))
+    "projection of known construction did not retain its index"
+  forM_ [False,True] $ \datum -> do
+    let quiet = quietValue datum
+    forM_ ["sumRebuild","sumNested","sumPrefix"] $ \name ->
+      check (calculate name [quiet] == quiet) "inactive dependent payload affected another sum variant"
+    check (calculate "sumRead" [quiet] == B datum) "independent sum alternative changed"
+  bad (set "compiled" (done 4 (constructor "packedBundle" [variable 1 [],variable 2 [],variable 3 [],variable 0 []])) sumMake)
+    "dependent sum construction swapped equal-domain indices"
+  bad (set "type" (generic (piType False (flagType [variable 1 []]) (named "SumBundle"))) packedBundle)
+    "dependent sum admitted a forward reference"
+  bad (set "compiled" (sumTree (split 1 [("off",1,done 4 (constructor "packedBundle"
+        [true,constructor "off" [variable 2 []],variable 1 [],variable 0 []]))
+      ,("on",1,done 4 (constructor "packedBundle"
+        [true,constructor "on" [variable 2 []],variable 1 [],variable 0 []]))])
+      (done 1 (constructor "quietBundle" [variable 0 []]))) sumNested)
+    "nested payload match violated an earlier index"
+  bad (set "compiled" (split 0 [("packedBundle",3,done 3 (constructor "quietBundle" [false]))
+    ,("quietBundle",1,done 1 (constructor "quietBundle" [variable 0 []]))]) sumRebuild)
+    "dependent constructor split lost a payload position"
+  bad (set "compiled" (split 0 [("quietBundle",1,done 1 (variable 0 []))]) sumRead)
+    "dependent constructor branch omitted"
+  bad (projection "witness" (flagType [variable 0 ["selectedFlag"]])) "projection declaration swapped equal-domain prefix fields"
+  bad (set "projection" (object ["proper" .= ("Pair" :: Text),"index" .= (1 :: Int)]) (projection "switch" (named "Bool")))
+    "foreign projection owner justified a dependent index"
+  bad (set "type" (piType True (named "Bundle") (flagType [call "notAProjection" [variable 0 []] []])) bundleSelect)
+    "arbitrary computed field index accepted"
+  bad (set "compiled" (done 3 (constructor "bundle" [variable 0 [],variable 1 [],variable 2 [],constructor "flagValue" [variable 2 []]])) bundleMake)
+    "construction silently swapped independent index fields"
+  bad (set "type" (generic (piType True (flagType [variable 1 []]) (generic (piType False (family "Flags" [variable 0 []]) (named "Bundle"))))) bundleCtor)
+    "out-of-scope constructor prefix reference accepted"
+  bad (set "compiled" (split 1 [("off",1,done 2 (variable 0 []))]) readAny) "missing possible indexed branch accepted"
+  bad (set "compiled" (done 1 (call "readEvidence" [true,variable 0 []] [])) caller) "helper accepted wrong fibre index"
+  bad (set "compiled" (split 1 [("off",1,done 2 (constructor "on" [constructor "red" []]))
+    ,("on",1,done 2 (constructor "on" [variable 0 []]))]) rebuild) "dependent result changed index"
+  bad (ctor "off" "Bool" (constructor "red" [])) "foreign enumeration constructor accepted as Boolean index"
+  bad (ctor "off" "Bool" (call "unknownIndex" [] [])) "computed index silently erased"
+  bad (set "type" (piType False (named "Pair") (universeAt (level 0))) evidence) "nonfinite index domain accepted"
+  bad (set "type" (generic (piType False (flagType [variable 0 []]) (flagType [variable 1 []])) ) (ctor "off" "Bool" false))
+    "recursive indexed payload accepted"
+  bad (set "compiled" (set "fallThrough" (Bool True) (split 0 [("off",1,done 1 (variable 0 []))])) single)
+    "unsupported indexed matching mode accepted"
+  check ("'Evidence.index0'" `Text.isInfixOf` T.modelText generated
+    && "index-contract-" `Text.isInfixOf` T.modelText generated) "native fibre constraints missing"
+  let report = T.correspondence generated
+      carriers = array (get "algebraicCarriers" report)
+  check (any (\c -> get "symbol" c == String "Evidence" && length (array (get "indices" c)) == 1) carriers)
+    "index correspondence absent"
+
+-- Static parameter removal must preserve runtime dependencies, including
+-- omitted indices on projection-like calls and receiver-dependent fields.
+composedChecks :: Inventory -> IO ()
+composedChecks base = do
+  let sort0 = universeAt (level 0)
+      piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      generic = piType True sort0
+      varType i = object ["term" .= variable i []]
+      applied s args = object ["term" .= call s args []]
+      evidence a b = applied "GenericEvidence" [get "term" a,b]
+      packet a = applied "GenericPacket" [get "term" a]
+      evidenceDef = set "parameters" (Number 1) $ set "constructors" (toJSON (["goff","gon"] :: [Text]))
+        $ declaration "GenericEvidence" "datatype" (generic (piType False (named "Bool") sort0))
+      evidenceCtor c tag = set "parameters" (Number 1) $ set "family" (String "GenericEvidence")
+        $ declaration c "constructor" (generic (piType False (varType 0) (evidence (varType 0) (constructor tag []))))
+      packetDef = set "parameters" (Number 1) $ set "constructor" (String "gpacket")
+        $ set "induction" (String "Nothing") $ set "fields" (toJSON (["genabled","gevidence"] :: [Text]))
+        $ declaration "GenericPacket" "record" (generic sort0)
+      packetCtor = set "parameters" (Number 1) $ set "family" (String "GenericPacket")
+        $ declaration "gpacket" "constructor" (generic (piType True (named "Bool")
+          (piType False (evidence (varType 1) (variable 0 [])) (packet (varType 1)))))
+      projection f ty = set "projection" (object ["proper" .= ("GenericPacket" :: Text),"index" .= (2 :: Int)])
+        $ declaration f "function" ty
+      enabled = projection "genabled" (generic (piType False (packet (varType 0)) (named "Bool")))
+      member = projection "gevidence" (generic (piType True (packet (varType 0))
+        (evidence (varType 1) (variable 0 ["genabled"]))))
+      function s ty tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $ declaration s "function" ty
+      retaining = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)])
+        $ function "gretain" (generic (piType True (named "Bool")
+          (piType False (evidence (varType 1) (variable 0 [])) (evidence (varType 1) (variable 0 [])))))
+          (done 1 (variable 0 []))
+      selecting = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)])
+        $ function "gselect" (generic (piType True (packet (varType 0))
+          (evidence (varType 1) (variable 0 ["genabled"])))) (done 1 (variable 0 ["gevidence"]))
+      rebuilding = function "grebuild" (generic (piType False (packet (varType 0)) (packet (varType 0))))
+        (split 1 [("gpacket",2,done 3 (constructor "gpacket" [variable 1 [],variable 0 []]))])
+      copying = function "gcopy" (generic (piType False (packet (varType 0)) (packet (varType 0))))
+        (done 2 (constructor "gpacket" [variable 0 ["genabled"],call "gretain" [variable 0 ["gevidence"]] []]))
+      constructing = function "gmake" (generic (piType False (varType 0) (packet (varType 0))))
+        (done 2 (constructor "gpacket" [constructor "true" [],constructor "gon" [variable 0 []]]))
+      use s target a = function s (piType False (packet a) (packet a))
+        (done 1 (call target [get "term" a,variable 0 []] []))
+      makeUse s a = function s (piType False a (packet a))
+        (done 1 (call "gmake" [get "term" a,variable 0 []] []))
+      selectUse = function "selectBoolPacket" (piType True (packet (named "Bool"))
+        (evidence (named "Bool") (variable 0 ["genabled"])))
+        (done 1 (call "gselect" [variable 0 []] []))
+      switch a = applied "GenericSwitch" [get "term" a]
+      switchDef = set "parameters" (Number 1) $ set "constructors" (toJSON (["gyes","gno"] :: [Text]))
+        $ declaration "GenericSwitch" "datatype" (generic sort0)
+      switchCtor c = set "parameters" (Number 1) $ set "family" (String "GenericSwitch")
+        $ declaration c "constructor" (generic (switch (varType 0)))
+      selected a tag = applied "Selected" [get "term" a,tag]
+      selectedDef = set "parameters" (Number 1) $ set "constructors" (toJSON (["gselected"] :: [Text]))
+        $ declaration "Selected" "datatype" (generic (piType False (switch (varType 0)) sort0))
+      selectedCtor = set "parameters" (Number 1) $ set "family" (String "Selected")
+        $ declaration "gselected" "constructor" (generic (piType True (switch (varType 0))
+          (piType False (varType 1) (selected (varType 1) (variable 0 [])))))
+      selectMake = function "makeSelected" (generic (piType False (varType 0) (selected (varType 0) (constructor "gyes" []))))
+        (done 2 (constructor "gselected" [constructor "gyes" [],variable 0 []]))
+      selectCaller = function "makeSelectedBool" (piType False (named "Bool") (selected (named "Bool") (constructor "gyes" [])))
+        (done 1 (call "makeSelected" [get "term" (named "Bool"),variable 0 []] []))
+      genEnvelope a tag = applied "PayloadEnvelope" [get "term" a,tag]
+      genEnvelopeDef = set "parameters" (Number 1) $ set "constructors" (toJSON (["dependentMessage","plainMessage"] :: [Text]))
+        $ declaration "PayloadEnvelope" "datatype" (generic (piType False (named "Bool") sort0))
+      genMessage = set "parameters" (Number 1) $ set "family" (String "PayloadEnvelope")
+        $ declaration "dependentMessage" "constructor" (generic (piType True (named "Bool")
+          (piType False (evidence (varType 1) (variable 0 [])) (genEnvelope (varType 1) (variable 0 [])))))
+      genPlain = set "parameters" (Number 1) $ set "family" (String "PayloadEnvelope")
+        $ declaration "plainMessage" "constructor" (generic (piType False (varType 0)
+          (genEnvelope (varType 0) (constructor "false" []))))
+      genCopy = function "copyPayloadEnvelope" (generic (piType True (named "Bool")
+        (piType False (genEnvelope (varType 1) (variable 0 [])) (genEnvelope (varType 1) (variable 0 [])))))
+        (split 2 [("dependentMessage",2,done 4 (constructor "dependentMessage" [variable 1 [],variable 0 []]))
+          ,("plainMessage",1,done 3 (constructor "plainMessage" [variable 0 []]))])
+      copyEnvelope s typ tag = function s (piType False (genEnvelope typ (constructor tag [])) (genEnvelope typ (constructor tag [])))
+        (done 1 (call "copyPayloadEnvelope" [get "term" typ,constructor tag [],variable 0 []] []))
+      additions = [genEnvelopeDef,genMessage,genPlain,genCopy,copyEnvelope "copyFalseEnvelope" (named "Bool") "false"
+        ,copyEnvelope "copyTrueEnvelope" (named "Tone") "true"
+        ,switchDef,switchCtor "gyes",switchCtor "gno",selectedDef,selectedCtor,selectMake,selectCaller
+        ,evidenceDef,evidenceCtor "goff" "false",evidenceCtor "gon" "true",packetDef,packetCtor
+        ,enabled,member,retaining,selecting,rebuilding,copying,constructing
+        ,use "copyBoolPacket" "gcopy" (named "Bool"),use "copyTonePacket" "gcopy" (named "Tone")
+        ,use "rebuildBoolPacket" "grebuild" (named "Bool")
+        ,makeUse "makeBoolPacket" (named "Bool"),makeUse "makeTonePacket" (named "Tone"),selectUse]
+      defs = M.insert "Bool" (set "constructors" (toJSON (["true","false"] :: [Text])) (declarations base M.! "Bool"))
+        $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      finite = M.fromList [(s,d) | (s,v) <- M.toList (declarations expanded),Right d <- [F.domain expanded v]]
+      shapes = fst (A.discover expanded finite)
+      table = M.mapMaybe (either (const Nothing) Just) (A.functions expanded finite shapes)
+      calculate s args = evalWith table args (A.body (table M.! s))
+      key s typ = P.typeKey (P.Named s [P.Named typ []])
+      evidenceValue typ tag value = R (key "GenericEvidence" typ) (M.fromList
+        [("constructor",E (key "GenericEvidence" typ <> ".constructor-tag") (key (if tag then "gon" else "goff") typ))
+        ,(key "GenericEvidence" typ <> ".index0",B tag)
+        ,(key "goff" typ <> ".payload0",if tag then N else value)
+        ,(key "gon" typ <> ".payload0",if tag then value else N)])
+      packetValue typ tag value = R (key "GenericPacket" typ) (M.fromList
+        [(key "genabled" typ,B tag),(key "gevidence" typ,evidenceValue typ tag value)])
+      bad d message = do
+        let altered = inv {declarations = M.insert (string (get "name" d)) d (declarations inv)}
+        check (not (T.complete (T.generate altered))) message
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  check (length [i | i <- P.instances prepared,P.origin i == "GenericEvidence"] == 2)
+    "runtime indices split static family identities"
+  forM_ [False,True] $ \tag -> do
+    forM_ [False,True] $ \value -> do
+      let packetV = packetValue "Bool" tag (B value)
+      check (calculate "copyBoolPacket" [packetV] == packetV) "omitted static/runtime indices changed copying"
+      check (calculate "rebuildBoolPacket" [packetV] == packetV) "specialized dependent eta expansion changed fields"
+      check (calculate "selectBoolPacket" [packetV] == evidenceValue "Bool" tag (B value)) "specialized receiver index was lost"
+      check (calculate "makeBoolPacket" [B value] == packetValue "Bool" True (B value)) "specialized construction changed index/payload"
+    forM_ ["red","blue"] $ \color -> do
+      let value = E "Tone" color; packetV = packetValue "Tone" tag value
+      check (calculate "copyTonePacket" [packetV] == packetV) "distinct payload specialization changed copying"
+      check (calculate "makeTonePacket" [value] == packetValue "Tone" True value) "enumeration payload became Boolean"
+  forM_ [False,True] $ \b -> do
+    let tag = E (key "GenericSwitch" "Bool") (key "gyes" "Bool")
+        expected = R (key "Selected" "Bool") (M.fromList
+          [("constructor",E (key "Selected" "Bool" <> ".constructor-tag") (key "gselected" "Bool"))
+          ,(key "Selected" "Bool" <> ".index0",tag)
+          ,(key "gselected" "Bool" <> ".payload0",tag),(key "gselected" "Bool" <> ".payload1",B b)])
+    check (calculate "makeSelectedBool" [B b] == expected) "specialized enumeration index lost its static domain"
+  bad (set "compiled" (done 2 (constructor "gselected" [constructor "gno" [],variable 0 []])) selectMake)
+    "specialized enumeration constructor violated a fixed result index"
+  let envelopeValue typ tag value = R (key "PayloadEnvelope" typ) (M.fromList
+        [("constructor",E (key "PayloadEnvelope" typ <> ".constructor-tag") (key "dependentMessage" typ))
+        ,(key "PayloadEnvelope" typ <> ".index0",B tag)
+        ,(key "dependentMessage" typ <> ".payload0",B tag)
+        ,(key "dependentMessage" typ <> ".payload1",evidenceValue typ tag value)
+        ,(key "plainMessage" typ <> ".payload0",N)])
+  forM_ [False,True] $ \b -> do
+    let expected = envelopeValue "Bool" False (B b)
+    check (calculate "copyFalseEnvelope" [expected] == expected)
+      "specialized indexed sum reconstruction lost dependent member"
+  forM_ ["red","blue"] $ \color -> do
+    let expected = envelopeValue "Tone" True (E "Tone" color)
+    check (calculate "copyTrueEnvelope" [expected] == expected)
+      "fixed outer fibre changed specialized dependent payload"
+  bad (set "compiled" (done 2 (constructor "gpacket" [constructor "false" [],constructor "gon" [variable 0 []]])) constructing)
+    "static specialization erased an inconsistent runtime index"
+  bad (projection "gevidence" (generic (piType False (packet (varType 0)) (evidence (varType 0) (constructor "false" [])))))
+    "static specialization erased a malformed dependent projection"
+  bad (set "projection" (object ["proper" .= ("Tone" :: Text),"index" .= (2 :: Int)]) member)
+    "static specialization changed projection ownership"
+  bad (set "compiled" (done 1 (call "gcopy" [get "term" (named "Tone"),variable 0 []] []))
+    (use "copyBoolPacket" "gcopy" (named "Bool"))) "different static payload types unified"
+
+-- Computed finite indices require checked bodies, not merely signatures.
+computedChecks :: Inventory -> IO ()
+computedChecks base = do
+  let piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      boolPi = piType True (named "Bool")
+      ty s args = object ["term" .= call s args []]
+      invert x = call "invertIndex" [x] []
+      namedIndex x = call "namedIndex" [x] []
+      true = constructor "true" []
+      false = constructor "false" []
+      function s t tree = set "compiled" tree $ set "sourceSyntax" (toJSON [object []]) $ declaration s "function" t
+      inversion = operation "invertIndex" ["Bool"] "Bool"
+        (split 0 [("true",0,done 0 false),("false",0,done 0 true)])
+      toneIndex = operation "namedIndex" ["Bool"] "Tone"
+        (split 0 [("true",0,done 0 (constructor "red" [])),("false",0,done 0 (constructor "blue" []))])
+      chain = operation "chainIndex" ["Bool"] "Tone" (done 1 (namedIndex (invert (variable 0 []))))
+      flags = set "constructors" (toJSON (["computedFlag"] :: [Text]))
+        $ declaration "ComputedFlag" "datatype" (boolPi (universeAt (level 0)))
+      flagCtor = declaration "computedFlag" "constructor" (boolPi (ty "ComputedFlag" [variable 0 []]))
+      family = set "constructors" (toJSON (["computedMember"] :: [Text]))
+        $ declaration "ComputedFamily" "datatype" (piType False (named "Tone") (universeAt (level 0)))
+      member = declaration "computedMember" "constructor"
+        (boolPi (piType False (ty "ComputedFlag" [invert (variable 0 [])])
+          (ty "ComputedFamily" [call "chainIndex" [variable 0 []] []])))
+      make = function "makeComputed" (boolPi (ty "ComputedFamily" [namedIndex (invert (variable 0 []))]))
+        (done 1 (constructor "computedMember" [variable 0 [],constructor "computedFlag" [invert (variable 0 [])]]))
+      consume = function "consumeComputed" (boolPi
+        (piType False (ty "ComputedFlag" [invert (variable 0 [])]) (ty "ComputedFlag" [invert (variable 0 [])])))
+        (split 1 [("computedFlag",1,done 2 (constructor "computedFlag" [variable 0 []]))])
+      fixed = function "fixedComputed" (piType False (named "Bool") (ty "ComputedFlag" [invert false]))
+        (done 1 (constructor "computedFlag" [true]))
+      branch = function "branchComputed" (boolPi (ty "ComputedFlag" [invert (variable 0 [])]))
+        (split 0 [("true",0,done 0 (constructor "computedFlag" [false]))
+          ,("false",0,done 0 (constructor "computedFlag" [true]))])
+      alias = function "signatureOnlyComputed" (boolPi
+        (piType False (ty "ComputedFlag" [invert (variable 0 [])]) (ty "ComputedFlag" [invert (variable 0 [])])))
+        (done 2 (variable 0 []))
+      choice = set "constructors" (toJSON (["computedOff","computedOn"] :: [Text]))
+        $ declaration "ComputedChoice" "datatype" (boolPi (universeAt (level 0)))
+      off = declaration "computedOff" "constructor" (ty "ComputedChoice" [false])
+      on = declaration "computedOn" "constructor" (ty "ComputedChoice" [true])
+      fixedChoice = function "computedChoiceRead" (piType False (ty "ComputedChoice" [invert false]) (named "Bool"))
+        (split 0 [("computedOn",0,done 0 true)])
+      additions = [inversion,toneIndex,chain,flags,flagCtor,family,member,make,consume,fixed,branch,alias
+        ,choice,off,on,fixedChoice]
+      defs = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      (shapes,errors) = A.discover inv finite
+      results = A.functions inv finite shapes
+      table = M.mapMaybe (either (const Nothing) Just) results
+      calculate s args = evalWith table args (A.body (table M.! s))
+      flagged b = R "ComputedFlag" (M.fromList [("constructor",E "ComputedFlag.constructor-tag" "computedFlag")
+        ,("ComputedFlag.index0",B b),("computedFlag.payload0",B b)])
+      bad d message = do
+        let changed = inv {declarations = M.insert (string (get "name" d)) d defs}
+        check (not (T.complete (T.generate changed))) message
+      generated = T.generate inv
+  check (M.null errors) (show errors)
+  check (T.complete generated) (show (T.diagnostics generated))
+  forM_ [False,True] $ \b -> do
+    let f = flagged (not b)
+        value = R "ComputedFamily" (M.fromList
+          [("constructor",E "ComputedFamily.constructor-tag" "computedMember")
+          ,("ComputedFamily.index0",E "Tone" (if b then "blue" else "red"))
+          ,("computedMember.payload0",B b),("computedMember.payload1",f)])
+    check (calculate "makeComputed" [B b] == value) "computed constructor index changed"
+    check (calculate "consumeComputed" [B b,f] == f) "computed branch equality was lost during reconstruction"
+    check (calculate "branchComputed" [B b] == f) "finite input branch did not reduce its index helper"
+    check (calculate "fixedComputed" [B b] == flagged True) "literal index calculation did not reduce"
+  check (calculate "computedChoiceRead" [R "ComputedChoice" (M.fromList
+    [("constructor",E "ComputedChoice.constructor-tag" "computedOn"),("ComputedChoice.index0",B True)])] == B True)
+    "computed closed index did not eliminate an impossible branch"
+  bad (set "compiled" (split 0 [("computedOff",0,done 0 false)]) fixedChoice)
+    "computed closed index omitted its possible branch"
+  bad (set "compiled" (done 1 (call "chainIndex" [variable 0 []] [])) toneIndex)
+    "mutually recursive index helpers accepted"
+  bad (operation "invertIndex" ["Pair"] "Bool" (done 1 (variable 0 ["flag"])))
+    "nonfinite helper domain justified a computed index"
+  bad (set "type" (boolPi (piType False (ty "ComputedFlag" [invert (variable 0 [])])
+    (ty "ComputedFlag" [variable 0 []]))) consume) "computed branch equality was inverted without evidence"
+  check (S.member "invertIndex" (A.dependencies (table M.! "signatureOnlyComputed")))
+    "signature-only calculation dependency missing"
+  check ("'chainIndex'(" `Text.isInfixOf` T.modelText generated) "computed index was erased from native output"
+  bad (set "compiled" Null inversion) "signature-only helper justified an index"
+  bad (set "opaque" (Bool True) inversion) "opaque helper justified an index"
+  bad (set "compiled" (done 1 (invert (variable 0 []))) inversion) "recursive index helper was accepted"
+  bad (set "compiled" (split 0 [("true",0,done 0 false)]) inversion) "incomplete index helper admitted"
+  bad (set "compiled" (done 1 (call "unknownIndexHelper" [variable 0 []] [])) inversion)
+    "unsupported helper dependency admitted"
+  bad (set "type" (boolPi (ty "ComputedFamily" [invert (variable 0 [])])) make) "wrong computed index domain admitted"
+  bad (set "compiled" (done 1 (constructor "computedFlag" [false])) fixed) "unequal computed literal index accepted"
+  bad (set "type" (boolPi (ty "ComputedFlag" [variable 0 []])) branch) "unknown index equality guessed"
+  bad (set "type" (boolPi (ty "ComputedFlag" [call "invertIndex" [] []])) branch) "partial index helper admitted"
+  bad (set "type" (boolPi (ty "ComputedFlag" [invert (constructor "red" [])])) branch)
+    "index helper accepted wrong argument domain"
+
+-- Exercise the real rule failures and complete report assembly, rather than
+-- classifying message strings. Changing wording must never change a code.
+diagnosticChecks :: Inventory -> M.Map Text F.Domain -> M.Map Text A.Shape -> IO ()
+diagnosticChecks inv finite shapes = do
+  let source = object ["file" .= ("Public.agda" :: Text), "line" .= (7 :: Int)]
+      annotate = set "sourceSyntax" (toJSON [source]) . set "sourceModule" (String "Public")
+      badSyntax = annotate $ operation "syntax" ["Bool"] "Bool"
+        (done 1 (object ["tag" .= ("lambda" :: Text)]))
+      badSemantics = annotate $ operation "semantics" ["Bool"] "Bool"
+        (set "fallThrough" (Bool True) (split 0
+          [("true",0,done 0 (constructor "true" [])),("false",0,done 0 (constructor "false" []))]))
+      badRepresentation = annotate $ operation "representation" ["MissingCarrier"] "Bool"
+        (done 1 (constructor "true" []))
+      cases = [(badSyntax,D.Syntax),(badSemantics,D.Semantics),(badRepresentation,D.Representation)]
+      extend additions = inv
+        { declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations inv)
+        , modelRequirements = M.insert "also-affected"
+            (S.fromList [(string (get "name" d),"behavior") | d <- additions])
+            (M.map (S.union (S.fromList [(string (get "name" d),"behavior") | d <- additions])) (modelRequirements inv)) }
+      expectedCode c = String (D.code (D.refusal c "wording-independent"))
+  check (T.complete (T.generate inv)) "diagnostic baseline is incomplete"
+  forM_ cases $ \(definition,kind) -> do
+    case A.function inv finite shapes definition of
+      Left reason -> check (D.category reason == kind) (show reason)
+      Right _ -> fail "unsupported diagnostic case translated"
+    let symbol = string (get "name" definition)
+        caller = annotate $ operation "caller" ["Bool"] "Bool" (done 1 (call symbol [variable 0 []] []))
+        additions = if kind == D.Representation then [definition] else [definition,caller]
+        altered = extend additions
+        results = A.functions altered finite shapes
+    forM_ additions $ \d -> case M.lookup (string (get "name" d)) results of
+      Just (Left reason) -> check (D.category reason == kind) "callee refusal category lost"
+      other -> fail (show other)
+    let generated = T.generate altered
+        report = T.correspondence generated
+        unresolved = [o | o <- array (get "obligations" report), get "status" o == String "textual"]
+        problems = T.diagnostics generated
+        coverage = get "coverage" report
+    check (not (T.complete generated) && length problems == length additions
+      && length unresolved == length problems) "diagnostic categories changed refusal accounting"
+    check (get "dischargedObligations" coverage ==
+      Number (fromIntegral (length (array (get "obligations" report)) - length unresolved)))
+      "rule attempts counted as separate obligations"
+    forM_ problems $ \problem -> do
+      let matches = [o | o <- unresolved, get "symbol" o == get "symbol" problem, get "kind" o == get "kind" problem]
+      case matches of
+        [obligation] -> do
+          check (get "code" problem == expectedCode kind && get "reasonCode" obligation == expectedCode kind)
+            "narrow rule fallback hid the general rule category"
+          check (get "source" problem == get "source" obligation
+            && get "syntax" (get "source" problem) == toJSON [source]
+            && get "module" (get "source" problem) == String "Public"
+            && get "symbol" (get "source" problem) == get "symbol" problem)
+            "classification lost source identity or location"
+          check (get "models" problem == toJSON (["algebraic","also-affected"] :: [Text]))
+            "classification lost affected model links"
+          let attempts = array (get "causes" problem)
+          check (map (get "rule") attempts == map String
+            ["native.boolean-cases","native.finite-cases","native.algebraic-cases"])
+            "failed rule alternatives were lost"
+          check (get "code" (last attempts) == expectedCode kind
+            && get "code" (attempts !! 1) == expectedCode D.Representation)
+            "individual fallback categories were overwritten"
+        _ -> fail "diagnostic does not identify exactly one unresolved obligation"
+  -- The inventory sharing adapter remains textual outside translation, while
+  -- its translation boundary is classified without changing the error API.
+  case D.field inv "type" (object ["type" .= object ["$node" .= ("absent" :: Text)]]) of
+    Left reason -> check (D.category reason == D.Syntax) "unreadable checked node misclassified"
+    Right _ -> fail "unreadable checked node accepted"
+  case P.readType inv [] (variable (-1) []) of
+    Left reason -> check (D.category reason == D.Syntax) "specialization syntax category lost"
+    Right _ -> fail "invalid specialization index accepted"
+  case P.constrainLevel M.empty (P.LevelExpr 2 M.empty) 1 of
+    Left reason -> check (D.category reason == D.Semantics) "specialization constraint category lost"
+    Right _ -> fail "inconsistent level constraint accepted"
+  forM_ [D.Syntax,D.Semantics,D.Representation] $ \kind -> do
+    let reason = D.refusal kind "original"
+        wrapped = D.context "callee: " reason
+        combined = D.alternatives [("narrow",D.refusal D.Representation "not applicable")] ("general",wrapped)
+    check (D.category combined == kind && D.message wrapped == "callee: original")
+      "context or alternative aggregation reclassified the underlying failure"
+
+-- Equal payload types and NoAbs still denote separate ordered helper inputs.
+helperProvenanceChecks :: IO ()
+helperProvenanceChecks = do
+  let tailType = signature [named "Bool"] (named "Duo")
+      helperType = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= named "Bool","info" .= info]
+        ,"codomain" .= object ["binds" .= False,"body" .= tailType]]]
+      def = declaration "duo" "constructor" helperType
+      inv = Inventory Null (M.singleton "duo" def) M.empty M.empty
+      sh = A.Shape "Duo" False [A.Constructor "duo"
+        [("duo.payload0",A.Boolean),("duo.payload1",A.Boolean)] []] []
+      shapes = M.singleton "Duo" sh
+      helper inventory = case A.constructorCalculations inventory shapes of
+        [c] -> c
+        _ -> error "missing constructor helper"
+      calc = helper inv
+      doc = A.renderCalculationDoc inv shapes id calc
+      trace = Trace.report inv inv doc
+      checked = array (get "checkedOccurrences" trace)
+      derivations = array (get "derivations" trace)
+      inputIds = [get "derivation" t | t <- array (get "targetOccurrences" trace),get "role" t == String "input"]
+      events = [get "evidence" d | d <- derivations,get "id" d `elem` inputIds]
+      positions = map (get "position" . get "premises") events
+      paths = [get "path" r | r <- checked,get "owner" r == String "duo",get "path" r /= toJSON ([] :: [Value])]
+  check (Trace.validate (Trace.render doc) trace == Right ()) "constructor helper trace has unresolved domains"
+  check (positions == [Number 0,Number 1]) "helper inputs lost their slot positions"
+  check (all ((== Bool False) . get "binds" . get "premises") (take 1 events)) "NoAbs helper input was skipped"
+  check (S.fromList paths == S.fromList [toJSON (["term","domain","type"] :: [Text])
+    ,toJSON (["term","codomain","body","term","domain","type"] :: [Text])])
+    "equal constructor domains were joined or given invented paths"
+  forM_ [False,True] $ \a -> forM_ [False,True] $ \b -> check
+    (eval [B a,B b] (A.body calc) == R "Duo" (M.fromList
+      [("constructor",E "Duo.constructor-tag" "duo"),("duo.payload0",B a),("duo.payload1",B b)]))
+    "helper input origins changed payload order or values"
+  -- A stale/incomplete schema must not acquire guessed telescope locators.
+  let broken = inv {declarations = M.singleton "duo" (set "type" (named "Duo") def)}
+      brokenDoc = A.renderCalculationDoc broken shapes id (helper broken)
+      brokenTrace = Trace.report broken broken brokenDoc
+      missing = [get "evidence" d | d <- array (get "derivations" brokenTrace)
+        ,get "rule" (get "evidence" d) `elem` [String "native.constructor-input",String "native.constructor-helper"]]
+  check (Trace.render brokenDoc == Trace.render doc) "provenance fallback changed constructor helper bytes"
+  check (not (null missing) && all ((/= Null) . get "unavailable") missing)
+    "incomplete constructor schema was silently promoted"
+
+-- Read the actual binding context: a NoAbs slot does not shift references,
+-- while the same raw index after inserting Abs denotes a different input.
+inputIndexProvenanceChecks :: IO ()
+inputIndexProvenanceChecks = do
+  let argInfo = object ["hiding" .= ("explicit" :: Text),"relevance" .= ("relevant" :: Text)
+        ,"quantity" .= ("unrestricted" :: Text)]
+      app value = object ["tag" .= ("apply" :: Text),"argument" .= object ["info" .= argInfo,"value" .= value]]
+      indexed family value = object ["term" .= object ["tag" .= ("definition" :: Text)
+        ,"symbol" .= (family :: Text),"eliminations" .= [app value]]]
+      piType binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= argInfo,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      constructorType binds value = piType True (named "Bool")
+        (piType binds (named "Bool") (piType True (indexed "Family" value) (named "Owner")))
+      decl ty = declaration "make" "constructor" ty
+      inventory ty = Inventory Null (M.singleton "make" (decl ty)) M.empty M.empty
+      con = A.Constructor "make" [("make.payload0",A.Boolean),("make.payload1",A.Boolean)
+        ,("make.payload2",A.Fibre "Family" [A.Input 0])] []
+      ownerShape = A.Shape "Owner" False [con] []
+      familyShape = A.Shape "Family" False [] [A.Boolean]
+      shapes = M.fromList [("Owner",ownerShape),("Family",familyShape)]
+      inv = inventory (constructorType False (variable 0 []))
+      helper i ss = case A.constructorCalculations i ss of [c] -> c; _ -> error "helper"
+      inspect i ss c = let doc = A.renderCalculationDoc i ss id c in (Trace.render doc,Trace.report i i doc)
+      contracts report = [t | t <- array (get "targetOccurrences" report)
+        ,get "role" t `elem` [String "index-contract",String "index-contract-boundary"]]
+      roles i ss c = map (get "role") (contracts (snd (inspect i ss c)))
+      original = helper inv shapes
+      expectBoundary message i ss c = check (roles i ss c == [String "index-contract-boundary"]) message
+      (model,trace) = inspect inv shapes original
+  check (Trace.validate model trace == Right ()) "direct input-index trace does not resolve"
+  check (roles inv shapes original == [String "index-contract"]) "NoAbs input index was not derived"
+  let events = [get "evidence" d | d <- array (get "derivations" trace)
+        ,get "rule" (get "evidence" d) == String "native.constructor-input-index"]
+  check (map (get "bindingSlots" . get "premises") events == [toJSON ([0] :: [Int])])
+    "input-index derivation lost the actual binder stack"
+  let rebased = inventory (constructorType True (variable 1 []))
+      captured = inventory (constructorType True (variable 0 []))
+      projected = inventory (constructorType False (variable 0 ["field"]))
+      computed = inventory (constructorType False (object ["tag" .= ("definition" :: Text)
+        ,"symbol" .= ("compute" :: Text),"eliminations" .= [app (variable 0 [])]]))
+  check (roles rebased shapes (helper rebased shapes) == [String "index-contract"]) "correctly rebased input index rejected"
+  expectBoundary "captured equal-typed input was admitted" captured shapes (helper captured shapes)
+  expectBoundary "projected input index escaped scope" projected shapes (helper projected shapes)
+  expectBoundary "computed input index escaped scope" computed shapes (helper computed shapes)
+  let noFamily = M.delete "Family" shapes
+  expectBoundary "missing family layout was guessed" inv noFamily (helper inv noFamily)
+  let functionInv = inv {declarations = M.adjust (set "kind" (String "function")) "make" (declarations inv)}
+  expectBoundary "ordinary function index contract escaped scope" functionInv shapes original
+  check (fst (inspect captured shapes (helper captured shapes)) == model) "refused provenance changed constraint bytes"
+  -- Unsupported contracts occupy their original ordinal; later evidence must
+  -- not slide onto them. The independently derived result keeps its ordinal.
+  let mixedCon = A.Constructor "make" [("make.payload0",A.Boolean)
+        ,("make.payload1",A.Fibre "Family" [A.Literal True])
+        ,("make.payload2",A.Fibre "Family" [A.Input 0])] [A.Input 0]
+      mixedShape = A.Shape "Owner" False [mixedCon] [A.Boolean]
+      mixedShapes = M.insert "Owner" mixedShape shapes
+      mixedType = piType True (named "Bool")
+        (piType False (indexed "Family" (constructor "true" []))
+          (piType False (indexed "Family" (variable 0 [])) (indexed "Owner" (variable 0 []))))
+      mixedInv = inventory mixedType
+      (mixedModel,mixedTrace) = inspect mixedInv mixedShapes (helper mixedInv mixedShapes)
+  check (map (get "role") (contracts mixedTrace) == [String "index-contract-boundary",String "index-contract",String "index-contract"])
+    "input/result contract evidence lost its original ordinal"
+  check (Trace.validate mixedModel mixedTrace == Right ()) "mixed contract trace has unresolved origins"
+
+  -- A single proper projection must retain both canonical field identity and
+  -- the actual receiver slot, even when another equal-typed input is present.
+  let projectedCon = A.Constructor "make" [("make.payload0",A.Named "Packet")
+        ,("make.payload1",A.Named "Packet")
+        ,("make.payload2",A.Fibre "Family" [A.Project (A.Input 0) "Packet.phase"])] []
+      packetShape = A.Shape "Packet" True
+        [A.Constructor "packet" [("Packet.phase",A.Named "Index"),("Packet.other",A.Named "Index")] []] []
+      projectedShapes = M.fromList [("Owner",A.Shape "Owner" False [projectedCon] [])
+        ,("Packet",packetShape),("Family",A.Shape "Family" False [] [A.Named "Index"])]
+      projectionDecl name = set "projection" (object ["proper" .= ("Packet" :: Text),"index" .= (1 :: Int)])
+        (declaration name "function" (piType False (named "Packet") (named "Index")))
+      projectedType binds term = piType True (named "Packet")
+        (piType binds (named "Packet") (piType False (indexed "Family" term) (named "Owner")))
+      projectedInventory binds term = Inventory Null (M.fromList
+        [("make",decl (projectedType binds term)),("Packet.phase",projectionDecl "Packet.phase")
+        ,("Packet.other",projectionDecl "Packet.other")]) M.empty M.empty
+      projectedInv = projectedInventory False (variable 0 ["Packet.phase"])
+      projectedHelper i ss = case [c | c <- A.constructorCalculations i ss,A.calculationSymbol c == "make"] of
+        [c] -> c; _ -> error "projected helper"
+      projectedCalc = projectedHelper projectedInv projectedShapes
+      (projectedModel,projectedTrace) = inspect projectedInv projectedShapes projectedCalc
+      projectionEvents = [get "evidence" d | d <- array (get "derivations" projectedTrace)
+        ,get "rule" (get "evidence" d) == String "native.constructor-projected-input-index"]
+      refuseProjection message i ss c = do
+        expectBoundary message i ss c
+        check (fst (inspect i ss c) == projectedModel) "projection refusal changed generated bytes"
+      modifyProjection f = projectedInv {declarations = M.adjust f "Packet.phase" (declarations projectedInv)}
+      badMetadata key value = modifyProjection (set "projection" (set key value (get "projection" (projectionDecl "Packet.phase"))))
+      badSignature ty = modifyProjection (set "type" ty)
+  check (roles projectedInv projectedShapes projectedCalc == [String "index-contract"])
+    "proper single-projection input contract was not derived"
+  check (map (get "projection" . get "premises") projectionEvents == [String "Packet.phase"]
+    && map (get "record" . get "premises") projectionEvents == [String "Packet"]
+    && map (get "bindingSlots" . get "premises") projectionEvents == [toJSON ([0] :: [Int])])
+    "projected contract lost canonical field, record, or receiver context"
+  check (Trace.validate projectedModel projectedTrace == Right ()) "projected contract trace does not resolve"
+  let rebound = projectedInventory True (variable 1 ["Packet.phase"])
+  check (roles rebound projectedShapes (projectedHelper rebound projectedShapes) == [String "index-contract"])
+    "projection receiver rebasing was rejected"
+  mapM_ (\(message,i) -> refuseProjection message i projectedShapes (projectedHelper i projectedShapes))
+    [("captured equal-typed receiver admitted",projectedInventory True (variable 0 ["Packet.phase"]))
+    ,("equal-typed canonical field swap admitted",projectedInventory False (variable 0 ["Packet.other"]))
+    ,("nested projection admitted",projectedInventory False (variable 0 ["Packet.phase","Packet.phase"]))
+    ,("applied projection admitted",projectedInventory False
+        (set "eliminations" (toJSON [object ["tag" .= ("project" :: Text),"symbol" .= ("Packet.phase" :: Text)]
+          ,app (variable 0 [])]) (variable 0 [])))
+    ,("missing proper projection metadata admitted",badMetadata "proper" Null)
+    ,("wrong record owner admitted",badMetadata "proper" (String "OtherPacket"))
+    ,("parameterized projection admitted",badMetadata "index" (Number 2))
+    ,("non-function projection admitted",modifyProjection (set "kind" (String "constructor")))
+    ,("wrong checked receiver type admitted",badSignature (piType False (named "OtherPacket") (named "Index")))
+    ,("wrong checked result type admitted",badSignature (piType False (named "Packet") (named "OtherIndex")))
+    ,("extra projection argument admitted",badSignature (piType True (named "Packet") (piType False (named "Packet") (named "Index"))))
+    ,("hidden projection receiver admitted",badSignature (object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= set "hiding" (String "hidden") argInfo,"type" .= named "Packet"]
+        ,"codomain" .= object ["binds" .= False,"body" .= named "Index"]]]))]
+  let missingField = projectedInv {declarations = M.delete "Packet.phase" (declarations projectedInv)}
+      noRecord = M.delete "Packet" projectedShapes
+  refuseProjection "missing projection declaration guessed" missingField projectedShapes projectedCalc
+  refuseProjection "unadmitted record field guessed" projectedInv noRecord projectedCalc
+
+resultIndexProvenanceChecks :: IO ()
+resultIndexProvenanceChecks = do
+  let explicit = set "hiding" (String "explicit") info
+      app v = set "argument" (object ["info" .= explicit,"value" .= v]) (application v)
+      family values = object ["term" .= object ["tag" .= ("definition" :: Text)
+        ,"symbol" .= ("Owner" :: Text),"eliminations" .= map app values]]
+      piType binds codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= explicit,"type" .= named "Bool"]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      checked binds values = piType True (piType binds (family values))
+      builtins = object ["builtins" .= object ["bool" .= ("Bool" :: Text)
+        ,"true" .= ("true" :: Text),"false" .= ("false" :: Text)]]
+      tone = set "constructors" (toJSON (["red","blue"] :: [Text]))
+        (declaration "Tone" "datatype" (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
+      inventory binds values = Inventory builtins (M.fromList
+        [("make",declaration "make" "constructor" (checked binds values)),("Tone",tone)
+        ,("red",declaration "red" "constructor" (named "Tone"))
+        ,("blue",declaration "blue" "constructor" (named "Tone"))]) M.empty M.empty
+      shapes types expected = M.singleton "Owner" (A.Shape "Owner" False
+        [A.Constructor "make" [("make.payload0",A.Boolean),("make.payload1",A.Boolean)] expected] types)
+      helper i ss = case A.constructorCalculations i ss of [c] -> c; _ -> error "result helper"
+      inspect i ss c = let doc = A.renderCalculationDoc i ss id c in (Trace.render doc,Trace.report i i doc)
+      contracts trace = [t | t <- array (get "targetOccurrences" trace)
+        ,get "role" t `elem` [String "index-contract",String "index-contract-boundary"]]
+      roles i ss c = map (get "role") (contracts (snd (inspect i ss c)))
+      ss = shapes [A.Boolean] [A.Input 0]
+      inv = inventory False [variable 0 []]
+      calc = helper inv ss
+      (model,trace) = inspect inv ss calc
+      events = [get "evidence" d | d <- array (get "derivations" trace)
+        ,get "rule" (get "evidence" d) == String "native.constructor-result-index"]
+      refuseUnchanged message i = do
+        check (roles i ss (helper i ss) == [String "index-contract-boundary"]) message
+        check (fst (inspect i ss (helper i ss)) == model) "result provenance refusal changed bytes"
+  check (roles inv ss calc == [String "index-contract"]) "NoAbs constructor result was not derived"
+  check (map (get "bindingSlots" . get "premises") events == [toJSON ([0] :: [Int])]
+    && map (get "expectedInput" . get "premises") events == [Number 0]) "result contract lost actual input identity"
+  check (Trace.validate model trace == Right ()) "result trace has unresolved references"
+  let rebased = inventory True [variable 1 []]
+  check (roles rebased ss (helper rebased ss) == [String "index-contract"]) "result receiver rebasing failed"
+  refuseUnchanged "result captured an equal-typed input" (inventory True [variable 0 []])
+  refuseUnchanged "projected result index escaped scope" (inventory False [variable 0 ["field"]])
+  refuseUnchanged "negative result index admitted" (inventory False [variable (-1) []])
+  refuseUnchanged "wrong result arity admitted" (inventory False [variable 0 [],variable 0 []])
+  let ordinary = inv {declarations = M.adjust (set "kind" (String "function")) "make" (declarations inv)}
+  check (roles ordinary ss calc == [String "index-contract-boundary"]) "ordinary function result admitted"
+  check (roles inv ss (calc {A.body = A.Input 0}) == [String "index-contract-boundary"])
+    "result evidence admitted an unrelated calculation body"
+  forM_ [False,True] $ \b -> do
+    let constShapes = shapes [A.Boolean] [A.Literal b]
+        constInv value = inventory False [constructor value []]
+        valid = constInv (if b then "true" else "false")
+        wrong = constInv (if b then "false" else "true")
+    check (roles valid constShapes (helper valid constShapes) == [String "index-contract"])
+      "Boolean result constant was not derived"
+    check (roles wrong constShapes (helper wrong constShapes) == [String "index-contract-boundary"])
+      "Boolean result constant changed value"
+  let enumShapes = shapes [A.Named "Tone"] [A.Enumeration "Tone" "red"]
+      enumInv = inventory False [constructor "red" []]
+      wrongEnum = inventory False [constructor "blue" []]
+      brokenEnum = enumInv {declarations = M.adjust (set "type" (signature [named "Bool"] (named "Tone"))) "red" (declarations enumInv)}
+  check (roles enumInv enumShapes (helper enumInv enumShapes) == [String "index-contract"])
+    "finite enum result constant was not derived"
+  check (roles wrongEnum enumShapes (helper wrongEnum enumShapes) == [String "index-contract-boundary"])
+    "different constructor of the same finite domain was admitted"
+  check (roles brokenEnum enumShapes (helper brokenEnum enumShapes) == [String "index-contract-boundary"])
+    "non-finite constructor payload was admitted as a result constant"
+  let mixedShapes = shapes [A.Boolean,A.Boolean,A.Named "Tone"]
+        [A.Input 0,A.Project (A.Input 0) "field",A.Enumeration "Tone" "red"]
+      mixedInv = inventory False [variable 0 [],variable 0 ["field"],constructor "red" []]
+      (mixedModel,mixedTrace) = inspect mixedInv mixedShapes (helper mixedInv mixedShapes)
+      mixedTargets = contracts mixedTrace
+  check (map (get "role") mixedTargets == [String "index-contract",String "index-contract-boundary",String "index-contract"])
+    "unsupported result index displaced later evidence"
+  check (Trace.validate mixedModel mixedTrace == Right ()) "mixed result trace references do not resolve"
+
+naturalChecks :: IO ()
+naturalChecks = do
+  let universe = universeAt (level 0)
+      nat = set "constructors" (toJSON (["zero","suc"] :: [Text])) (declaration "Nat" "datatype" universe)
+      zeroDef = set "family" (String "Nat") (declaration "zero" "constructor" (named "Nat"))
+      sucDef = set "family" (String "Nat") (declaration "suc" "constructor" (signature [named "Nat"] (named "Nat")))
+      primitive s p out = set "primitive" (String p) (declaration s "primitive" (signature [named "Nat",named "Nat"] (named out)))
+      primitiveDefs = [primitive "add" "PrimNatPlus" "Nat",primitive "monus" "PrimNatMinus" "Nat"
+        ,primitive "multiply" "PrimNatTimes" "Nat",primitive "less" "PrimNatLess" "Bool",primitive "equal" "PrimNatEquality" "Bool"]
+      literal n = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= (n :: Integer)]]
+      predecessor = operation "predecessor" ["Nat"] "Nat" (split 0 [("zero",0,done 0 (literal 0)),("suc",1,done 1 (variable 0 []))])
+      defs = [nat,zeroDef,sucDef,predecessor] ++ primitiveDefs
+      inv = Inventory (object ["builtins" .= object ["nat" .= ("Nat" :: Text),"zero" .= ("zero" :: Text),"suc" .= ("suc" :: Text),"bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "numbers" (S.fromList [(string (get "name" d),if get "kind" d `elem` [String "function",String "primitive"] then "behavior" else "structure") | d <- defs]))
+      calculations = A.functions inv M.empty M.empty
+  table <- traverse (either (fail . show) pure) calculations
+  sequenceChecks inv
+  forM_ [0,1,7,10^(100 :: Int)] $ \a -> do
+    check (evalWith table [Z a] (A.body (table M.! "predecessor")) == Z (max 0 (a-1))) "natural branch lost predecessor"
+    forM_ [0,2,11,10^(101 :: Int)] $ \b ->
+      forM_ [("add",Z (a+b)),("monus",Z (max 0 (a-b))),("multiply",Z (a*b)),("less",B (a<b)),("equal",B (a==b))] $ \(name,expected) ->
+        check (evalWith table [Z a,Z b] (A.body (table M.! name)) == expected) "native arithmetic changed unbounded natural semantics"
+  check (length (A.calculationContracts id (table M.! "add")) == 3) "natural boundary omitted finiteness"
+  let malformed = primitive "bad" "PrimNatPlus" "Bool"
+      missing = set "primitive" Null (primitive "bad" "PrimNatPlus" "Nat")
+      negative = operation "negative" [] "Nat" (done 0 (literal (-1)))
+  forM_ [malformed,missing,negative] $ \d ->
+    check (isLeft (A.function inv M.empty M.empty d)) "invalid numeric schema admitted"
+
+familyParameterChecks :: IO ()
+familyParameterChecks = do
+  let universe = universeAt (level 0)
+      arrow binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      variableType index args = object ["term" .= object ["tag" .= ("variable" :: Text),"index" .= (index :: Int)
+        ,"eliminations" .= map application args]]
+      familyDomain = arrow False (named "Bool") universe
+      resultType = variableType 1 [get "term" (variableType 0 [])]
+      declaration' = set "projection" Null $ declaration "selectFamily" "function"
+        (arrow True familyDomain (arrow True (named "Bool") resultType))
+      inv = Inventory (object []) M.empty M.empty M.empty
+      bool = P.Named "Bool" []
+      schema = P.FamilyParameter 0 [bool] (P.LevelExpr 0 M.empty)
+      family = P.OpenFamily 0 [bool] 0
+      value = P.Runtime bool (P.IndexInput 0)
+      applicationTerm = get "term" resultType
+  sig <- either (fail . show) pure (P.signature inv declaration')
+  check (P.parameters sig == 1 && P.inputs sig == [bool]
+    && P.parameterKinds sig == [P.FamilyKind [bool] (P.LevelExpr 0 M.empty)]
+    && P.output sig == P.FamilyApplication schema [value]) "checked family telescope/application lost binder or index"
+  resolved <- either (fail . show) pure (P.substitute [family] (P.output sig))
+  check (resolved == P.FamilyApplication family [value]) "family substitution discarded runtime index"
+  check (P.readType inv [Just value,Just schema] applicationTerm == Right (P.FamilyApplication schema [value]))
+    "family application did not retain checked index domain"
+  let wrong = P.Runtime (P.Named "Other" []) (P.IndexInput 0)
+  check (isLeft (P.readType inv [Just wrong,Just schema] applicationTerm)) "incompatible family index domain admitted"
+  check (isLeft (P.readType inv [Just value,Just schema] (get "term" (variableType 1 [get "term" (variableType 0 []),get "term" (variableType 0 [])]))))
+    "overapplied family parameter admitted"
+  let dependent = arrow True (named "Bool") (arrow False (variableType 0 []) universe)
+      unsupported = set "type" (arrow True dependent (named "Bool")) declaration'
+  check (isLeft (P.signature inv unsupported)) "dependent family argument domain silently flattened"
+
+reductionChecks :: IO ()
+reductionChecks = do
+  let lambda binds body = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= binds,"body" .= body]]
+      local = Reduction.variable
+      safe d = set "opaque" (Bool False) $ set "terminates" (Bool True) $ set "sourceModule" (String "Checked") d
+      wrap = safe (operation "wrap" ["Bool"] "Bool" (done 1 (local 0)))
+      short = safe (operation "short" ["Bool"] "Bool" (done 0 (call "wrap" [] [])))
+      bottom = call "unrepresentedProof" [] []
+      box = set "fields" (toJSON (["value","evidence"] :: [Text])) $ set "constructor" (String "box") $ declaration "Box" "record" (universeAt (level 0))
+      ctor = set "family" (String "Box") (declaration "box" "constructor" (signature [named "Bool",named "Proof"] (named "Box")))
+      make = safe (operation "make" ["Bool"] "Box" (done 1 (constructor "box" [local 0,bottom])))
+      doc = object ["checking" .= [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]]
+      inv = Inventory doc (M.fromList [(string (get "name" d),d) | d <- [wrap,short,box,ctor,make]]) M.empty M.empty
+      reduce t = fst <$> Reduction.reduceHead inv t
+  check (Reduction.substituteTerms [local 0] (lambda True (local 1)) == Just (lambda True (local 1))) "substitution captured an outer variable"
+  check (Reduction.substituteTerms [local 2] (lambda True (local 0)) == Just (lambda True (local 0))) "substitution replaced a bound variable"
+  check (Reduction.substituteTerms [local 2] (lambda False (local 0)) == Just (lambda False (local 2))) "NoAbs was incorrectly treated as a binder"
+  check (Reduction.applyTerms (lambda True (local 0)) [constructor "true" []] == Just (constructor "true" [])) "beta reduction failed"
+  check (reduce (call "short" [local 0] []) == Just (local 0)) "eta-short checked wrapper did not reduce"
+  check (reduce (call "make" [local 0] ["value"]) == Just (local 0)) "projection evaluated or retained an unused field"
+  check (reduce (call "make" [local 0] ["evidence"]) /= Just (local 0)) "proof field was identified with the computational field"
+  let untrusted = inv {document = Null}
+  check (Reduction.reduceHead untrusted (call "wrap" [local 0] []) == Nothing) "unchecked termination flag justified unfolding"
+  let opaque = inv {declarations = M.adjust (set "opaque" (Bool True)) "wrap" (declarations inv)}
+  check (Reduction.reduceHead opaque (call "wrap" [local 0] []) == Nothing) "opaque definition was unfolded"
+
+closureChecks :: Inventory -> IO ()
+closureChecks base = do
+  let piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= binds,"body" .= b]]]
+      varType i = object ["term" .= variable i []]
+      fn a b = piType False a b
+      safe d = set "opaque" (Bool False) $ set "terminates" (Bool True) $ set "sourceModule" (String "Checked") d
+      invoke term args = set "eliminations" (toJSON (array (get "eliminations" term) ++ map application args)) term
+      applyOnce = safe $ set "type" (piType True (universeAt (level 0)) (fn (fn (varType 0) (varType 0)) (fn (varType 0) (varType 0))))
+        $ operation "applyOnce" [] "Bool" (done 3 (invoke (variable 1 []) [variable 0 []]))
+      xor = safe $ operation "xor" ["Bool","Bool"] "Bool" $ split 0
+        [("false",0,done 1 (variable 0 [])),("true",0,split 0
+          [("false",0,done 0 (constructor "true" [])),("true",0,done 0 (constructor "false" []))])]
+      caller = safe $ operation "closureCaller" ["Bool","Bool"] "Bool" $ done 2
+        (call "applyOnce" [get "term" (named "Bool"),call "xor" [variable 1 []] [],variable 0 []] [])
+      lambda = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True
+        ,"body" .= call "xor" [variable 2 [],variable 0 []] []]]
+      lambdaCaller = safe $ operation "lambdaCaller" ["Bool","Bool"] "Bool" $ done 2
+        (call "applyOnce" [get "term" (named "Bool"),lambda,variable 0 []] [])
+      nat = set "constructors" (toJSON (["zero","suc"] :: [Text])) (declaration "Nat" "datatype" (universeAt (level 0)))
+      zeroDef = set "family" (String "Nat") (declaration "zero" "constructor" (named "Nat"))
+      sucDef = set "family" (String "Nat") (declaration "suc" "constructor" (signature [named "Nat"] (named "Nat")))
+      iterateFn = safe $ set "type" (piType True (universeAt (level 0))
+        (fn (fn (varType 0) (varType 0)) (fn (named "Nat") (fn (varType 0) (varType 0)))))
+        $ operation "iterate" [] "Bool" $ split 2
+          [("zero",0,done 3 (variable 0 [])),("suc",1,done 4 (call "iterate"
+            [variable 3 [],variable 2 [],variable 1 [],invoke (variable 2 []) [variable 0 []]] []))]
+      iterated = safe $ operation "iterated" ["Bool","Nat","Bool"] "Bool" $ done 3
+        (call "iterate" [get "term" (named "Bool"),call "xor" [variable 2 []] [],variable 1 [],variable 0 []] [])
+      additions = [applyOnce,xor,caller,lambdaCaller,nat,zeroDef,sucDef,iterateFn,iterated]
+      added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      registry = set "nat" (String "Nat") $ set "zero" (String "zero") $ set "suc" (String "suc") (get "builtins" (document base))
+      inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (set "builtins" registry (document base))
+        ,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      finite = M.fromList [(s,d) | (s,v) <- M.toList (declarations expanded),Right d <- [F.domain expanded v]]
+      shapes = fst (A.discover expanded finite)
+      calculations = A.functions expanded finite shapes
+      table = M.mapMaybe (either (const Nothing) Just) calculations
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  forM_ ["closureCaller","lambdaCaller"] $ \name -> do
+    calculation <- either (fail . show) pure (calculations M.! name)
+    forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument ->
+      check (evalWith table [B captured,B argument] (A.body calculation) == B (captured /= argument)) "closure specialization lost a capture or argument"
+  check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 2) "closure templates were merged or specialized by runtime value"
+
+  iteration <- either (fail . show) pure (calculations M.! "iterated")
+  forM_ [False,True] $ \captured -> forM_ [0..7] $ \n -> forM_ [False,True] $ \value ->
+    check (evalWith table [B captured,Z n,B value] (A.body iteration)
+      == B (if odd n then captured /= value else value)) "recursive closure cache lost its body or captured value"
+
+  let retainedOnly = declaration "sourceOnly" "axiom" (universeAt (level 0))
+      refs xs = object ["symbols" .= (xs :: [Text])]
+      model roots = object ["models" .= object ["selected" .= object
+        ["state" .= refs ["Bool"],"commands" .= refs ["Bool"]
+        ,"transition" .= object ["entry" .= refs roots]]]]
+      addModels roots = set "models" (get "models" (model roots)) (document inv)
+      accounting roots = inv {document = addModels roots
+        ,declarations = M.insert "sourceOnly" retainedOnly (declarations inv)
+        ,modelRequirements = M.map (S.insert ("sourceOnly","structure")) (modelRequirements inv)}
+      retainedReport = T.generate (accounting ["closureCaller"])
+      accountingRows = array (get "obligations" (T.correspondence retainedReport))
+  check (T.complete retainedReport) (show (T.diagnostics retainedReport))
+  forM_ [row | row <- accountingRows,"@closure-" `Text.isInfixOf` string (get "symbol" row)] $ \row ->
+    check (M.member (string (get "checkedDefinition" (get "source" row))) (declarations inv))
+      "closure obligation points to a generated identity absent from the source inventory"
+  check (any (\row -> get "symbol" row == String "sourceOnly" && get "kind" row == String "reduction-source"
+    && get "sourceKind" row == String "structure" && get "target" row == Null) accountingRows)
+    "unneeded source evidence was omitted or presented as native behavior"
+  check (not (T.complete (T.generate (accounting ["closureCaller","sourceOnly"]))))
+    "an explicitly selected unsupported root was waived as reduced source"
+  let brokenAccounting = (accounting ["closureCaller"]) {declarations = M.adjust (set "compiled" Null) "xor" (declarations (accounting ["closureCaller"]))}
+  check (not (T.complete (T.generate brokenAccounting))) "an unresolved runtime dependency was waived as reduced source"
+
+sequenceChecks :: Inventory -> IO ()
+sequenceChecks base = do
+  let sequenceType = set "nativeSequence" (named "Nat") $ set "constructors" (toJSON (["nil","cons"] :: [Text]))
+        $ declaration "ListNat" "datatype" (universeAt (level 0))
+      nil = set "family" (String "ListNat") (declaration "nil" "constructor" (named "ListNat"))
+      cons = set "family" (String "ListNat") (declaration "cons" "constructor" (signature [named "Nat",named "ListNat"] (named "ListNat")))
+      shift = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+        operation "shift" ["Nat","ListNat"] "ListNat" (split 1
+          [("nil",0,done 1 (constructor "nil" [])),("cons",2,done 3 (constructor "cons"
+            [call "add" [variable 2 [],variable 1 []] [],call "shift" [variable 2 [],variable 0 []] []]))])
+      additions = [sequenceType,nil,cons,shift]
+      extra = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.map (`S.union` extra) (modelRequirements base)}
+      (shapes,errors) = A.discover inv M.empty
+      calculations = A.functions inv M.empty shapes
+      list values = R "ListNat" (M.singleton "items" (Seq (map Z values)))
+  check (M.null errors && M.member "ListNat" shapes) (show errors)
+  table <- traverse (either (fail . show) pure) calculations
+  forM_ [[],[0],[2,2,0],[10^(80 :: Int),3,3]] $ \values ->
+    forM_ [0,1,10^(70 :: Int)] $ \offset ->
+      check (evalWith table [Z offset,list values] (A.body (table M.! "shift")) == list (map (+offset) values))
+        "recursive sequence translation changed order, multiplicity, capture, or arithmetic"
+  let unchecked = inv {document = document base}
+      broken = inv {declarations = M.adjust (set "primitive" (String "Unsupported")) "add" (declarations inv)}
+  check (isLeft (A.functions unchecked M.empty shapes M.! "shift")) "recursive function flag alone admitted a call cycle"
+  check (isLeft (A.functions broken M.empty shapes M.! "shift")) "recursive cycle concealed a refused external dependency"
+
+-- Default selection must cover independent definitions and must not infer proof
+-- roles from a declaration's spelling or from a local annotation.
+automaticSelectionChecks :: IO ()
+automaticSelectionChecks = do
+  let clean = set "statementDependencies" (toJSON ([] :: [Text]))
+        . set "bodyDependencies" (toJSON ([] :: [Text]))
+      ordinary = clean (operation "step-preserves" ["Bool"] "Bool" (done 1 (variable 0 [])))
+      negation = clean (operation "not" ["Bool"] "Bool" (split 0
+        [("true",0,done 0 (constructor "false" [])),("false",0,done 0 (constructor "true" []))]))
+      proof = clean (operation "identity-law" ["Bool"] "Equality" (done 1 (constructor "refl" [])))
+      opaque = clean (declaration "opaque" "axiom" (signature [named "Bool"] (named "Bool")))
+      md libraryName ds = object ["name" .= libraryName,"source" .= object ["library" .= libraryName]
+        ,"definitions" .= ds]
+      input = object ["selectionProfile" .= ("declarations" :: Text),"library" .= ("Own" :: Text)
+        ,"builtins" .= object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text)
+          ,"false" .= ("false" :: Text),"equality" .= ("Equality" :: Text)]
+        ,"modules" .= [md ("Own" :: Text) [ordinary,negation,proof,opaque],md ("Dependency" :: Text)
+          [clean (declaration "Bool" "datatype" (universeAt (level 0)))
+          ,clean (declaration "Equality" "datatype" (universeAt (level 0)))
+          ,clean (operation "unrelated" ["Bool"] "Bool" (done 1 (variable 0 [])))]]]
+      emptyMapping = Mapping.Mapping 2 "Own" "own.agda-lib" ["Own"] False M.empty
+  selected <- either (fail . Text.unpack) pure (prepare emptyMapping input)
+  let needs = required selected
+  check (S.member ("not","behavior") needs && S.member ("step-preserves","behavior") needs)
+    "automatic selection omitted an independent calculation or classified a proof by its name"
+  check (S.member ("identity-law","statement") needs && S.member ("identity-law","proof-source") needs
+    && not (S.member ("identity-law","behavior") needs)) "canonical equality law lost its proof-source role"
+  check (not (S.member ("unrelated","behavior") needs)) "unrelated dependency became project scope"
+  check (S.member ("opaque","behavior") needs && S.member ("opaque","external-assumption") needs)
+    "assumption provenance replaced a postulated operation's computational requirement"
+  let opaqueRows = [r | r <- array (get "obligations" (T.correspondence (T.generate selected)))
+                     ,get "symbol" r == String "opaque",get "kind" r == String "behavior"]
+  check (not (null opaqueRows) && all ((== String "textual") . get "status") opaqueRows)
+    "retaining an assumption concealed an operation with no executable body"
+  let model = Mapping.Model "Own" "Local" (Mapping.NamedState "Bool") Nothing
+        (Mapping.Function "not" Nothing (Mapping.Position 0) Mapping.DirectState) [] ["step-preserves"]
+      overlay = emptyMapping {Mapping.models = M.singleton "local" model}
+      refs = [object ["reference" .= name,"candidates" .= [name]] | name <- ["not","Bool","step-preserves"] :: [Text]]
+      inputAnnotated = set "resolutions" (toJSON [object ["model" .= ("local" :: Text),"references" .= refs]]) input
+  annotated <- either (fail . Text.unpack) pure (prepare overlay inputAnnotated)
+  check (needs `S.isSubsetOf` required annotated && S.member ("step-preserves","behavior") (required annotated))
+    "a local theorem annotation removed a default computational requirement"

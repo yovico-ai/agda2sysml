@@ -1,0 +1,15 @@
+mapping-version: 2
+project:
+  name: Witnessed state endpoints
+  agda-library: contracts.agda-lib
+  roots: [Witnessed]
+models:
+  recorded:
+    module: Witnessed
+    state: {type: Bool}
+    transition:
+      encoding: relation
+      symbol: Recorded
+      indices: {before: 0, after: 1}
+    contracts:
+      theorems: [source-preserves, target-preserves]

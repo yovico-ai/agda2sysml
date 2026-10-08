@@ -1,0 +1,20 @@
+mapping-version: 2
+project:
+  name: Indexed permits
+  agda-library: contracts.agda-lib
+  roots: [Indexed]
+models:
+  permits:
+    module: Indexed
+    state: {type: State}
+    commands: {type: Command}
+    transition:
+      encoding: function
+      symbol: step
+      arguments:
+        command: {position: 0}
+        before: {position: 1}
+      result: {state: return}
+    contracts:
+      invariants: [readPending, readReady, readMarked]
+      theorems: [retain-preserves, approve-preserves, flag-preserves, keep-preserves, set-pending, set-ready]

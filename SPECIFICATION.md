@@ -1,8 +1,10 @@
 # Agda to SysML specification
 
-Status: initial specification for review. Requirements describe the intended
+Status: alpha, work in progress. The implementation already supports useful
+models and explicitly reports its limits. Requirements describe the intended
 generator; the accompanying Agda modules establish the formal core identified
-below. A generator is not yet implemented.
+below. Full acceptance criteria remain unfinished. See the
+[alpha guide](docs/alpha.md) for implemented functionality and reproducible use.
 
 agda2sysml generates SysML models and a source-linked definition inventory from
 Agda specifications. The purpose is to make structures, operations, conditions,
@@ -35,8 +37,15 @@ generated model and inventory without becoming the authority for behavior.
 
 ## Inputs and generation stages
 
-The input consists of an Agda library, one or more entry modules, a versioned
-project mapping, and the library dependencies needed to check those modules.
+The default input consists of an Agda library, one or more entry modules, and
+the library dependencies needed to check those modules. YAML is optional.
+Without YAML the generator selects every declaration belonging to the input
+library in the checked import closure. It applies generic structural and
+computational rules, preserving modules, signatures, algorithm bodies and
+formal contracts where those rules apply. A local mapping adds modeling roles
+and presentation metadata; it cannot reduce this default required scope.
+The existing mapping-only invocation remains an explicitly selected model
+profile for compatibility.
 The requested entry modules and their import closure define the inspected
 corpus. An unimported source file is outside this invocation's scope, not
 silently counted as covered. The manifest must identify this scope.
@@ -44,7 +53,8 @@ silently counted as covered. The manifest must identify this scope.
 Generation has five stages:
 
 1. Check the input using Agda, resolve imports, and inventory declarations.
-2. Resolve and validate the mapping against those checked declarations.
+2. Select the project declarations and, when supplied, resolve and validate
+   local mapping annotations against those checked declarations.
 3. Extract source expressions and lower supported encodings into a typed
    intermediate model with provenance.
 4. Translate supported intermediate constructs to SysML and validate the result.
@@ -209,6 +219,26 @@ the boundary. It does not mean equivalent SysML semantics were generated.
 Diagnostic codes distinguish unsupported syntax, unsupported semantics,
 unsupported target representation, and interrupted or resource-limited work.
 
+Translation refusals use these categories at the failing rule boundary:
+
+- `unsupported-syntax`: the rule cannot read a checked term form, elimination,
+  binding/reference metadata, or source anchor.
+- `unsupported-semantics`: the form is understood, but the rule cannot justify
+  its meaning, such as additional matching behavior, recursion, opacity,
+  erased runtime data, or an unestablished type/index equality.
+- `unsupported-target-representation`: no admitted native carrier or calculation
+  representation covers the domain, family, specialization, or application.
+
+These describe generator limitations, not errors in an Agda specification that
+passed checking. Categories are assigned explicitly by rules, never inferred
+from explanation text. Dependency context preserves the underlying category.
+When all Boolean, homogeneous finite, and general algebraic calculation rules
+fail, the general algebraic refusal supplies the primary code. The ordered
+`causes` retain each attempted rule's code and explanation. Other refusal paths
+have an empty `causes` list. Each unresolved obligation contributes one error,
+regardless of how many rules were attempted; classification preserves its source
+identity, affected models, evidence status, and coverage contribution.
+
 A definition is semantically translated only when its required dependencies are
 also accounted for by applicable translation rules. A named call to an opaque
 helper may support navigation but cannot conceal an untranslated guard or effect.
@@ -228,7 +258,13 @@ Both modes retain inventory entries for all inspected declarations. The manifest
 lists the required translation scope separately from the inspected corpus:
 selected models and contracts plus their semantic dependency closure. Other
 inspected declarations remain accounted for, but cannot inflate a claim of full
-semantic coverage. The coverage report gives counts for each scope and status.
+semantic coverage. The coverage report gives counts for each scope and status. Checked preparation
+may refine the conservative source dependency graph. A dependency outside every
+prepared runtime root may be retained under a distinct `reduction-source`
+requirement only after the complete prepared graph passes translation. Its
+original requirement, checked source, and reduction context remain auditable;
+it is not presented as translated behavior. Selected roots and unresolved runtime
+dependencies cannot be reclassified this way.
 
 Diagnostics contain a stable code, source or mapping location, affected symbol
 and model, and the reason the operation failed or remained textual. A fatal
@@ -301,6 +337,23 @@ The first generator implementation is acceptable when:
 
 The validator is the official SysML Pilot Implementation release 2026-03 with
 its matching SysML 2.0 libraries, invoked through a headless Java adapter.
+
+Beta usefulness is measured against this project's own formal specification
+and substantial external domain models. The self specification must be usable
+without YAML. Every selected declaration must have an inspectable native
+representation or an explicit retained-source/unsupported boundary. Formal
+equality laws may be retained as proof contracts rather than executed; this
+must not turn an unsupported ordinary calculation into a translated theorem.
+Valid diagnostic SysML is useful partial output but is not a complete semantic
+translation. Coverage, validation, and behavior comparisons remain separate.
+Private external specifications, mappings and detailed acceptance artifacts
+must remain outside the public repository; public tests use independent inputs.
+
+The target uses direct domain types, calculations, and constraints. A generic
+Agda value/type representation and interpreter embedded in SysML is outside
+the chosen architecture. Each source construct needs a direct translation and
+its own correspondence argument, including dependent and higher-order terms.
+Source text alone cannot discharge an executable-behavior obligation.
 Diagram layout remains outside generator scope. Target expression rules must
 carry correspondence obligations before they count as semantic translations.
 
