@@ -201,9 +201,9 @@ compare complete field results and positional projections and reject mismatched
 schemas and members. These tests complement the formal laws and target validator;
 they are not an end-to-end proof of the Haskell compiler.
 
-Computed schema concatenation and higher-order handlers remain outside this
-rule. In particular, this support does not imply translation of `append`,
-`nativeAppend` or every definition in `AlgebraicValues`.
+Computed schema concatenation also supports `append` and `nativeAppend` through
+the structural calculation rule below. Higher-order handlers and other
+unsupported definitions in `AlgebraicValues` remain explicit refusals.
 
 ## First-order helper calls
 
@@ -547,6 +547,34 @@ Boolean-to-enumeration calculations, indexed sums, and specialized record fields
 Implementation tests check evaluation and refusal; native tests check helper
 results and valid/invalid computed constraints.
 
+
+## Computed structured indices
+
+After unindexed carriers are admitted, a separate pass can admit acyclic native
+helpers over those carriers. Indexed families consuming their results do not
+justify their own helpers. Every helper still needs a supported body and complete
+call closure; a signature alone is insufficient.
+
+A recursive list helper has a finite concatenation normal form only when its
+checked native body matches both constructor equations: the empty branch returns
+the second input, and the prepend branch retains the head and recursively joins
+the tail with the second input. Applicability uses checked shapes, signatures,
+case semantics and safe termination evidence; it does not inspect function names.
+Mutual or other recursive index computations remain unsupported.
+
+Comparison uses the certified concatenation form, flattens nested ordered
+sequences, and handles empty contributions. List indices compare their contents;
+existing type/family binding checks remain. This permits dependent field append
+without inferring a split of inputs from an equal concatenated result. Native
+calculations and constraints retain the original helper calls and their lexical
+parameter bindings. No normalization evaluator is embedded in the target.
+
+`SchemaConcatenation` proves the characterization, source/native correspondence,
+and associative grouping laws for arbitrary atom carriers and finite lists.
+The adapter must establish the equations from the checked body. Tests exercise
+arbitrary helper names, altered equations, missing bodies/termination evidence,
+and refusal to recover ambiguous inputs, alongside complete field results from
+the project's own `append` and `nativeAppend` emitted as SysML.
 
 ## Naturals, ordered lists, and checked recursion
 

@@ -1505,6 +1505,47 @@ sequenceChecks base = do
   check (isLeft (A.functions unchecked M.empty shapes M.! "shift")) "recursive function flag alone admitted a call cycle"
   check (isLeft (A.functions broken M.empty shapes M.! "shift")) "recursive cycle concealed a refused external dependency"
 
+  -- Recognize structural equations at arbitrary identities, not a library
+  -- function name. The consuming family is admitted only after its helper.
+  forM_ ["join","combine"] $ \helper -> do
+    let joinedType index = object ["term" .= call "Joined" [index] []]
+        joined = set "constructors" (toJSON (["joined"] :: [Text])) $
+          declaration "Joined" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        constructorDef = set "family" (String "Joined") $
+          declaration "joined" "constructor" (signature [named "ListNat",named "ListNat"]
+            (joinedType (call helper [variable 1 [],variable 0 []] [])))
+        helperDef headValue = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat","ListNat"] "ListNat" (split 0
+            [("nil",0,done 1 (variable 0 [])),("cons",2,done 3 (constructor "cons"
+              [headValue,call helper [variable 1 [],variable 0 []] []]))])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [joined,constructorDef,helperDef (variable 2 [])]
+        (admitted,refused) = A.discover valid M.empty
+        calcs = A.functions valid M.empty admitted
+    check (M.member "Joined" admitted && M.notMember "Joined" refused) "structural index helper failed stratified admission"
+    helperCalc <- either (fail . show) pure (calcs M.! helper)
+    native <- traverse (either (fail . show) pure) calcs
+    forM_ [[],[0],[2,2,0]] $ \left -> forM_ [[],[1],[2,2]] $ \right ->
+      check (evalWith native [list left,list right] (A.body helperCalc) == list (left ++ right)) "named structural helper changed concatenation"
+    let one = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= (1 :: Integer)]]
+        modified = add [joined,constructorDef,helperDef (call "add" [variable 2 [],one] [])]
+        noEvidence = valid {document = document base}
+        signatureOnly = valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}
+    forM_ [modified,noEvidence,signatureOnly] $ \invalid ->
+      check (M.notMember "Joined" (fst (A.discover invalid M.empty))) "unjustified recursive index equation admitted"
+    let joinedSchema = joinedType (call helper [variable 1 [],variable 0 []] [])
+        implicitRead = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)]) $
+          set "type" (signature [named "ListNat",named "ListNat",joinedSchema] (named "Nat")) $
+          operation "implicitRead" [] "Nat" (done 1 one)
+        fixedSchema = joinedType (call helper [constructor "nil" [],constructor "nil" []] [])
+        recoverCaller = set "type" (signature [fixedSchema] (named "Nat")) $
+          operation "recoverJoined" [] "Nat" (done 1 (call "implicitRead" [variable 0 []] []))
+        recovery = add [joined,constructorDef,helperDef (variable 2 []),implicitRead,recoverCaller]
+        recoveryShapes = fst (A.discover recovery M.empty)
+    check (isLeft (A.functions recovery M.empty recoveryShapes M.! "recoverJoined"))
+      "concatenation result was used to recover an unjustified split of its inputs"
+
 -- Default selection must cover independent definitions and must not infer proof
 -- roles from a declaration's spelling or from a local annotation.
 automaticSelectionChecks :: IO ()

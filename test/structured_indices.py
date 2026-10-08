@@ -18,7 +18,7 @@ def verify_structured_indices(output):
     prefix = 'Agda2SysML.AlgebraicValues.'
     suffix = '<type parameter 0, type family 1>'
     roots = {}
-    for operation in ('encodeFields', 'decodeFields', 'project', 'nativeProject'):
+    for operation in ('encodeFields', 'decodeFields', 'project', 'nativeProject', 'append', 'nativeAppend'):
         rows = [o for o in report['obligations'] if o['symbol'].startswith(prefix + operation + '#')
                 and '@' not in o['symbol'] and o['sourceKind'] == 'behavior']
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], ('field operation missing', operation)
@@ -46,7 +46,7 @@ def verify_structured_indices(output):
     member_index = next(f for f, _, _, _ in member_fields if f.endswith('.index0'))
     member_payload = next(f for f, _, _, _ in member_fields if f.endswith('.value'))
     schema_type = model.calculations[roots['encodeFields']][0][-2][1]
-    comparisons = repeated_positions = rejected = binding_cases = 0
+    comparisons = repeated_positions = rejected = binding_cases = append_comparisons = 0
 
     def refuse(action):
         nonlocal rejected
@@ -112,6 +112,21 @@ def verify_structured_indices(output):
                         comparisons += 2
                         repeated_positions += int(layout.count(atom) > 1)
 
+        inputs = [(layout, choices) for length in range(3)
+                  for layout in itertools.product(atoms, repeat=length)
+                  for choices in itertools.product(range(2), repeat=length)]
+        for (left, left_choices), (right, right_choices) in itertools.product(inputs, repeat=2):
+            layout, choices = left + right, left_choices + right_choices
+            appended = model.invoke(roots['append'], [*binding, schema(left), schema(right),
+                                    fields(left, left_choices), fields(right, right_choices)])
+            native = model.invoke(roots['nativeAppend'], [*binding, schema(left), schema(right),
+                                  fields(left, left_choices, True), fields(right, right_choices, True)])
+            assert same(appended, fields(layout, choices)), ('source append lost/reordered members', left, right)
+            assert same(native, fields(layout, choices, True)), ('native append lost/reordered members', left, right)
+            assert same(model.invoke(roots['encodeFields'], [*binding, schema(layout), appended]), native)
+            assert same(model.invoke(roots['decodeFields'], [*binding, schema(layout), native]), appended)
+            append_comparisons += 4
+
         a, b = atoms[:2]
         source = fields((a, b, a), (0, 1, 1))
         refuse(lambda: model.invoke(roots['encodeFields'], [*binding, schema((b, a, a)), source]))
@@ -120,6 +135,9 @@ def verify_structured_indices(output):
         refuse(lambda: call('Fields.cons', [a, schema((a,)), member(a, 0), fields((b,), (0,))], binding))
         refuse(lambda: model.invoke(roots['project'], [*binding, b, schema((a, b, a)), position((a, b, a), 2), source]))
         refuse(lambda: model.invoke(roots['project'], [*binding, a, schema((a, b, a)), position((a,), 0), source]))
+        refuse(lambda: model.invoke(roots['append'], [*binding, schema((b, a, a)), schema(()), source, fields((), ())]))
+        refuse(lambda: model.invoke(roots['nativeAppend'], [*binding, schema(()), schema((b, a, a)),
+                      fields((), (), True), fields((a, b, a), (0, 1, 1), True)]))
 
     opaque_atoms = (Record('OpaqueAtom', (('id', 0),)), Record('OpaqueAtom', (('id', 1),)))
     for stored, supplied in (((True, False), (False, True)),
@@ -138,7 +156,8 @@ def verify_structured_indices(output):
     layout = source.get(model.results[prefix + 'Fields.nil' + suffix] + '.index0')
     refuse(lambda: model.invoke(roots['encodeFields'], [(False, True), (), layout, source]))
 
-    return {'operations': 4, 'comparisons': comparisons, 'repeatedPositions': repeated_positions,
+    return {'operations': 6, 'comparisons': comparisons, 'appendComparisons': append_comparisons,
+            'repeatedPositions': repeated_positions,
             'invalidSchemasRejected': rejected, 'completeMembersPreserved': True,
             'reorderedBindings': binding_cases,
             'source': 'parsed emitted SysML'}
