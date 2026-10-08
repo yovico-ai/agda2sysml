@@ -300,7 +300,8 @@ models:
     check(recursive_evidence["totalComparisons"] >= 1000 and recursive_evidence["invalidCasesRejected"] >= 10,
           "recursive core lacks parsed results and index/finiteness/capture checks")
     structured_evidence = verify_structured_indices(self_output)
-    check(structured_evidence["comparisons"] == 18116 and structured_evidence["invalidSchemasRejected"] == 13
+    check(structured_evidence["comparisons"] == 18116 and structured_evidence["appendComparisons"] == 9160
+          and structured_evidence["invalidSchemasRejected"] == 17
           and structured_evidence["repeatedPositions"] > 1000 and structured_evidence["reorderedBindings"] == 3,
           "structured indices lack ordered schemas, complete members, or invalid-index refusals")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
