@@ -61,6 +61,7 @@ formal gate alone does not imply that a SysML emitter has been tested.
 | [FiniteLowering](Agda2SysML/FiniteLowering.agda) | Exhaustive finite constructor cases preserve every input substitution; native ordered equality tests select the same branch | Concrete enum identities and textual rendering must satisfy the finite carrier correspondence |
 | [DependentFamilies](Agda2SysML/DependentFamilies.agda) | Every dependent family is equivalent to the fibres of its own indexed carrier, in both directions and without K | Native domain types and index constraints must implement that carrier and its projection; arbitrary proof erasure is not justified |
 | [AlgebraicValues](Agda2SysML/AlgebraicValues.agda) | Typed products and admissible sums preserve fields, payload binding, round trips, distinct constructors, tag preservation, inactive-slot absence, and dispatch | Checked schemas and native field multiplicities must implement the abstract carriers |
+| [StructuredIndices](Agda2SysML/StructuredIndices.agda) | Ordered index transport round-trips, preserves and reflects equality, and preserves complete dependent members | Checked constructor payloads, sequence order and repeated positions must survive extraction and rendering |
 | [FirstOrder](Agda2SysML/FirstOrder.agda) | Every function in a finite program preserves evaluation under lowering, including ordered nested calls | Bodies can call only preceding definitions; compiler extraction and native invocation must implement the typed expressions, with separate preservation evidence for primitive operations |
 | [Specialization](Agda2SysML/Specialization.agda) | Type substitution preserves interpretation for arbitrary families; closed instantiation preserves values in both directions and transports first-order operations | Concrete-use discovery, checked binder interpretation, identity generation, and native lowering must instantiate these laws; open parameters and dependent value indices are outside the rule |
 
@@ -141,6 +142,13 @@ its selected payload, encoding injectivity, constructor distinction, and
 dispatch preservation for arbitrary branch functions. Native field cardinality,
 exact-type constraints, and checked compiler telescope order instantiate these
 laws; the Agda proof does not parse or execute SysML.
+
+`StructuredIndices` quantifies over arbitrary atom carriers with an invertible
+representation. Mapping atoms through an ordered schema preserves every
+position and repeated occurrence. Equality reflection prevents distinct schemas
+from being merged, and dependent transport preserves the entire member. The
+implementation tests execute field encoding, decoding and positional projection
+from parsed SysML; they also reject mismatched layouts and member indices.
 
 `FiniteLowering` generalizes exhaustive nullary constructor cases to every finite
 domain size. Its lowering law quantifies over arbitrary input substitutions;

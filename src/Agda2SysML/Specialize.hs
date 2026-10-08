@@ -28,7 +28,7 @@ data Type = Parameter Int | Open Int Integer | Named Text [Type] | Level LevelEx
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
 -- Runtime positions are absolute within a value telescope. Static arguments
 -- on proper projections are retained until those declarations are cloned.
-data IndexExpr = IndexInput Int | IndexCaptured Int | IndexConstructor Text [Type]
+data IndexExpr = IndexInput Int | IndexCaptured Int | IndexConstructor Text [Type] [IndexExpr]
   | IndexNatural Integer | IndexSuccessor IndexExpr
   | IndexProject Text [Type] IndexExpr | IndexCall Text [Type] [IndexExpr] deriving (Eq,Ord,Show)
 
@@ -62,6 +62,7 @@ shiftIndices offset = mapIndices go
   where
     go (IndexInput i) = IndexInput (i+offset)
     go (IndexSuccessor i) = IndexSuccessor (go i)
+    go (IndexConstructor c ts xs) = IndexConstructor c (map (shiftIndices offset) ts) (map go xs)
     go (IndexProject f ts i) = IndexProject f (map (shiftIndices offset) ts) (go i)
     go (IndexCall f ts xs) = IndexCall f (map (shiftIndices offset) ts) (map go xs)
     go ix = ix
@@ -71,6 +72,7 @@ materializeCaptures = mapIndices go
   where
     go (IndexCaptured slot) = IndexInput slot
     go (IndexSuccessor i) = IndexSuccessor (go i)
+    go (IndexConstructor c ts xs) = IndexConstructor c (map materializeCaptures ts) (map go xs)
     go ix = ix
 
 staticArguments :: [Type] -> [Type]
@@ -175,11 +177,7 @@ readType inv env t = case string (get "tag" t) of
     if c `elem` [builtin inv "zero",builtin inv "suc"] && not (T.null c)
       then readIndex inv env (Named (builtin inv "nat") []) t
       else do
-        unless (null (array (get "eliminations" t))) (refuse Representation "Index constructor has payloads")
-        d <- maybe (refuse Syntax "Unknown index constructor") Right (M.lookup c (declarations inv))
-        ty <- field inv "type" d
-        result <- readType inv [] (get "term" ty)
-        pure (Runtime result (IndexConstructor c []))
+        readConstructorIndex inv env Nothing t
   "literal" | get "tag" (get "literal" t) == String "natural" ->
     Runtime (Named (builtin inv "nat") []) . IndexNatural <$> natural (get "value" (get "literal" t))
   "definition" | string (get "symbol" t) `S.member` S.fromList (filter (not . T.null) [builtin inv k | k <- ["levelZero","levelSuc","levelMax"]]) ->
@@ -261,20 +259,67 @@ readIndex inv env expected term
         _ -> refuse Representation "Unsupported natural index constructor"
       pure (Runtime expected index)
   | get "tag" term == String "constructor" = do
-      unless (null (array (get "eliminations" term))) (refuse Representation "Index constructor has payloads")
-      let c = string (get "symbol" term)
-      d <- maybe (refuse Syntax "Unknown index constructor") Right (M.lookup c (declarations inv))
-      sig <- signature inv d
-      args <- case expected of Named _ xs -> Right (staticArguments xs); _ -> refuse Representation "Index domain is not a named finite type"
-      result <- substitute args (output sig)
-      unless (parameters sig == length args && null (inputs sig) && result == expected)
-        (refuse Semantics "Index constructor has wrong domain or static parameters")
-      pure (Runtime expected (IndexConstructor c args))
+      actual <- readConstructorIndex inv env (Just expected) term
+      case actual of
+        Runtime domain _ | domain == expected -> Right actual
+        _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
       actual <- readType inv env term
       case actual of
         Runtime domain _ | domain == expected -> Right actual
         _ -> refuse Semantics "Index expression has the wrong declared domain"
+
+-- Constructor terms omit static parameters. Recover them from the expected
+-- result and ordered payload types, then check every dependent payload against
+-- the instantiated telescope. No constructor names or schema shapes are assumed.
+readConstructorIndex :: Inventory -> [Maybe Type] -> Maybe Type -> Value -> Either Refusal Type
+readConstructorIndex inv env expected term = do
+  let c = string (get "symbol" term)
+  d <- maybe (refuse Syntax "Unknown index constructor") Right (M.lookup c (declarations inv))
+  sig <- signature inv d
+  values <- traverse app (array (get "eliminations" term))
+  unless (length values == length (inputs sig)) (refuse Representation "Index constructor payload arity mismatch")
+  initial <- maybe (Right M.empty) (unify M.empty (output sig)) expected
+  (known,payloads) <- foldM (step sig) (initial,[]) (zip (inputs sig) values)
+  final <- complete sig known
+  args <- traverse (\i -> maybe (refuse Representation "Cannot recover index constructor parameter") Right (M.lookup i final)) [0..parameters sig-1]
+  result <- substitute args (output sig)
+  pure (Runtime (replaceInputs payloads result) (IndexConstructor c args payloads))
+  where
+    step sig (known,prior) (domain,value) = do
+      completed <- complete sig known
+      let args = [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
+      concrete <- replaceInputs prior <$> substitute args domain
+      actual <- if hasParameter concrete then readType inv env value else readIndex inv env concrete value
+      case actual of
+        Runtime actualDomain ix -> do
+          next <- unify completed domain actualDomain
+          pure (next,prior ++ [ix])
+        _ -> refuse Semantics "Constructor index payload is not a runtime value"
+    hasParameter Parameter{} = True
+    hasParameter FamilyParameter{} = True
+    hasParameter (Named _ xs) = any hasParameter xs
+    hasParameter (FamilyApplication f xs) = hasParameter f || any hasParameter xs
+    hasParameter (Runtime ty _) = hasParameter ty
+    hasParameter _ = False
+    -- Signature reading also runs before specialization, when carrier
+    -- parameters are symbolic. Only concrete carriers determine a level here.
+    complete sig known = foldM step known (zip [0..] (parameterKinds sig))
+      where
+        step table (i,TypeKind level) = case M.lookup i table of
+          Just ty | closed ty -> universeOf inv ty >>= constrainLevel table level
+          _ -> Right table
+        step table _ = Right table
+
+replaceInputs :: [IndexExpr] -> Type -> Type
+replaceInputs values = mapIndices go
+  where
+    go (IndexInput i) | i < length values = values !! i
+    go (IndexConstructor c ts xs) = IndexConstructor c (map (replaceInputs values) ts) (map go xs)
+    go (IndexSuccessor x) = IndexSuccessor (go x)
+    go (IndexProject f ts x) = IndexProject f (map (replaceInputs values) ts) (go x)
+    go (IndexCall f ts xs) = IndexCall f (map (replaceInputs values) ts) (map go xs)
+    go x = x
 
 projectIndex :: Inventory -> Type -> Value -> Either Refusal Type
 projectIndex inv (Runtime (Named owner args) receiver) elimination = do
@@ -358,7 +403,7 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
   where
     go (IndexProject f ts receiver) = IndexProject f <$> traverse (substitute args) ts <*> go receiver
     go (IndexCall f ts values) = IndexCall f <$> traverse (substitute args) ts <*> traverse go values
-    go (IndexConstructor c ts) = IndexConstructor c <$> traverse (substitute args) ts
+    go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (substitute args) ts <*> traverse go xs
     go (IndexSuccessor i) = IndexSuccessor <$> go i
     go i = Right i
 closed :: Type -> Bool
@@ -371,7 +416,7 @@ closed (Runtime ty index) = closed ty && go index
   where
     go IndexCaptured{} = True
     go IndexInput{} = False
-    go (IndexConstructor _ args) = all closed args
+    go (IndexConstructor _ args xs) = all closed args && all go xs
     go (IndexProject _ ts receiver) = all closed ts && go receiver
     go (IndexCall _ ts values) = all closed ts && all go values
     go (IndexSuccessor i) = go i
@@ -487,7 +532,8 @@ indexValue (IndexInput i) = object ["input" .= i]
 indexValue (IndexCaptured i) = object ["capture" .= i]
 indexValue (IndexNatural n) = object ["natural" .= n]
 indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
-indexValue (IndexConstructor c args) = object ["constructor" .= c,"arguments" .= map typeValue args]
+indexValue (IndexConstructor c args values) = object (["constructor" .= c,"arguments" .= map typeValue args]
+  ++ ["values" .= map indexValue values | not (null values)])
 indexValue (IndexCall f args values) = object
   ["calculation" .= f,"arguments" .= map typeValue args,"values" .= map indexValue values]
 indexValue (IndexProject f args receiver) = object
@@ -538,7 +584,8 @@ indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
 indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .= (depth-i-1),"eliminations" .= ([] :: [Value])]
 indexTerm _ (IndexNatural n) = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= n]]
 indexTerm depth (IndexSuccessor i) = object ["tag" .= ("native-index-successor" :: Text),"predecessor" .= indexTerm depth i]
-indexTerm _ (IndexConstructor c args) = object ["tag" .= ("constructor" :: Text),"symbol" .= instanceKey c args,"eliminations" .= ([] :: [Value])]
+indexTerm depth (IndexConstructor c args values) = object ["tag" .= ("constructor" :: Text),"symbol" .= instanceKey c args
+  ,"eliminations" .= map (application . indexTerm depth) values]
 indexTerm depth (IndexCall f args values) = object ["tag" .= ("definition" :: Text),"symbol" .= instanceKey f args
   ,"eliminations" .= map (application . indexTerm depth) values]
 indexTerm depth (IndexProject f args receiver) = let t = indexTerm depth receiver in
@@ -669,7 +716,8 @@ showType inv (Runtime _ index) = showIndex index
     showIndex (IndexInput i) = "input" <> T.pack (show i)
     showIndex (IndexNatural n) = T.pack (show n)
     showIndex (IndexSuccessor i) = "suc(" <> showIndex i <> ")"
-    showIndex (IndexConstructor c args) = display inv c <> suffix inv args
+    showIndex (IndexConstructor c args values) = display inv c <> suffix inv args
+      <> (if null values then "" else "(" <> T.intercalate ", " (map showIndex values) <> ")")
     showIndex (IndexCall f args values) = display inv f <> suffix inv args <> "(" <> T.intercalate ", " (map showIndex values) <> ")"
     showIndex (IndexProject f args receiver) = "(" <> showIndex receiver <> ")." <> display inv f <> suffix inv args
 showType _ (Parameter i) = "?" <> T.pack (show i)
@@ -844,6 +892,7 @@ ensureIndex inv (IndexCall f args values) = do
   ensureFunction inv [] f args
 ensureIndex inv (IndexProject _ _ receiver) = ensureIndex inv receiver
 ensureIndex inv (IndexSuccessor i) = ensureIndex inv i
+ensureIndex inv (IndexConstructor _ _ xs) = mapM_ (ensureIndex inv) xs
 ensureIndex _ _ = pure ()
 
 -- The compiled value environment is independent of type-codomain binding.
@@ -1041,6 +1090,9 @@ expression inv stack env expected term = do
               where
                 replace (IndexInput i) | i < runtimeParameters, i < length contextualIndices = contextualIndices !! i
                 replace (IndexSuccessor ix) = IndexSuccessor (replace ix)
+                replace (IndexConstructor c ts xs) = IndexConstructor c (map contextualize ts) (map replace xs)
+                replace (IndexProject f ts ix) = IndexProject f (map contextualize ts) (replace ix)
+                replace (IndexCall f ts xs) = IndexCall f (map contextualize ts) (map replace xs)
                 replace ix = ix
             valueSig = sig {inputs = map contextualize (drop runtimeParameters (inputs sig))
               , output = contextualize (output sig)}

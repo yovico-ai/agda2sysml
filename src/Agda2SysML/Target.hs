@@ -280,8 +280,8 @@ generate original = Generated text report problems (null problems)
       ,"algebraicCarriers" .= Algebraic.carrierReport targetLabel algebraicShapes
       ,"indexContracts" .= [object ["symbol" .= Algebraic.calculationSymbol c
         ,"target" .= targetReference (Algebraic.calculationSymbol c)
-        ,"constraints" .= Algebraic.calculationContracts targetLabel c]
-        | AlgebraicCalculation c <- emitted,not (null (Algebraic.calculationContracts targetLabel c))]
+        ,"constraints" .= Algebraic.calculationContractsIn algebraicShapes targetLabel c]
+        | AlgebraicCalculation c <- emitted,not (null (Algebraic.calculationContractsIn algebraicShapes targetLabel c))]
       ,"calculationDependencies" .= [object ["symbol" .= Algebraic.calculationSymbol c
         ,"target" .= targetReference (Algebraic.calculationSymbol c)
         ,"callees" .= [object ["symbol" .= s,"target" .= targetReference s] | s <- S.toAscList (Algebraic.dependencies c)]]
