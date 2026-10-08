@@ -174,6 +174,37 @@ their inputs. The independent algebraic expression tests cover those lowering
 operations; they are not a claim that the Pilot executes them correctly, or an
 end-to-end proof of the emitter.
 
+## Ordered schemas as dependent indices
+
+Checked constructor values can appear in a dependent index with their ordered,
+typed payloads. Static parameters come from the constructor's expected result
+and payload telescope; each payload is checked in the preceding payload context.
+Unresolved parameters, wrong domains and wrong payload arities remain refusals.
+
+List schemas use the native ordered, nonunique sequence carrier. Empty and cons
+indices retain every atom, including repeated atoms at distinct positions.
+Schema construction in validity and calculation constraints carries the same
+type-parameter binding as the corresponding value. Schema equality compares
+the ordered contents; it does not compare extent bindings as list elements.
+Existing membership constraints require the same extent and permit reordered bindings.
+Constructor matching can
+refine a schema's head and tail and justify a later lazy match only when its
+constructor is uniquely determined. This does not infer injectivity for
+arbitrary calculation calls.
+
+The generator translates its own `AlgebraicValues.Fields`, `NativeFields` and
+`Position`, together with `encodeFields`, `decodeFields`, `project` and
+`nativeProject`. Members of a parameterized meaning family retain their complete
+payloads and atom indices. `StructuredIndices` proves schema equality reflection
+and complete-member transport for arbitrary atom carriers. Parsed SysML tests
+compare complete field results and positional projections and reject mismatched
+schemas and members. These tests complement the formal laws and target validator;
+they are not an end-to-end proof of the Haskell compiler.
+
+Computed schema concatenation and higher-order handlers remain outside this
+rule. In particular, this support does not imply translation of `append`,
+`nativeAppend` or every definition in `AlgebraicValues`.
+
 ## First-order helper calls
 
 `native.first-order-calls` admits functions over the existing Boolean,

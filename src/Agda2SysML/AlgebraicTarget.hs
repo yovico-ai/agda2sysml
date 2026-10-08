@@ -5,7 +5,7 @@
 module Agda2SysML.AlgebraicTarget
   ( Carrier(..), Shape(..), pattern Shape, Constructor(..), Calculation(..), Expression(Input, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Absent)
   , discover, function, symbols, renderShapes, renderShapesIn, renderCalculation, renderCalculationDoc, references
-  , constructorCalculations, naturalCalculations, generatedNames, carrierReport, functions, calls, calculationContracts, dependencies ) where
+  , constructorCalculations, naturalCalculations, generatedNames, carrierReport, functions, calls, calculationContracts, calculationContractsIn, dependencies ) where
 
 import qualified Agda2SysML.Derivation as D
 import Agda2SysML.Inventory hiding (field)
@@ -196,13 +196,22 @@ indexExpression inv finite helpers shapes env expected t = do
               pure (Natural,Numeric "+" value (NumberLiteral 1))
             _ -> refuse Syntax "Successor index arity mismatch"
         "constructor" -> do
-          unless (null es) (refuse Representation "Finite index constructor has arguments")
           let c = string (get "symbol" term)
-          if c == builtin inv "true" then Right (Boolean,Literal True)
-          else if c == builtin inv "false" then Right (Boolean,Literal False)
-          else case [F.domainSymbol d | d <- M.elems finite,c `elem` F.constructors d] of
-            [owner] -> Right (Named owner,Enumeration owner c)
-            _ -> refuse Representation "Index constructor has no finite domain"
+          case M.lookup c (constructorTable shapes) of
+            Just (sh,con) -> do
+              unless (length es == length (payload con)) (refuse Syntax "Structured index constructor arity mismatch")
+              values <- foldM (\prior ((_,typ),arg) -> do
+                value <- applicationValue arg >>= indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) typ)
+                pure (prior ++ [value])) [] (zip (payload con) es)
+              pure (familyCarrier sh (map (instantiate values) (resultIndices con)),
+                Construct (shapeSymbol sh) (construction (Just term) sh con values))
+            Nothing -> do
+              unless (null es) (refuse Representation "Unadmitted index constructor has arguments")
+              if c == builtin inv "true" then Right (Boolean,Literal True)
+              else if c == builtin inv "false" then Right (Boolean,Literal False)
+              else case [F.domainSymbol d | d <- M.elems finite,c `elem` F.constructors d] of
+                [owner] -> Right (Named owner,Enumeration owner c)
+                _ -> refuse Representation "Index constructor has no admitted domain"
         "definition" -> case M.lookup (string (get "symbol" term)) helpers of
           Just helper -> do
             unless (length es == length (inputs helper)) (refuse Syntax "Computed index helper arity mismatch")
@@ -290,9 +299,19 @@ normalizeStep (Numeric op x y) = case (op,normalize x,normalize y) of
   ("monus",Numeric "+" a (NumberLiteral b),NumberLiteral c) | b >= c -> normalizeStep (Numeric "+" a (NumberLiteral (b-c)))
   ("monus",NumberLiteral a,NumberLiteral b) -> NumberLiteral (max 0 (a-b))
   (_,a,b) -> Numeric op a b
-normalizeStep (Sequence xs) = Sequence (map normalize xs)
-normalizeStep (SequenceOp op xs) = SequenceOp op (normalize xs)
-normalizeStep (SequenceHead t xs) = SequenceHead t (normalize xs)
+normalizeStep (Sequence xs) = Sequence (concatMap flatten (map normalize xs))
+  where flatten (Sequence ys) = ys
+        flatten x = [x]
+normalizeStep (SequenceOp op xs) = case (op,normalize xs) of
+  ("isEmpty",Sequence []) -> Literal True
+  ("isEmpty",Sequence (_:_)) -> Literal False
+  ("tail",Sequence (_:rest)) -> case rest of
+    [Project value field] | field == sequenceField -> Project value field
+    _ -> Sequence rest
+  (_,value) -> SequenceOp op value
+normalizeStep (SequenceHead t xs) = case normalize xs of
+  Sequence (x:_) -> x
+  value -> SequenceHead t value
 normalizeStep (Conditional p x y) = Conditional (normalize p) (normalize x) (normalize y)
 normalizeStep e = e
 
@@ -337,10 +356,10 @@ discover inv finite = go M.empty candidates
       && get "kind" d `elem` [String "record",String "datatype"]
       && not (get "kind" d == String "datatype" && S.member (s,"behavior") (required inv))
       && s /= builtin inv "bool" && s /= builtin inv "nat" && not (M.member s finite))) (declarations inv)
-    header d = do
+    header accepted d = do
       unless (get "kind" d == String "datatype" && get "parameters" d == Number 0) (refuse Representation "No provisional datatype header")
       ty <- field inv "type" d
-      (args,_,out) <- typedTelescope inv finite helpers M.empty ty
+      (args,_,out) <- typedTelescope inv finite helpers accepted ty
       unless (get "tag" (get "term" out) == String "sort") (refuse Representation "Invalid datatype header")
       pure ((Shape (string (get "name" d)) False [] args) {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d})
     deps sh = S.fromList [s | t <- indexTypes sh ++ case sequenceElement sh of
@@ -350,7 +369,7 @@ discover inv finite = go M.empty candidates
     close accepted table = let next = M.filter (\sh -> deps sh `S.isSubsetOf` (M.keysSet accepted `S.union` M.keysSet table `S.union` M.keysSet finite)) table
       in if M.keysSet next == M.keysSet table then table else close accepted next
     go accepted pending = let
-      headers = M.mapMaybe (either (const Nothing) Just . header) pending
+      headers = M.mapMaybe (either (const Nothing) Just . header accepted) pending
       attempts = M.map (shape inv finite helpers (M.union accepted headers)) pending
       parsed = close accepted (M.mapMaybe (either (const Nothing) Just) attempts)
       components = stronglyConnComp [(sh,s,S.toList (deps sh)) | (s,sh) <- M.toList parsed]
@@ -662,8 +681,12 @@ functionWith inv finite helpers shapes signatures d = do
     alternatives (Fibre s indices) selected = do
       sh <- maybe (refuse Representation "Missing indexed carrier") Right (M.lookup s shapes)
       pure [(constructorSymbol c,payload c) | c <- variants sh,compatible indices (endpoints selected c)]
-    alternatives (Named s) _ = case M.lookup s shapes of
-      Just sh -> Right [(constructorSymbol c,payload c) | c <- variants sh]
+    alternatives (Named s) selected = case M.lookup s shapes of
+      Just sh -> let options = [(constructorSymbol c,payload c) | c <- variants sh]
+        in Right $ case (sequenceElement sh,normalize (Project selected sequenceField)) of
+          (Just _,Sequence []) -> take 1 options
+          (Just _,Sequence (_:_)) -> drop 1 options
+          _ -> options
       Nothing -> maybe (refuse Representation "Missing case carrier") (Right . map (,[]) . F.constructors) (M.lookup s finite)
     endpoints selected c = map (instantiate [Project selected f | (f,_) <- payload c]) (resultIndices c)
     distinct (Literal a) (Literal b) = a /= b
@@ -671,6 +694,8 @@ functionWith inv finite helpers shapes signatures d = do
     distinct (NumberLiteral a) (NumberLiteral b) = a /= b
     distinct (NumberLiteral 0) (Numeric "+" _ (NumberLiteral k)) = k > 0
     distinct (Numeric "+" _ (NumberLiteral k)) (NumberLiteral 0) = k > 0
+    distinct (Construct s [(f,Sequence xs)]) (Construct t [(g,Sequence ys)])
+      | s == t && f == sequenceField && g == sequenceField = null xs /= null ys
     distinct _ _ = False
     compatible xs ys = length xs == length ys && not (or (zipWith distinct (map (expand helpers) xs) (map (expand helpers) ys)))
     branchEquations (Fibre s xs) selected c = do
@@ -684,15 +709,26 @@ functionWith inv finite helpers shapes signatures d = do
         orient (Numeric "+" x (NumberLiteral a),Numeric "+" y (NumberLiteral b)) | a == b = orient (x,y)
         orient (NumberLiteral a,Numeric "+" y (NumberLiteral b)) | a >= b = orient (NumberLiteral (a-b),y)
         orient (Numeric "+" x (NumberLiteral a),NumberLiteral b) | b >= a = orient (x,NumberLiteral (b-a))
+        orient (Construct s [(f,x)],Construct t [(g,y)])
+          | s == t && f == sequenceField && g == sequenceField = orientSequence (x,y)
+        orient (Sequence (x:xs),Sequence (y:ys)) = orient (x,y) ++ orient (Sequence xs,Sequence ys)
         orient (x,y) | x == y = []
                      | isReference x = [(x,y)]
                      | isReference y = [(y,x)]
                      | otherwise = []
+        orientSequence (Sequence [x,Project xs f],Sequence [y,Project ys g])
+          | f == sequenceField && g == sequenceField = orient (x,y) ++ orient (xs,ys)
+        orientSequence values = orient values
     branchEquations Boolean selected c = Right [(selected,Literal (c == builtin inv "true"))]
     branchEquations Natural selected c | c == builtin inv "zero" = Right [(selected,NumberLiteral 0)]
     branchEquations Natural selected c | c == builtin inv "suc" =
       Right [(Numeric "+" (Numeric "monus" selected (NumberLiteral 1)) (NumberLiteral 1),selected)]
     branchEquations (Named s) selected c | M.member s finite = Right [(selected,Enumeration s c)]
+    branchEquations (Named s) selected _ | Just sh <- M.lookup s shapes, Just _ <- sequenceElement sh =
+      Right $ case normalize (Project selected sequenceField) of
+        Sequence [_,Project tailValue field] | field == sequenceField ->
+          [(Construct s [(sequenceField,Project tailValue sequenceField)],tailValue)]
+        _ -> []
     branchEquations _ _ _ = Right []
     isReference Input{} = True
     isReference Project{} = True
@@ -784,21 +820,22 @@ functionWith inv finite helpers shapes signatures d = do
               value <- applicationValue e >>= expressionExpected (if dropped == 0 then Just contextType else Nothing) equationsInScope env
               pure (prior ++ [value])) [] (zip (drop dropped ins) apps)
             -- Recover omitted finite inputs from the actual principal fibre.
-            known <- foldM recover M.empty (zip (drop dropped ins) (map fst actuals))
+            known <- foldM (recover equationsInScope) M.empty (zip (drop dropped ins) (map fst actuals))
             prefix <- traverse (\i -> maybe (refuse Semantics "Cannot recover omitted finite index") Right (M.lookup i known)) [0..dropped-1]
             let args = prefix ++ map snd actuals
                 supplied = zip (drop dropped ins) actuals
             mapM_ (\(expected,value) -> () <$ requireType equationsInScope (mapCarrier (instantiate args) expected) value) supplied
             eliminate (mapCarrier (instantiate args) out,Call callee args) rest
         _ -> refuse Syntax "Term requires a rule beyond algebraic construction and projection"
-    recover known (Fibre s xs,Fibre t ys) | s == t && length xs == length ys = foldM bind known (zip xs ys)
+    recover equations known (Fibre s xs,Fibre t ys) | s == t && length xs == length ys = foldM bind known (zip xs ys)
       where
         bind table (Input i,y) = case M.lookup i table of
           Nothing -> Right (M.insert i y table)
-          Just x | expand helpers x == expand helpers y -> Right table
+          Just x | canonical x == canonical y -> Right table
           _ -> refuse Semantics "Inconsistent omitted index"
         bind table _ = Right table
-    recover known _ = Right known
+        canonical = expand helpers . normalize . rewrite equations
+    recover _ known _ = Right known
     argument equationsInScope env typ a = do
       unless (get "tag" a == String "apply") (refuse Syntax "Constructor argument is not an application")
       expressionExpected (Just typ) equationsInScope env (get "value" (get "argument" a)) >>= requireType equationsInScope typ
@@ -956,7 +993,7 @@ renderCalculationDoc inv shapes label c = D.mark owner "calculation"
             Just evidence -> ("index-contract",evidence)
             Nothing -> ("index-contract-boundary",D.generated "native.index-contract")
       in D.mark owner role origin (D.text ("    assert constraint " <> quote ("index-contract-" <> T.pack (show i)) <> " { " <> condition <> " }"))
-     | (i,condition) <- zip [0 :: Int ..] (calculationContracts label c)] ++ ["  }"])
+     | (i,condition) <- zip [0 :: Int ..] (calculationContractsIn shapes label c)] ++ ["  }"])
   where
     owner = calculationSymbol c
     calcParameters s = maybe [] Specialize.nativeParameters (M.lookup s (declarations inv))
@@ -1127,19 +1164,47 @@ constructorResultContracts inv shapes calc = case result calc of
                  | otherwise = Nothing
 
 calculationContracts :: (Text -> Text) -> Calculation -> [Text]
-calculationContracts label c = concat
-  [refinementText label input (input i) t | (i,t) <- zip [0 :: Int ..] (inputs c)]
-  ++ refinementText label input returned (result c)
+calculationContracts = calculationContractsIn M.empty
+
+calculationContractsIn :: Shapes -> (Text -> Text) -> Calculation -> [Text]
+calculationContractsIn shapes label c = concat
+  [refinementTextIn shapes label input binding (input i) t | (i,t) <- zip [0 :: Int ..] (inputs c)]
+  ++ refinementTextIn shapes label input binding returned (result c)
   where
     input i = quote (label (calculationSymbol c)) <> "::" <> quote ("input" <> T.pack (show i))
     returned = quote (label (calculationSymbol c)) <> "::'result'"
+    binding p = quote (label (calculationSymbol c)) <> "::" <> quote p
 
 refinementText :: (Text -> Text) -> (Int -> Text) -> Text -> Carrier -> [Text]
-refinementText _ _ value Natural = ["(" <> value <> " < *)"]
-refinementText label input value (Fibre s xs) =
-  ["(" <> value <> "." <> quote (label (indexField s i)) <> " == " <> renderWith label input x <> ")"
-  | (i,x) <- zip [0..] xs]
-refinementText _ _ _ _ = []
+refinementText label input = refinementTextIn M.empty label input quote
+
+refinementTextIn :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> Text -> Carrier -> [Text]
+refinementTextIn _ _ _ _ value Natural = ["(" <> value <> " < *)"]
+refinementTextIn shapes label input binding value (Fibre s xs) =
+  [indexEquality shapes label input binding domain (value <> "." <> quote (label (indexField s i))) x
+  | Just sh <- [M.lookup s shapes]
+  , (i,(domain,x)) <- zip [0..] (zip (indexTypes sh) xs)]
+  ++ ["(" <> value <> "." <> quote (label (indexField s i)) <> " == " <> renderIndexIn shapes label input binding x <> ")"
+     | (i,x) <- zip [0..] xs, M.notMember s shapes]
+refinementTextIn _ _ _ _ _ _ = []
+
+-- Type extents are representation bindings, not elements of a source list.
+-- Membership constraints still check them; schema equality retains precisely
+-- the ordered, nonunique contents when equal bindings use different orders.
+indexEquality :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> Carrier -> Text -> Expression -> Text
+indexEquality shapes label input binding domain value expected =
+  let rendered = renderIndexIn shapes label input binding expected
+  in case domain of
+    Named s | Just sh <- M.lookup s shapes, Just _ <- sequenceElement sh ->
+      "SequenceFunctions::equals(" <> value <> "." <> quote sequenceField <> ", (" <> rendered <> ")." <> quote sequenceField <> ")"
+    _ -> "(" <> value <> " == " <> rendered <> ")"
+
+renderIndexIn :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> Expression -> Text
+renderIndexIn shapes label input binding = D.render . renderParameterizedDoc label input "" (const []) bindings binding
+  where
+    bindings symbol = case M.lookup symbol shapes of
+      Just sh -> map parameterName (typeParameters sh) ++ map (familyName . fst) (familyParameters sh)
+      Nothing -> []
 
 hasValidity :: Shape -> Bool
 hasValidity sh | Just _ <- sequenceElement sh = False
@@ -1167,7 +1232,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
                  Named{} -> "(element as " <> renderCarrier label element <> ")"
                  Fibre{} -> "(element as " <> renderCarrier label element <> ")"
                  _ -> "element"
-         ,condition <- refinementText label (T.pack . show) value element
+         ,condition <- refinementTextIn shapes label (T.pack . show) quote value element
            ++ parameterRefinements shapes label quote value element]
       ++ ["    assert constraint { " <> condition <> " }" | condition <- familyDomainConstraints shapes label quote (familyParameters sh)]
       ++ ["  }"]
@@ -1214,7 +1279,7 @@ familyDomainConstraints shapes label binding families =
   | (slot,symbol) <- families,Just member <- [M.lookup symbol shapes]
   ,(i,domain) <- zip [0..] (indexTypes member)
   ,let field = "(row as " <> quote (label (familyRow symbol)) <> ")." <> quote (label (indexField (familyRow symbol) i))
-  ,condition <- refinementText label (T.pack . show) field domain
+  ,condition <- refinementTextIn shapes label (T.pack . show) binding field domain
     ++ parameterRefinements shapes label binding field domain]
 
 validity :: Shapes -> (Text -> Text) -> Shape -> Text
@@ -1229,11 +1294,11 @@ validity shapes label sh = case constraints of
     constraints = (if isRecord sh then [] else
       ["(SequenceFunctions::size(" <> fieldText f <> ") == (if " <> selected c <> " ? 1 else 0))"
       | c <- variants sh,(f,_) <- payload c])
-      ++ [guarded c ("(" <> fieldText (indexField (shapeSymbol sh) i) <> " == "
-           <> renderWith label (\j -> fieldText (fst (payload c !! j))) e <> ")")
-         | c <- variants sh,(i,e) <- zip [0..] (resultIndices c)]
+      ++ [guarded c (indexEquality shapes label (\j -> fieldText (fst (payload c !! j))) fieldText domain
+           (fieldText (indexField (shapeSymbol sh) i)) e)
+         | c <- variants sh,(i,(domain,e)) <- zip [0..] (zip (indexTypes sh) (resultIndices c))]
       ++ [guarded c constraint | c <- variants sh,(f,t) <- payload c
-         ,constraint <- refinementText label (\j -> fieldText (fst (payload c !! j))) (fieldText f) t
+         ,constraint <- refinementTextIn shapes label (\j -> fieldText (fst (payload c !! j))) fieldText (fieldText f) t
            ++ parameterRefinements shapes label fieldText (fieldText f) t]
       ++ [condition | (i,t) <- zip [0..] (indexTypes sh),condition <- parameterRefinements shapes label fieldText (fieldText (indexField (shapeSymbol sh) i)) t]
       ++ familyDomainConstraints shapes label fieldText (familyParameters sh)
@@ -1347,10 +1412,10 @@ carrierReport label shapes = toJSON [object
     ,"target" .= (target (shapeSymbol sh) <> "::" <> quote (label (indexField (shapeSymbol sh) i)))]
     | (i,t) <- zip [0 :: Int ..] (indexTypes sh)]
   ,"constructors" .= [object ["symbol" .= constructorSymbol c,"target" .= target (constructorSymbol c)
-    ,"resultIndices" .= map (renderWith label (\i -> quote (label (fst (payload c !! i))))) (resultIndices c)
+    ,"resultIndices" .= map (renderIndexIn shapes label (\i -> quote (label (fst (payload c !! i)))) quote) (resultIndices c)
     ,"payload" .= [object ["position" .= i,"field" .= f
       ,"type" .= renderCarrier label typ
-      ,"refinements" .= refinementText label (\j -> quote (label (fst (payload c !! j)))) (quote (label f)) typ
+      ,"refinements" .= refinementTextIn shapes label (\j -> quote (label (fst (payload c !! j)))) quote (quote (label f)) typ
       ,"target" .= (case sequenceElement sh of
           Just _ -> Null
           Nothing -> String (target (shapeSymbol sh) <> "::" <> quote (label f)))]

@@ -14,6 +14,7 @@ import tempfile
 from open_parameters import verify_open_parameters
 from dependent_evidence import verify_dependent_evidence
 from recursive_core import verify_recursive_core
+from structured_indices import verify_structured_indices
 
 
 def check(condition, message):
@@ -298,6 +299,10 @@ models:
     recursive_evidence = verify_recursive_core(self_output)
     check(recursive_evidence["totalComparisons"] >= 1000 and recursive_evidence["invalidCasesRejected"] >= 10,
           "recursive core lacks parsed results and index/finiteness/capture checks")
+    structured_evidence = verify_structured_indices(self_output)
+    check(structured_evidence["comparisons"] == 18116 and structured_evidence["invalidSchemasRejected"] == 13
+          and structured_evidence["repeatedPositions"] > 1000 and structured_evidence["reorderedBindings"] == 3,
+          "structured indices lack ordered schemas, complete members, or invalid-index refusals")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
           and self_manifest["selectionProfile"] == "declarations", "default generation required a hidden mapping")

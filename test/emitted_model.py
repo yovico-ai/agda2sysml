@@ -298,6 +298,9 @@ class Model:
                 method = symbol.split('::')[-1]
                 if method == 'includes': return includes(*values)
                 if method == 'includesOnly': return same_extent(*values)
+                if method == 'equals':
+                    left, right = map(sequence, values)
+                    return len(left) == len(right) and all(same(x, y) for x, y in zip(left, right))
                 seq = sequence(values[0])
                 if method == 'head': return seq[0] if seq else ()
                 if method == 'tail': return seq[1:]
