@@ -275,7 +275,7 @@ callee and its dependencies pass the same analysis. Carrier parameters also
 require every constructor to leave the parameter unused. Unknown or partial
 applications, missing metadata, opaque bodies and unsupported case trees prevent
 omission. Stored function payloads use the callable-member rule below;
-live unary callbacks use the callback-input rule rather than being omitted.
+live callbacks use the callback-input rule rather than being omitted.
 
 An admitted unused parameter occupies a static bookkeeping slot during
 specialization and contributes no runtime SysML input. The original quantified
@@ -826,34 +826,40 @@ opaque or unchecked helper computations remain refusal
 boundaries. Static callback expansion is bounded to 128 active helper frames;
 exhausting that bound refuses rather than assumes semantic preservation.
 
-## Native unary callback inputs
+## Native unary and multiargument callback inputs
 
-A checked input of type `A → B` or `(x : A) → B x` is represented by a native `in calc` usage
-with one typed argument and one typed result. Applications invoke that usage
+A checked function input is represented by a native `in calc` usage with an
+ordered argument telescope and one typed result. This includes `A → B`,
+`A → B → C`, and dependent signatures such as `(a : A) → B a → C a`.
+Fully applied calls invoke that usage
 directly. Passing the input to another admitted operation preserves the same
 binding, including through recursive helpers. The compiler checks both domain
 and result types before admitting an application; it retains open type extents,
 record payloads, indices and result contracts.
 
 The binding must denote a total, deterministic, side-effect-free mathematical
-function, as required when using SysML calculations mathematically. Its argument
-and result have multiplicity one, their declared carriers, and the applicable
+function, as required when using SysML calculations mathematically. Each argument
+and the result have multiplicity one, their declared carriers, and the applicable
 native extent/refinement constraints. These contracts do not prove purity or
 termination of an arbitrary externally supplied calculation. No function table,
 Agda value encoding, or target interpreter is emitted. See the native invocation
 mechanism in [KerML 1.0 §7.4.9.4](https://www.omg.org/spec/KerML/1.0/PDF) and
 calculations in [SysML 2.0 §7.19](https://www.omg.org/spec/SysML/2.0/Language/PDF).
 
-This rule covers unary callbacks with supported first-order domains and results,
-including indexed families. The callback argument has its own lexical scope;
-result indices are instantiated with the supplied argument at invocation.
+This rule covers callbacks with supported first-order domains and results,
+including indexed families. Callback arguments have their own indexed lexical
+scope. Each argument domain is instantiated with preceding supplied arguments;
+the result is instantiated with the complete argument list. Implicit value
+indices are retained as explicit SysML arguments.
 Signatures retain references to surrounding inputs and earlier record fields,
 including calls to supplied callbacks inside an index. Substitution resolves a
 callee's index telescope before inserting caller types, so indices inside those
 types cannot be captured accidentally.
 
-Multiargument callbacks and arbitrary function-valued results remain
-outside its boundary. Function-valued family indices are explicitly refused:
+Callbacks that take function-valued arguments, runtime type-polymorphic callbacks,
+and runtime closure construction remain outside this rule. A partially applied
+callback is refused when it requires creating a closure; overapplication is
+rejected by the result type. Function-valued family indices are explicitly refused:
 family indices are data attributes, and function identity needs a separate
 representation and equality rule. Stored callbacks and their projections use the separate
 callable-member rule below. Existing static closure
@@ -864,6 +870,12 @@ The self specification exercises the rule through `BooleanLowering.map`,
 `NaturalValues.caseNat` and `nativeCase`, and `SourceAlignment.Direct.mapMaybe`
 and `rename`. Tests vary supplied calculations, preserve complete evidence and
 opaque payloads, and use unbounded natural extents.
+
+The multiargument rule also translates the existing `ComputedIndices.replace`
+and `replaceArgs`, `DependencyScope.evaluate` and `evaluateArgs`,
+`Derivations.Trace.combine`, and `SequenceValues.caseList` and `caseSequence`.
+Their tests exercise dependent substitution, argument order, complete values,
+metadata preservation, invalid bindings, and deliberate body mutations.
 
 **Pilot execution limitation:** the pinned Pilot 0.58.0 validates this native
 representation, but invocation through a bound callback can remain an unresolved
@@ -876,7 +888,7 @@ bindings as warnings, so validator acceptance alone is not refusal evidence.
 
 ## Native callable members
 
-Records and constructor payloads may contain supported unary callbacks,
+Records and constructor payloads may contain supported unary or multiargument callbacks,
 including indexed and dependent signatures. A member is emitted as `ref calc` with explicit argument/result types,
 multiplicity and extent/refinement constraints. The containing carrier remains an
 immutable `attribute def`. The member is referential and nonvariable; it does not
@@ -919,7 +931,7 @@ retain the signature's input schema, output index, and evidence endpoints.
 The callback-input purity/totality obligation and Pilot execution limitation
 above also apply here. This rule does not construct new callbacks capturing
 runtime environments: `DecisionTree.normalize` and `restrict` remain unsupported.
-Multiargument callback fields, direct sequences of callables,
+Direct sequences of callables
 and recursive carrier cycles through a callable's domain/result remain outside
 the rule. No generic Agda evaluator or callback table is emitted.
 

@@ -28,7 +28,7 @@ browser review and the official SysML notebook tools.
   recursive carriers. Checked recursive calculations preserve their inputs.
 - Specialize supported concrete higher-order calls and perform checked
   definitional reduction at generation time.
-- Translate supported unary callback inputs, including indexed and dependent
+- Translate supported unary and multiargument callback inputs, including indexed and dependent
   signatures, as native SysML
   calculations, including invocation and forwarding through recursive helpers.
   Store these callbacks in records and constructor payloads: supplied decision
@@ -98,12 +98,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 199 native calculation functions out of 722 (27.6%)
-and 90 native equality statements, including 25 compiler-generated helpers.
-Seven functions have both representations: 282/722 function declarations (39.1%)
+The default self model has 210 native calculation functions out of 722 (29.1%)
+and 107 native equality statements, including 32 compiler-generated helpers.
+Seven functions have both representations: 310/722 function declarations (42.9%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 578 unresolved requirements. Source-only proof retention is
+There are still 572 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

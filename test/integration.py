@@ -25,6 +25,7 @@ from callable_fields import verify_callable_fields
 from equality_statements import verify_equality_statements
 from symbolic_levels import verify_symbolic_levels
 from dependent_callbacks import verify_dependent_callbacks
+from multi_callbacks import verify_multi_callbacks
 
 
 def check(condition, message):
@@ -310,6 +311,14 @@ models:
     statement_evidence = verify_equality_statements(self_output)
     level_evidence = verify_symbolic_levels(self_output)
     dependent_callback_evidence = verify_dependent_callbacks(self_output)
+    multi_callback_evidence = verify_multi_callbacks(self_output)
+    check(multi_callback_evidence['operations'] == 7
+          and multi_callback_evidence['comparisons'] >= 230
+          and multi_callback_evidence['invalidBindingsRejected'] >= 11
+          and multi_callback_evidence['bodyMutationsDetected'] == 7
+          and multi_callback_evidence['dependentArguments']
+          and multi_callback_evidence['completeResultsAndOriginsPreserved'],
+          'multiargument callbacks lack complete behavior, dependent binding or mutation checks')
     check(dependent_callback_evidence == {'operations': 6, 'comparisons': 360,
           'evidenceCallbacksExercised': 12, 'invalidBindingsRejected': 15,
           'bodyMutationsDetected': 6},

@@ -32,9 +32,14 @@ class CalculationValue:
 
 @dataclass(frozen=True)
 class CallableSignature:
-    argument: str
+    arguments: tuple
     result: str
     assertions: tuple
+
+    @property
+    def argument(self):
+        assert len(self.arguments) == 1
+        return self.arguments[0]
 
 
 @dataclass
@@ -125,9 +130,12 @@ class Parser:
 
     def callable_body(self):
         self.expect('{')
-        self.expect('in'); assert self.qualified() == 'argument'; self.expect(':')
-        domain = self.qualified()
-        assert self.multiplicity() == (1, 1); self.expect(';')
+        domains = []
+        while self.take('in'):
+            assert self.qualified() == ('argument' if not domains else 'argument' + str(len(domains)))
+            self.expect(':'); domains.append(self.qualified())
+            assert self.multiplicity() == (1, 1); self.expect(';')
+        assert domains, 'empty callback argument telescope'
         self.expect('return'); assert self.qualified() == 'result'; self.expect(':')
         codomain = self.qualified()
         assert self.multiplicity() == (1, 1); self.expect(';')
@@ -136,7 +144,7 @@ class Parser:
             self.expect('constraint'); self.expect('{')
             contracts.append(self.expression()); self.expect('}')
         self.expect('}')
-        return CallableSignature(domain, codomain, tuple(contracts))
+        return CallableSignature(tuple(domains), codomain, tuple(contracts))
 
     PRECEDENCE = {'or': 1, 'and': 2, '==': 3, '!=': 3, '<': 4, '>': 4,
                   '<=': 4, '>=': 4, 'hastype': 4, 'istype': 4, 'as': 4, '+': 5, '-': 5, '*': 6}
@@ -383,8 +391,9 @@ class Model:
                 while isinstance(callback, BoundCalculation):
                     callback = callback.value
                 inputs = self.calculations[callback.symbol][0]
-                assert len(inputs) == 1, 'callback arity mismatch'
-                for expected, actual in ((carrier.argument, inputs[0][1]), (carrier.result, self.results[callback.symbol])):
+                assert len(inputs) == len(carrier.arguments), 'callback arity mismatch'
+                for expected, actual in [*zip(carrier.arguments, (i[1] for i in inputs)),
+                                         (carrier.result, self.results[callback.symbol])]:
                     assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
             return
         if carrier in ('Boolean', 'Natural'):
@@ -440,8 +449,7 @@ class Model:
             symbol, nodes = args
             values = [ev(node) for node in nodes]
             if symbol in env:
-                assert len(values) == 1, 'callback invocation arity mismatch'
-                return self.invoke_callback(env[symbol], values[0], check, depth + 1)
+                return self.invoke_callback_many(env[symbol], values, check, depth + 1)
             if symbol.startswith('SequenceFunctions::'):
                 method = symbol.split('::')[-1]
                 if method == 'includes': return self.includes(*values)
@@ -459,8 +467,7 @@ class Model:
                 raise AssertionError(('unsupported native library operation', symbol))
             return self.invoke(symbol, values, check, depth + 1)
         if op == 'apply':
-            assert len(args[1]) == 1, 'callback invocation arity mismatch'
-            return self.invoke_callback(ev(args[0]), ev(args[1][0]), check, depth + 1)
+            return self.invoke_callback_many(ev(args[0]), [ev(x) for x in args[1]], check, depth + 1)
         if op in ('as', 'hastype', 'istype'):
             value, typ = ev(args[0]), args[1][1]
             matches = typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)
@@ -481,17 +488,23 @@ class Model:
         raise AssertionError(('unsupported native expression', ast))
 
     def invoke_callback(self, binding, argument, check=True, depth=0):
+        return self.invoke_callback_many(binding, [argument], check, depth)
+
+    def invoke_callback_many(self, binding, arguments, check=True, depth=0):
         if isinstance(binding, CalculationValue):
-            return self.invoke(binding.symbol, [argument], check, depth)
+            return self.invoke(binding.symbol, arguments, check, depth)
         assert isinstance(binding, BoundCalculation), 'invocation target is not callable'
         signature = binding.signature
+        assert len(arguments) == len(signature.arguments), 'callback invocation arity mismatch'
         if check:
-            self.boundary(signature.argument, 1, 1, argument, depth)
-        result = self.invoke_callback(binding.value, argument, check, depth)
+            for carrier, argument in zip(signature.arguments, arguments):
+                self.boundary(carrier, 1, 1, argument, depth)
+        result = self.invoke_callback_many(binding.value, arguments, check, depth)
         if check:
             self.boundary(signature.result, 1, 1, result, depth)
-            env = {**binding.environment, 'argument': argument, 'result': result,
-                   binding.scope + '::argument': argument,
-                   binding.scope + '::result': result}
+            env = {**binding.environment, 'result': result, binding.scope + '::result': result}
+            for i, argument in enumerate(arguments):
+                name = 'argument' if i == 0 else 'argument' + str(i)
+                env[name] = env[binding.scope + '::' + name] = argument
             assert all(self.evaluate(c, env, True, depth) is True for c in signature.assertions), 'callback contract failed'
         return result
