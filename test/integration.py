@@ -298,7 +298,9 @@ models:
     check(natural_evidence == {'operations': 8, 'comparisons': 344, 'invalidCasesRejected': 6},
           "finite-natural adapters lack complete arithmetic results and inconsistent-evidence refusals")
     sum_evidence = verify_tagged_sums(self_output)
-    check(sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 18
+    check(sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 36
+          and sum_evidence['constructionComparisons'] >= 100 and sum_evidence['lookupComparisons'] >= 100
+          and sum_evidence['computedSchemaRefusals'] == 18
           and sum_evidence['repeatedConstructorSchemas'] > 0 and sum_evidence['completePayloadsAndEvidencePreserved'],
           "tagged-sum adapters lack complete results, distinct equal-schema constructors or validity refusals")
     open_evidence = verify_open_parameters(self_output)

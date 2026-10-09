@@ -13,7 +13,7 @@ def verify_tagged_sums(output):
     model = Model((output / 'model.sysml').read_text())
     prefix = 'Agda2SysML.AlgebraicValues.'
     roots = {}
-    for operation in ('encode', 'decode'):
+    for operation in ('encode', 'decode', 'schemaAt', 'slotAt', 'sourceConstructor', 'nativeConstructor'):
         rows = [o for o in report['obligations'] if o['symbol'].startswith(prefix + operation + '#')
                 and '@' not in o['symbol'] and o['sourceKind'] == 'behavior']
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], ('sum operation missing', operation)
@@ -75,6 +75,7 @@ def verify_tagged_sums(output):
     member_index, _ = field(member_type, '.index0')
     member_value, _ = field(member_type, '.value')
     comparisons = rejected = repeated_schemas = 0
+    construction_comparisons = lookup_comparisons = schema_refusals = 0
 
     def refuse(action):
         nonlocal rejected
@@ -150,13 +151,26 @@ def verify_tagged_sums(output):
         for layouts in layouts_to_check:
             for chosen, layout in enumerate(layouts):
                 for choices in itertools.product(range(2), repeat=len(layout)):
-                    source, expected, *_ = values(layouts, chosen, choices)
+                    source, expected, tag, slots, _ = values(layouts, chosen, choices)
                     encoded = call(roots['encode'], [schema(layouts), source])
                     decoded = call(roots['decode'], [schema(layouts), expected])
                     assert same(encoded, expected), ('encoding changed complete tag, slots or evidence', layouts, chosen, choices)
                     assert same(decoded, source), ('decoding changed constructor or complete payload', layouts, chosen, choices)
                     comparisons += 2
                     repeated_schemas += int(layouts.count(layout) > 1)
+                    source_payload = fields(layout, choices)
+                    native_payload = fields(layout, choices, True)
+                    assert same(call(roots['sourceConstructor'], [schema(layouts), tag, source_payload]), source)
+                    assert same(call(roots['nativeConstructor'], [schema(layouts), tag, native_payload]), expected)
+                    construction_comparisons += 2
+                    for other, other_layout in enumerate(layouts):
+                        # A tag depends only on position and schema, not the payload.
+                        other_tag = values(layouts, other, (0,) * len(other_layout))[2]
+                        assert same(call(roots['schemaAt'], [schema(layouts), other_tag]), atom_schema(other_layout))
+                        expected_slot = (call(just, [atom_schema(layout), native_payload]) if other == chosen
+                                         else call(nothing, [atom_schema(other_layout)]))
+                        assert same(call(roots['slotAt'], [schema(layouts), other_tag, slots]), expected_slot)
+                        lookup_comparisons += 2
 
         layouts = ((a,), (a,))
         source, first, first_tag, first_slots, first_proof = values(layouts, 0, (0,))
@@ -176,7 +190,24 @@ def verify_tagged_sums(output):
         refuse(lambda: call(roots['encode'], [schema(((b,), (a,))), source]))
         refuse(lambda: call(cons, [a, atom_schema(()), member(b, 0), fields((), ())]))
 
-    return {'operations': 2, 'comparisons': comparisons, 'invalidCasesRejected': rejected,
+        before = rejected
+        distinct_layouts = ((a,), (b,), ())
+        _, _, chosen_tag, chosen_slots, _ = values(distinct_layouts, 0, (0,))
+        for operation, native in (('sourceConstructor', False), ('nativeConstructor', True)):
+            refuse(lambda operation=operation, native=native: call(roots[operation],
+                [schema(distinct_layouts), chosen_tag, fields((b,), (0,), native)]))
+            refuse(lambda operation=operation, native=native: call(roots[operation],
+                [schema(distinct_layouts), chosen_tag, fields((), (), native)]))
+            refuse(lambda operation=operation, native=native: call(roots[operation],
+                [schema(((b,), (b,), ())), chosen_tag, fields((a,), (0,), native)]))
+        refuse(lambda: call(roots['slotAt'], [schema(distinct_layouts), first_tag, chosen_slots]))
+        refuse(lambda: call(roots['slotAt'], [schema(distinct_layouts), chosen_tag, first_slots]))
+        refuse(lambda: call(roots['schemaAt'], [schema(((b,), (b,), ())), chosen_tag]))
+        schema_refusals += rejected - before
+
+    return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
+            'constructionComparisons': construction_comparisons, 'lookupComparisons': lookup_comparisons,
+            'computedSchemaRefusals': schema_refusals,
             'repeatedConstructorSchemas': repeated_schemas, 'completePayloadsAndEvidencePreserved': True}
 
 

@@ -355,27 +355,41 @@ normalizeStep e = e
 -- forms. A recursive symbol unfolds once per path; residual calls stay opaque.
 -- Emission retains the original native calls and their checked dependency graph.
 expand :: Helpers -> Expression -> Expression
-expand helpers = go S.empty
+expand = expandWith id
+
+-- Branch facts also apply to expressions exposed by unfolding a helper. Keep
+-- the same expansion-path guard while rewriting; restarting expansion after
+-- each rewrite would unfold recursive calls indefinitely.
+expandWith :: (Expression -> Expression) -> Helpers -> Expression -> Expression
+expandWith rewrite helpers = go S.empty . rewrite
   where
-    go seen (Call s args) = case M.lookup s helpers of
-      Just helper | S.notMember s seen -> go (S.insert s seen) (instantiate (map (go seen) args) (body helper))
+    go = step
+    step seen (Call s args) = case M.lookup s helpers of
+      Just helper | S.notMember s seen ->
+        let arguments = map (go seen) args
+            unfolded = go (S.insert s seen) (rewrite (instantiate arguments (body helper)))
+        in case unfolded of
+          Conditional{} | S.member s recursive -> Call s arguments
+          _ -> unfolded
       _ -> Call s (map (go seen) args)
-    go seen (Project x f) = normalize (Project (go seen x) f)
-    go seen (Construct s fs) = Construct s [(f,go seen x) | (f,x) <- fs]
-    go seen (Sequence xs) = normalize (Sequence (map (go seen) xs))
-    go seen (SequenceOp op xs) = normalize (SequenceOp op (go seen xs))
-    go seen (SequenceHead t xs) = normalize (SequenceHead (mapCarrier (go seen) t) (go seen xs))
-    go seen (Equal x y) = case (go seen x,go seen y) of
+    step seen (Project x f) = normalize (Project (go seen x) f)
+    step seen (Construct s fs) = Construct s [(f,go seen x) | (f,x) <- fs]
+    step seen (Sequence xs) = normalize (Sequence (map (go seen) xs))
+    step seen (SequenceOp op xs) = normalize (SequenceOp op (go seen xs))
+    step seen (SequenceHead t xs) = normalize (SequenceHead (mapCarrier (go seen) t) (go seen xs))
+    step seen (Equal x y) = case (go seen x,go seen y) of
       (Literal a,Literal b) -> Literal (a == b)
       (Enumeration a x',Enumeration b y') -> Literal (a == b && x' == y')
       (x',y') | x' == y' -> Literal True
               | otherwise -> Equal x' y'
-    go seen (Conditional p yes no) = case go seen p of
+    step seen (Conditional p yes no) = case go seen p of
       Literal True -> go seen yes
       Literal False -> go seen no
       p' -> let yes' = go seen yes; no' = go seen no in
         if yes' == no' then yes' else Conditional p' yes' no'
-    go _ e = e
+    step _ e = e
+    recursive = S.fromList (concat [ss | CyclicSCC ss <- stronglyConnComp
+      [(s,s,S.toList (calls (body c))) | (s,c) <- M.toList helpers]])
 
 recordFieldType :: Shape -> Expression -> Carrier -> Carrier
 recordFieldType sh receiver = mapCarrier (instantiate [Project receiver f | c <- variants sh,(f,_) <- payload c])
@@ -585,9 +599,10 @@ indexHelpers inv finite shapes initial = close candidates
               | otherwise -> []
     select (CyclicSCC cs) | checked cs = [(calculationSymbol c,c) | c <- cs]
                         | otherwise = []
-    checked = all (\c -> case result c of
-      Fibre{} -> maybe False (terminationChecked inv) (M.lookup (calculationSymbol c) (declarations inv))
-      _ -> False)
+    checked = all (\c -> any indexed (result c : inputs c)
+      && maybe False (terminationChecked inv) (M.lookup (calculationSymbol c) (declarations inv)))
+    indexed Fibre{} = True
+    indexed _ = False
     close table = let next = M.filter (\c -> dependencies c `S.isSubsetOf` M.keysSet table) table
       in if M.keysSet next == M.keysSet table then table else close next
 
@@ -687,14 +702,15 @@ functionWith inv finite helpers shapes signatures d = do
     constructors = constructorTable shapes
     projections = projectionTable shapes
     rewrite equations = foldl (\f (left,right) -> mapExpression (\x -> if x == left then Just right else Nothing) . f) id equations
+    reduce equations = expandWith (rewrite equations) helpers
     requireType equations expected (actual,expr) = if canonical actual == canonical expected
       then Right expr else refuse Semantics ("Expression carrier mismatch: expected " <> describe (canonical expected)
         <> "; actual " <> describe (canonical actual))
       where canonical (Fibre family indices) = case M.lookup family shapes of
               Just sh -> Fibre family [canonicalIndex domain index | (domain,index) <- zip (indexTypes sh) indices]
-              Nothing -> mapCarrier (expand helpers . rewrite equations) (Fibre family indices)
+              Nothing -> mapCarrier (reduce equations) (Fibre family indices)
             canonical typ = typ
-            canonicalIndex domain value = let expanded = expand helpers (rewrite equations value) in case domain of
+            canonicalIndex domain value = let expanded = reduce equations value in case domain of
               Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh ->
                 normalize (Project expanded sequenceField)
               _ -> normalize expanded
@@ -819,7 +835,7 @@ functionWith inv finite helpers shapes signatures d = do
     compatible equations domains xs ys = length xs == length ys && length domains == length xs
       && not (or (zipWith3 (separated S.empty) domains xs ys))
       where
-        reduced = normalize . expand helpers . rewrite equations
+        reduced = normalize . reduce equations
         separated seen domain x y = distinct (reduced x) (reduced y) || case ownerOf domain >>= (`M.lookup` shapes) of
           Just sh | sequenceElement sh == Nothing, S.notMember (shapeSymbol sh) seen ->
             let leftTag = reduced (Project x tagField)
@@ -986,7 +1002,7 @@ functionWith inv finite helpers shapes signatures d = do
           Just x | canonical domain x == canonical domain y -> Right table
           _ -> refuse Semantics "Inconsistent omitted index"
         bind table _ = Right table
-        canonical domain value = let expanded = expand helpers (normalize (rewrite equations value)) in case domain of
+        canonical domain value = let expanded = reduce equations (normalize value) in case domain of
           Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh -> normalize (Project expanded sequenceField)
           _ -> normalize expanded
     recover _ known _ = Right known

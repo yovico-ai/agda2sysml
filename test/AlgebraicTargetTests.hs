@@ -266,6 +266,7 @@ main = do
   composedChecks inv
   indexedChecks inv
   computedChecks inv
+  indexedLookupChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
   root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
@@ -881,6 +882,59 @@ composedChecks base = do
     "static specialization changed projection ownership"
   bad (set "compiled" (done 1 (call "gcopy" [get "term" (named "Tone"),variable 0 []] []))
     (use "copyBoolPacket" "gcopy" (named "Bool"))) "different static payload types unified"
+
+-- Recursive lookups with indexed inputs reduce only under justified branch
+-- facts. Different caller expressions must meet at the same residual call.
+indexedLookupChecks :: Inventory -> IO ()
+indexedLookupChecks base = do
+  let ty s args = object ["term" .= call s args []]
+      v i = variable i []
+      family s cs = set "constructors" (toJSON (cs :: [Text])) $
+        declaration s "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      cursor = set "induction" (String "Inductive") $ set "sourceModule" (String "CheckedLookup") $
+        family "Cursor" ["end","more"]
+      flag = family "LookupFlag" ["lookupFlag"]
+      ctor s owner ins out = set "family" (String owner) $ declaration s "constructor" (signature ins out)
+      end = ctor "end" "Cursor" [named "Bool"] (ty "Cursor" [v 0])
+      more = ctor "more" "Cursor" [named "Bool",ty "Cursor" [v 0]] (ty "Cursor" [v 1])
+      flagCtor = ctor "lookupFlag" "LookupFlag" [named "Bool"] (ty "LookupFlag" [v 0])
+      lookupCall b x = call "lookupIndex" [b,x] []
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "CheckedLookup")
+      op s ins out tree = safe $ set "type" (signature ins out) $ operation s [] "Bool" tree
+      lookupDef = op "lookupIndex" [named "Bool",ty "Cursor" [v 0]] (named "Bool")
+        (split 1 [("end",1,done 2 (v 0)),("more",2,done 3 (lookupCall (v 1) (v 0)))])
+      build = op "buildLookup" [named "Bool",ty "Cursor" [v 0]]
+        (ty "LookupFlag" [lookupCall (v 1) (v 0)])
+        (split 1 [("end",1,done 2 (constructor "lookupFlag" [v 0]))
+          ,("more",2,done 3 (call "buildLookup" [v 1,v 0] []))])
+      declarations' = [cursor,end,more,flag,flagCtor,lookupDef,build]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- declarations']) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedLookup" :: Text),"safe" .= True
+            ,"terminationCheck" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "lookup" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- declarations'])}
+      (shapes,shapeErrors) = A.discover inv M.empty
+      calculations = A.functions inv M.empty shapes
+      value b 0 = R "Cursor" (M.fromList [("constructor",E "Cursor.constructor-tag" "end")
+        ,("Cursor.index0",B b),("end.payload0",B b)])
+      value b n = R "Cursor" (M.fromList [("constructor",E "Cursor.constructor-tag" "more")
+        ,("Cursor.index0",B b),("more.payload0",B b),("more.payload1",value b (n-1))])
+  check (M.member "Cursor" shapes && M.member "LookupFlag" shapes) (show shapeErrors)
+  table <- traverse (either (fail . show) pure) calculations
+  forM_ [False,True] $ \b -> forM_ [0..8 :: Int] $ \n -> do
+    let expected = R "LookupFlag" (M.fromList [("constructor",E "LookupFlag.constructor-tag" "lookupFlag")
+          ,("LookupFlag.index0",B b),("lookupFlag.payload0",B b)])
+    check (evalWith table [B b,value b n] (A.body (table M.! "buildLookup")) == expected)
+      "computed indexed lookup lost its complete result"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null] $ \change -> do
+    let invalid = inv {declarations = M.adjust change "lookupIndex" (declarations inv)}
+    check (isLeft (A.functions invalid M.empty (fst (A.discover invalid M.empty)) M.! "buildLookup"))
+      "opaque, unchecked or absent recursive lookup justified an index"
+  let wrong = inv {declarations = M.adjust (set "compiled" (split 1
+        [("end",1,done 2 (constructor "lookupFlag" [constructor "false" []]))
+        ,("more",2,done 3 (call "buildLookup" [v 1,v 0] []))])) "buildLookup" (declarations inv)}
+  check (isLeft (A.functions wrong M.empty (fst (A.discover wrong M.empty)) M.! "buildLookup"))
+    "unknown computed index equality was guessed"
 
 -- Computed finite indices require checked bodies, not merely signatures.
 computedChecks :: Inventory -> IO ()
