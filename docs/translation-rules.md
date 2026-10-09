@@ -320,7 +320,7 @@ The general round-trip and mismatch-refusal laws remain Agda proofs; parsed
 SysML checks compare complete prefixes, members and equality evidence and
 reject wrong indices, captures and admission proofs.
 
-Open universe levels, unknown runtime index functions and unsupported family
+Unknown runtime index functions and unsupported family
 lambda domains remain explicit refusal boundaries. Alias reduction uses the
 existing checked reduction budget; carrier specialization is bounded to 128
 active frames. No exhausted budget establishes semantic equivalence.
@@ -374,7 +374,7 @@ for; retaining a generic template is insufficient to discharge a concrete use.
 Unbound parameters, unsupported dependencies, changing recursive type
 instantiations, unresolved higher-order values, and unsupported type-level
 expressions remain explicit boundaries.
-Leading type and closed universe-level parameters are supported as described
+Leading type and static universe-level parameters are supported as described
 below. Value parameters require a separate representation rule.
 
 ### Open first-order type parameters
@@ -408,8 +408,8 @@ inconsistent extents. This oracle is test code, not an emitted interpreter.
 
 Native validation and independent parsed-target evaluation remain separate
 from Pilot execution. In particular, `all DomainType` is not model-level
-evaluable in Pilot; it denotes an extent in the target model. Open universe
-levels, higher-order source parameters and unsupported dependent signatures
+evaluable in Pilot; it denotes an extent in the target model. Unsupported
+higher-order source parameters and dependent signatures
 remain explicit boundaries. Directly calling `BaseFunctions::'istype'` with
 runtime type metadata is not a dynamic membership test and is not used.
 
@@ -428,8 +428,8 @@ The existing dependent sum and fibre rules then retain declaration/kind indices,
 constructor guards and payload relationships. Calls and constructions pass the
 same family bindings; mutual inclusion checks binding equality independently
 of row order. Family relations have no finite-size constraint. Behavioral
-callbacks, dependent argument domains within a family telescope, and unresolved
-universe levels remain unsupported by this rule.
+callbacks, dependent argument domains within a family telescope, and unsolved
+universe constraints remain unsupported by this rule.
 
 `FamilyRelations` states general source and payload round trips, index
 preservation, selection/wrapping preservation and transport across actual index
@@ -474,7 +474,7 @@ tests additionally cover returned construction, nested carriers, heterogeneous
 type-argument order, phantom parameters, and static binder removal. The Pilot's
 returned-construction limitation continues to apply.
 
-## Statically resolved universe levels
+## Static universe levels
 
 Universe-polymorphic specialization retains both level and type parameters in
 their checked order. Closed levels built from zero, successor, and maximum
@@ -483,10 +483,22 @@ argument is static metadata, not a target runtime carrier. Each concrete type
 argument must inhabit the universe declared by its instantiated telescope.
 Compiler builtin identity establishes `Level`; source spelling is insufficient.
 
+Open declaration schemas also retain symbolic levels, successors and maxima.
+Template level binders and rigid levels belonging to an open schema have
+separate identities: substitution of a helper's arguments cannot capture a
+level in its caller's scope. Normalization combines repeated atoms and removes
+dominated constants while preserving distinct variables and their offsets.
+Symbolic level expressions remain in specialization identities and provenance;
+they do not become runtime inputs, type extents, or integer-valued fields.
+Open type and family arguments must still have exactly the declared universe.
+This supports the original polymorphic sequence operations and indexed-family
+encode/decode operations without fixed-level source wrappers.
+
 Omitted levels may be recovered from checked carrier universes and parameter
 constraints only when those constraints determine them uniquely. Ambiguous,
-unresolved, inconsistent, or runtime level uses remain incomplete. Removing
-resolved static binders must preserve all runtime values and their positions.
+unsolved, inconsistent, or runtime level uses remain incomplete. A declared
+symbolic level is a bound parameter, not an unsolved inference variable.
+Removing static binders must preserve all runtime values and their positions.
 `UniverseLevels` gives general level substitution/resolution laws and runtime
 environment reconstruction and lookup-preservation laws for this boundary.
 

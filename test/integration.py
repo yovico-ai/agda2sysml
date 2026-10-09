@@ -23,6 +23,7 @@ from report_accounting import verify_report_accounting
 from native_callbacks import verify_native_callbacks
 from callable_fields import verify_callable_fields
 from equality_statements import verify_equality_statements
+from symbolic_levels import verify_symbolic_levels
 
 
 def check(condition, message):
@@ -306,6 +307,11 @@ models:
     native_callback_evidence = verify_native_callbacks(self_output)
     callable_field_evidence = verify_callable_fields(self_output)
     statement_evidence = verify_equality_statements(self_output)
+    level_evidence = verify_symbolic_levels(self_output)
+    check(level_evidence['operations'] == 10 and level_evidence['comparisons'] >= 700
+          and level_evidence['invalidCasesRejected'] >= 30
+          and level_evidence['nativeStatementsExercised'] == 4 and level_evidence['bodyMutationDetected'],
+          'symbolic universe operations lack complete behavior and refusal checks')
     check(statement_evidence['authoredStatements'] == 28
           and statement_evidence['executedStatements'] == 28
           and statement_evidence['conclusionMutationDetected']
