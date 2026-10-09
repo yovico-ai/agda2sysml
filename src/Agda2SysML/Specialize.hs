@@ -376,19 +376,34 @@ readConstructorIndex inv env expected term = do
   let c = string (get "symbol" term)
   d <- maybe (refuse Syntax "Unknown index constructor") Right (M.lookup c (declarations inv))
   sig <- signature inv d
+  let ownerName = case get "family" d of
+        String name -> name
+        _ -> case output sig of Named name _ -> name; _ -> ""
+  owner <- maybe (refuse Syntax "Unknown index constructor family") Right (M.lookup ownerName (declarations inv))
+  sourceParameters <- field inv "parameters" owner >>= number
+  let runtimeParameters = sourceParameters - parameters sig
+      contextual = case expected of
+        Just (Named _ xs) -> take runtimeParameters [ix | Runtime _ ix <- xs]
+        _ -> []
+  unless (runtimeParameters >= 0 && length contextual == runtimeParameters)
+    (refuse Representation "Index constructor needs its contextual value parameters")
   values <- traverse app (array (get "eliminations" term))
-  unless (length values == length (inputs sig)) (refuse Representation "Index constructor payload arity mismatch")
+  unless (length values == length (inputs sig) - runtimeParameters) (refuse Representation "Index constructor payload arity mismatch")
   initial <- maybe (Right M.empty) (unify M.empty (output sig)) expected
-  (known,payloads) <- foldM (step sig) (initial,[]) (zip (inputs sig) values)
+  (known,payloads) <- foldM (step sig) (initial,contextual) (zip (drop runtimeParameters (inputs sig)) values)
   final <- complete sig known
   args <- traverse (\i -> maybe (refuse Representation "Cannot recover index constructor parameter") Right (M.lookup i final)) [0..parameters sig-1]
-  result <- substitute args (output sig)
-  pure (Runtime (replaceInputs payloads result) (IndexConstructor c args payloads))
+  result <- substitute args (replaceInputs payloads (output sig))
+  pure (Runtime result (IndexConstructor c args
+    (if get "kind" owner == String "record" then payloads else drop runtimeParameters payloads)))
   where
     step sig (known,prior) (domain,value) = do
       completed <- complete sig known
       let args = [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
-      concrete <- replaceInputs prior <$> substitute args domain
+      -- Telescope indices belong to this constructor; inferred static
+      -- arguments can contain indices belonging to the caller. Substitute
+      -- the former before inserting the latter, keeping both scopes intact.
+      concrete <- substitute args (replaceInputs prior domain)
       let contextualConstructor = get "tag" value == String "constructor" && case concrete of Named{} -> True; _ -> False
       actual <- if hasParameter concrete && not contextualConstructor then readType inv env value else readIndex inv env concrete value
       case actual of
@@ -421,16 +436,32 @@ replaceInputs values = mapIndices go
     go (IndexCall f ts xs) = IndexCall f (map (replaceInputs values) ts) (map go xs)
     go x = x
 
+replaceKnownInputs :: M.Map Int IndexExpr -> Type -> Type
+replaceKnownInputs values = mapIndices go
+  where
+    go original@(IndexInput i) = M.findWithDefault original i values
+    go (IndexConstructor c ts xs) = IndexConstructor c (map (replaceKnownInputs values) ts) (map go xs)
+    go (IndexSuccessor x) = IndexSuccessor (go x)
+    go (IndexProject f ts x) = IndexProject f (map (replaceKnownInputs values) ts) (go x)
+    go (IndexCall f ts xs) = IndexCall f (map (replaceKnownInputs values) ts) (map go xs)
+    go x = x
+
 projectIndex :: Inventory -> Type -> Value -> Either Refusal Type
 projectIndex inv (Runtime (Named owner args) receiver) elimination = do
   unless (get "tag" elimination == String "project") (refuse Representation "Applied runtime index variable")
   let name = string (get "symbol" elimination); concrete = staticArguments args
   d <- maybe (refuse Syntax "Unknown index projection") Right (M.lookup name (declarations inv))
   p <- field inv "projection" d
-  unless (get "proper" p == String owner && get "index" p == toJSON (length concrete + 1))
+  ownerDeclaration <- maybe (refuse Syntax "Unknown index projection owner") Right (M.lookup owner (declarations inv))
+  sourceParameters <- field inv "parameters" ownerDeclaration >>= number
+  unless (get "proper" p == String owner && get "index" p == toJSON (sourceParameters + 1))
     (refuse Syntax "Index projection has wrong owner or parameter count")
   sig <- signature inv d
-  out <- substitute concrete (output sig)
+  let runtimeParameters = sourceParameters - length concrete
+      contextual = take runtimeParameters [ix | Runtime _ ix <- args]
+  unless (runtimeParameters >= 0 && length contextual == runtimeParameters)
+    (refuse Representation "Index projection needs its contextual value parameters")
+  out <- substitute concrete (replaceInputs (contextual ++ [receiver]) (output sig))
   pure (Runtime out (IndexProject name concrete receiver))
 projectIndex _ _ _ = refuse Representation "Index projection requires a record receiver"
 
@@ -1006,12 +1037,16 @@ ensureType inv stack ty@(Named s allArgs) = do
       else map string . array <$> liftEither (field inv "constructors" d)
     fields <- map string . array <$> liftEither (field inv "fields" d)
     let captureFields = [typeKey ty <> ".capture" <> T.pack (show i) | i <- [0..prefix-1]]
-        nativeFields = captureFields ++ map (`instanceKey` args) fields
+        runtimeCount = sourceParameters-n
+        parameterFields = [typeKey ty <> ".parameter" <> T.pack (show i) | i <- [0..runtimeCount-1]]
+        recordPrefix = prefix+runtimeCount
+        prefixFields = captureFields ++ parameterFields
+        nativeFields = prefixFields ++ map (`instanceKey` args) fields
     -- A header permits only the same static instance to recur. Every payload
     -- is still checked before this provisional declaration becomes usable.
     let header = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
           $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
-          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
+          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then recordPrefix else 0))
           $ (case (get "kind" d,cs) of
               (String "record",[c]) -> set "constructor" (String (instanceKey c args))
               _ -> set "constructors" (toJSON (map (`instanceKey` args) cs))) $ clone inv s args d
@@ -1030,8 +1065,8 @@ ensureType inv stack ty@(Named s allArgs) = do
         Named _ xs -> mapM_ (\x -> case x of Runtime _ i -> ensureIndex inv i; _ -> pure ()) xs
         _ -> pure ()
       let cd' = set "type" (arrow ins out) $ set "parameters" (Number 0)
-            $ set "runtimeParameters" (toJSON (sourceParameters-n + if get "kind" d == String "record" then 0 else prefix))
-            $ set "patternCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
+            $ set "runtimeParameters" (toJSON (if get "kind" d == String "record" then 0 else runtimeCount+prefix))
+            $ set "patternCaptures" (toJSON (if get "kind" d == String "record" then recordPrefix else 0))
             $ set "family" (String (typeKey ty)) $ clone inv c args cd
       save c args cd'
       pure (ins,cd')
@@ -1039,16 +1074,16 @@ ensureType inv stack ty@(Named s allArgs) = do
       [(ins,_)] -> do
         unless (length nativeFields == length ins) (abort Syntax "Record constructor/field arity mismatch")
         let receiver = Named (typeKey ty) []
-            rebaseIndex (IndexInput i) | i < prefix = IndexProject (captureFields !! i) [] (IndexInput 0)
-                                      | i == prefix = IndexInput 0
+            rebaseIndex (IndexInput i) | i < recordPrefix = IndexProject (prefixFields !! i) [] (IndexInput 0)
+                                      | i == recordPrefix = IndexInput 0
             rebaseIndex (IndexProject f ts x) = IndexProject f (map (mapIndices rebaseIndex) ts) (rebaseIndex x)
             rebaseIndex (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexCall f ts xs) = IndexCall f (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexSuccessor x) = IndexSuccessor (rebaseIndex x)
             rebaseIndex x = x
-        forM_ (zip captureFields captureTypes) $ \(f,domain) ->
+        forM_ (zip prefixFields (take recordPrefix ins)) $ \(f,domain) ->
           save f [] (object ["name" .= f,"displayName" .= f,"kind" .= ("function" :: Text)
-            ,"abstract" .= False,"parameters" .= (0 :: Int),"type" .= arrow [receiver] domain
+            ,"abstract" .= False,"parameters" .= (0 :: Int),"type" .= arrow [receiver] (mapIndices rebaseIndex domain)
             ,"projection" .= object ["proper" .= typeKey ty,"index" .= (1 :: Int)]])
         forM_ fields $ \f -> do
           fd <- definition inv f
@@ -1056,17 +1091,17 @@ ensureType inv stack ty@(Named s allArgs) = do
           p <- liftEither (field inv "projection" fd)
           actualIns <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
           actualOut <- liftEither (instantiate (output sig))
-          unless (parameters sig == n && take prefix actualIns == captureTypes && length actualIns == prefix+1
+          unless (parameters sig == n && take prefix actualIns == captureTypes && length actualIns == recordPrefix+1
             && typeKey (last actualIns) == typeKey ty
-            && get "proper" p == String s && get "index" p == toJSON (n+1)) (abort Syntax "Dependent or malformed proper record projection")
-          let nativeOut = if prefix == 0 then actualOut else mapIndices rebaseIndex actualOut
-              fd' = set "type" (arrow [if prefix == 0 then Named s args else receiver] nativeOut) $ set "projection"
+            && get "proper" p == String s && get "index" p == toJSON (sourceParameters+1)) (abort Syntax "Dependent or malformed proper record projection")
+          let nativeOut = if recordPrefix == 0 then actualOut else mapIndices rebaseIndex actualOut
+              fd' = set "type" (arrow [if recordPrefix == 0 then Named s args else receiver] nativeOut) $ set "projection"
                 (set "proper" (String (typeKey ty)) (set "index" (Number 1) p)) $ clone inv f args fd
           save f args fd'
       _ -> abort Representation "Record requires exactly one constructor"
     let d' = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
           $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
-          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
+          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then recordPrefix else 0))
           $ (case (get "kind" d,cs) of
               (String "record",[c]) -> set "constructor" (String (instanceKey c args))
               _ -> set "constructors" (toJSON (map (`instanceKey` args) cs))) $ clone inv s args d
@@ -1214,12 +1249,33 @@ specializeTree inv stack env out tree = case string (get "tag" tree) of
           unless (get "family" cd == String owner) (abort Syntax "Case constructor owner mismatch")
           original <- definition inv c
           sig <- liftEither (signature inv original)
-          allFields <- liftEither (traverse (substitute args) (inputs sig))
           sourceParameters <- liftEither (field inv "parameters" original >>= number)
-          let fields = drop (sourceParameters - parameters sig) allFields
+          let runtimeParameters = sourceParameters - parameters sig
+              fieldSchemas = drop runtimeParameters (inputs sig)
+              position = length (filter isDynamic (take i env))
+              count = length fieldSchemas
+              contextual = case ty of Named _ xs -> take runtimeParameters [ix | Runtime _ ix <- xs]; _ -> []
+              record = case ty of
+                Named sourceOwner _ -> get "kind" (M.findWithDefault Null sourceOwner (declarations inv)) == String "record"
+                _ -> False
+              payloadIndices = map IndexInput [position..position+count-1]
+              replacement = IndexConstructor c args (if record then contextual ++ payloadIndices else payloadIndices)
+              reindex = mapIndices rewrite
+              rewrite (IndexInput j) | j == position = replacement
+                                    | j > position = IndexInput (j+count-1)
+              rewrite (IndexConstructor name ts xs) = IndexConstructor name (map reindex ts) (map rewrite xs)
+              rewrite (IndexProject name ts x) = IndexProject name (map reindex ts) (rewrite x)
+              rewrite (IndexCall name ts xs) = IndexCall name (map reindex ts) (map rewrite xs)
+              rewrite (IndexSuccessor x) = IndexSuccessor (rewrite x)
+              rewrite x = x
+              bindings = map rewrite contextual ++ payloadIndices
+              change (Dynamic domain) = Dynamic (reindex domain)
+              change binding = binding
+          fields <- liftEither (traverse (substitute (map reindex args) . replaceInputs bindings) fieldSchemas)
           arity <- liftEither (number (get "arity" b))
           unless (arity == length fields) (abort Syntax "Specialized case payload arity mismatch")
-          result <- specializeTree inv stack (take i env ++ map Dynamic fields ++ drop (i+1) env) out (get "tree" b)
+          result <- specializeTree inv stack (map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env))
+            (reindex out) (get "tree" b)
           pure (set "tree" result b)
     cs <- forM (array (get "constructors" tree)) $ \b -> do
       let c = string (get "symbol" b)
@@ -1312,30 +1368,22 @@ expression inv stack env expected term = do
             contextualIndices = case expected of
               Just (Named _ xs) -> [ix | Runtime _ ix <- xs]
               _ -> []
-            contextualize = mapIndices replace
-              where
-                replace (IndexInput i) | i < runtimeParameters, i < length contextualIndices = contextualIndices !! i
-                replace (IndexSuccessor ix) = IndexSuccessor (replace ix)
-                replace (IndexConstructor c ts xs) = IndexConstructor c (map contextualize ts) (map replace xs)
-                replace (IndexProject f ts ix) = IndexProject f (map contextualize ts) (replace ix)
-                replace (IndexCall f ts xs) = IndexCall f (map contextualize ts) (map replace xs)
-                replace ix = ix
-            valueSig = sig {inputs = map contextualize (drop runtimeParameters (inputs sig))
-              , output = contextualize (output sig)}
+            valueSig = sig {inputs = drop runtimeParameters (inputs sig)}
         -- Constructor terms omit their family parameters. Expected result types
         -- recover phantom parameters too; otherwise infer from ordered payloads.
         known <- if length es == length (inputs valueSig) then
           maybe (pure M.empty) (liftEither . unify M.empty (output sig)) expected else pure M.empty
-        (types,values,rest) <- argumentsFor valueSig known es
+        (types,values,indices,rest) <- argumentsFor valueSig runtimeParameters (take runtimeParameters contextualIndices) known es
         let tyArgs = types
-        schemaOut <- liftEither (substitute tyArgs (output sig))
+        schemaOut <- liftEither (substitute tyArgs (replaceKnownInputs indices (output sig)))
         out <- if runtimeParameters == 0 then pure schemaOut else case expected of
           Just actual | typeKey actual == typeKey schemaOut -> pure actual
           _ -> abort Representation "Value-parameter constructor needs its contextual family type"
         ensureType inv [] out
         let recordConstructor = maybe False ((== String "record") . get "kind")
               (M.lookup (string (get "family" d)) (declarations inv))
-            captureValues = [indexTerm (length (filter isDynamic env)) ix | recordConstructor,(_,ix) <- snd (captureArguments tyArgs)]
+            captureValues = [indexTerm (length (filter isDynamic env)) ix | recordConstructor
+              ,ix <- map snd (snd (captureArguments tyArgs)) ++ take runtimeParameters contextualIndices]
             resultTerm = set "symbol" (String (instanceKey s tyArgs)) $ set "eliminations" (toJSON (map application (captureValues ++ values))) term
         eliminate out resultTerm rest
       "definition" -> do
@@ -1350,16 +1398,18 @@ expression inv stack env expected term = do
             valueElims = drop supplied es
         known <- if length valueElims == length (inputs sig) then
           maybe (pure explicit) (liftEither . unify explicit (output sig)) expected else pure explicit
-        (types,values,rest) <- argumentsFor (sig {inputs = drop (max 0 (dropped sig - parameters sig)) (inputs sig)}) known valueElims
+        let runtimeDropped = max 0 (dropped sig - parameters sig)
+        (types,values,indices,rest) <- argumentsFor (sig {inputs = drop runtimeDropped (inputs sig)}) runtimeDropped [] known valueElims
         ensureFunction inv stack s types
-        out <- liftEither (substitute types (output sig))
+        out <- liftEither (substitute types (replaceKnownInputs indices (output sig)))
         let resultTerm = set "symbol" (String (instanceKey s types)) $ set "eliminations" (toJSON (map application ([indexTerm (length (filter isDynamic env)) ix | (_,ix) <- snd (captureArguments types)] ++ values))) term
         eliminate out resultTerm rest
       _ -> abort Syntax "Term outside first-order specialization"
-    argumentsFor sig initial elims = do
+    argumentsFor sig offset prefix initial elims = do
       unless (length elims >= length (inputs sig)) (abort Representation "Partially applied specialized operation")
       initialKnown <- liftEither (completeKnown inv sig initial)
-      (known,values,actuals) <- foldM step (initialKnown,[],[]) (zip (inputs sig) (take (length (inputs sig)) elims))
+      (known,values,actuals,indices) <- foldM step (initialKnown,[],[],M.fromList (zip [0..] prefix))
+        (zip (inputs sig) (take (length (inputs sig)) elims))
       finalKnown <- liftEither (completeKnown inv sig known)
       args <- forM [0..parameters sig-1] $ \i -> maybe (abort Representation "Cannot resolve omitted type parameter") pure (M.lookup i finalKnown)
       unless (all closed (fst (captureArguments args))) (abort Representation "Unresolved concrete type arguments")
@@ -1367,11 +1417,11 @@ expression inv stack env expected term = do
       expectedInputs <- liftEither (traverse (substitute args) (inputs sig))
       unless (length actuals == length expectedInputs && all (either (const False) (const True) . uncurry (unify M.empty)) (zip expectedInputs actuals))
         (abort Semantics "Specialized argument constraints do not agree")
-      pure (args,values,drop (length (inputs sig)) elims)
+      pure (args,values,indices,drop (length (inputs sig)) elims)
       where
-        step (known,values,actuals) (patternType,e) = do
+        step (known,values,actuals,indices) (patternType,e) = do
           value <- liftEither (app e)
-          let fill t = case substitute [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] t of
+          let fill t = case substitute [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] (replaceKnownInputs indices t) of
                 Right actual | resolved actual -> Just actual
                 _ -> Nothing
               resolved Parameter{} = False
@@ -1390,7 +1440,20 @@ expression inv stack env expected term = do
           (actual,v) <- expression inv stack env (fill patternType) value
           known' <- liftEither (unify known patternType actual)
           completed <- liftEither (completeKnown inv sig known')
-          pure (completed,values ++ [v],actuals ++ [actual])
+          let concrete = substitute [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
+                (replaceKnownInputs indices patternType)
+              index = concrete >>= \domain -> readIndex inv (runtimeBindings env) domain value
+              recovered = recoverInputs indices patternType actual
+              next = case index of
+                Right (Runtime _ ix) -> M.insert (offset+length actuals) ix recovered
+                _ -> recovered
+          pure (completed,values ++ [v],actuals ++ [actual],next)
+        recoverInputs table (Runtime _ (IndexInput i)) (Runtime _ ix) = M.insertWith (\_ prior -> prior) i ix table
+        recoverInputs table (Named s xs) (Named t ys) | s == t && length xs == length ys =
+          foldl (\known (a,b) -> recoverInputs known a b) table (zip xs ys)
+        recoverInputs table (FamilyApplication f xs) (FamilyApplication g ys) | f == g && length xs == length ys =
+          foldl (\known (a,b) -> recoverInputs known a b) table (zip xs ys)
+        recoverInputs table _ _ = table
     eliminate ty value [] = pure (ty,value)
     eliminate ty@(Named owner args) value (e:rest) = do
       unless (get "tag" e == String "project") (abort Representation "Extra value application is unsupported")

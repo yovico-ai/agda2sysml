@@ -205,6 +205,28 @@ Computed schema concatenation also supports `append` and `nativeAppend` through
 the structural calculation rule below. Higher-order handlers and other
 unsupported definitions in `AlgebraicValues` remain explicit refusals.
 
+The existing `AlgebraicValues.encode` and `decode` also translate. Their native
+tagged sum retains the chosen constructor, every typed payload, inactive slots,
+and the complete `Active` evidence linking the tag to the slots. Constructor
+positions distinguish alternatives even when their payload schemas are equal.
+Parsed-model checks compare independently assembled complete results and reject
+inconsistent tags, schemas, slots, missing evidence and members at a wrong atom.
+
+Relevant datatype value parameters omitted from constructor terms are recovered
+from the expected family. Indexed records store these parameters explicitly;
+their projections read the actual receiver's stored parameters. Constructor and
+call substitution preserve the separate scopes of caller indices and local
+telescope indices. Splitting a value remaps dependent types to the reconstructed
+constructor and its ordered payload, rather than reusing stale input positions.
+Later family indices and call arguments are checked against actual preceding
+values. Unknown arguments do not establish index equality.
+
+Branch facts retain ordinary list reconstruction and the tag of an indexed sum.
+Empty-fibre checks may compare payloads only for records or a sum constructor
+whose tag is established on both sides. Disjoint nested tags can justify an
+impossible branch; an unknown payload or unrelated scrutinee cannot. Recursive
+payload comparison stops at a repeated carrier and remains conservative.
+
 ## First-order helper calls
 
 ### Dependent pairs and projected record adapters
@@ -583,10 +605,19 @@ results and valid/invalid computed constraints.
 
 ## Computed structured indices
 
-After unindexed carriers are admitted, a separate pass can admit acyclic native
+After carriers are admitted, a separate pass can admit acyclic native
 helpers over those carriers. Indexed families consuming their results do not
 justify their own helpers. Every helper still needs a supported body and complete
 call closure; a signature alone is insufficient.
+
+Checked recursive helpers with indexed results, such as the existing `absent`
+slot constructor, may also appear in indices after their carriers are admitted.
+They require safe-module termination evidence and a supported complete call
+closure. Symbolic comparison unfolds a recursive symbol once along each path
+and leaves further calls opaque; native emission retains the recursive call.
+This bounded comparison does not assume injectivity or prove arbitrary recursive
+equations. Unindexed recursive helpers continue to require the concatenation
+certificate below.
 
 A recursive list helper has a finite concatenation normal form only when its
 checked native body matches both constructor equations: the empty branch returns

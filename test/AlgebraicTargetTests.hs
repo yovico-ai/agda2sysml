@@ -134,6 +134,7 @@ universeAt l = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= obj
 main :: IO ()
 main = do
   familyParameterChecks
+  constructorScopeChecks
   reductionChecks
   naturalChecks
   constructorFibreChecks
@@ -1372,6 +1373,78 @@ constructorFibreChecks = do
         $ set "compiled" (split 0 [("packed",1,done 3 (variable 2 [])),("empty",0,absurd 2)]) decoder
   check (isLeft (A.function inv M.empty shapes unrelated))
     "constructor choice for another input justified an absurd branch"
+  let indexedToken c fields = A.Construct "IndexedToken"
+        (("constructor",A.Enumeration "IndexedToken.constructor-tag" c):("IndexedToken.index0",A.Input 0):fields)
+      indexedShape = A.Shape "IndexedToken" False
+        [A.Constructor "indexedPacked" [("indexedPacked.payload0",A.Boolean),("indexedPacked.payload1",A.Boolean)] [A.Input 0]
+        ,A.Constructor "indexedEmpty" [("indexedEmpty.payload0",A.Boolean)] [A.Input 0]] [A.Boolean]
+      indexedProof = A.Shape "IndexedProof" False
+        [A.Constructor "indexedWitness" [("indexedWitness.payload0",A.Boolean),("indexedWitness.payload1",A.Boolean)]
+          [A.Input 0,indexedToken "indexedPacked" [("indexedPacked.payload0",A.Input 0),("indexedPacked.payload1",A.Input 1)] ]]
+        [A.Boolean,A.Fibre "IndexedToken" [A.Input 0]]
+      indexedShapes = M.fromList [("IndexedToken",indexedShape),("IndexedProof",indexedProof)]
+      tokenType b = object ["term" .= call "IndexedToken" [b] []]
+      proofType b t = object ["term" .= call "IndexedProof" [b,t] []]
+      indexedDecoder = set "type" (piType True (named "Bool") (piType True (tokenType (variable 0 []))
+        (piType False (proofType (variable 1 []) (variable 0 [])) (named "Bool"))))
+        $ operation "indexedUnpack" [] "Bool" (split 1
+          [("indexedPacked",2,done 4 (variable 1 [])),("indexedEmpty",1,absurd 3)])
+  _ <- either (fail . show) pure (A.function inv M.empty indexedShapes indexedDecoder)
+  let indexedInhabited = indexedProof {A.variants = A.variants indexedProof ++
+        [A.Constructor "indexedEmptyWitness" [("indexedEmptyWitness.payload0",A.Boolean)]
+          [A.Input 0,indexedToken "indexedEmpty" [("indexedEmpty.payload0",A.Input 0)]] ]}
+  check (isLeft (A.function inv M.empty (M.insert "IndexedProof" indexedInhabited indexedShapes) indexedDecoder))
+    "indexed constructor tag separation ignored an inhabitant of the empty branch"
+
+constructorScopeChecks :: IO ()
+constructorScopeChecks = do
+  let universe = universeAt (level 0)
+      arrow binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      applied name args = object ["term" .= call name args []]
+      var i = object ["term" .= variable i []]
+      bool = P.Named "Bool" []
+      boolean = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" universe
+      booleanConstructor c = set "family" (String "Bool") $ declaration c "constructor" (named "Bool")
+      wrapped value = applied "Wrapped" [value]
+      wrapper = set "parameters" (Number 1) $ declaration "Wrapped" "datatype" (arrow False (named "Bool") universe)
+      mark = set "parameters" (Number 1) $ set "family" (String "Wrapped") $ declaration "mark" "constructor"
+        (arrow True (named "Bool") (arrow True (named "Bool") (wrapped (variable 1 []))))
+      indexed = declaration "Indexed" "datatype" (arrow True (named "Bool")
+        (arrow False (wrapped (variable 0 [])) universe))
+      packed = set "parameters" (Number 1) $ declaration "Packed" "record" (arrow False (named "Bool") universe)
+      projection = set "projection" (object ["proper" .= ("Packed" :: Text),"index" .= (2 :: Int)])
+        $ declaration "value" "function" (arrow True (named "Bool")
+          (arrow True (applied "Packed" [variable 0 []]) (wrapped (variable 1 []))))
+      holder = set "parameters" (Number 1) $ declaration "Holder" "datatype" (arrow True universe universe)
+      hold = set "parameters" (Number 1) $ set "family" (String "Holder") $ declaration "hold" "constructor"
+        (arrow True universe (arrow False (var 0) (applied "Holder" [variable 0 []])))
+      holding = set "parameters" (Number 1) $ declaration "Holding" "datatype" (arrow True universe
+        (arrow False (applied "Holder" [variable 0 []]) universe))
+      defs = [boolean,booleanConstructor "true",booleanConstructor "false",wrapper,mark,indexed,packed,projection,holder,hold,holding]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty M.empty
+      yes = P.IndexConstructor "true" [] []
+      no = P.IndexConstructor "false" [] []
+      member = P.Named "Wrapped" [P.Runtime bool yes]
+      term = call "Indexed" [constructor "true" [],constructor "mark" [constructor "false" []]] []
+  check (P.readType inv [] term == Right (P.Named "Indexed"
+    [P.Runtime bool yes,P.Runtime member (P.IndexConstructor "mark" [] [no])]))
+    "omitted runtime constructor parameter was not recovered from the preceding family index"
+  check (isLeft (P.readType inv [] (call "Indexed" [constructor "true" [],constructor "mark" []] [])))
+    "omitted value parameter recovery admitted a missing constructor payload"
+  check (P.readType inv [Just (P.Runtime (P.Named "Packed" [P.Runtime bool yes]) (P.IndexInput 7))]
+    (variable 0 ["value"]) == Right (P.Runtime member (P.IndexProject "value" [] (P.IndexInput 7))))
+    "record projection lost its runtime parameter or actual receiver"
+  let contextual = P.Named "Wrapped" [P.Runtime bool (P.IndexInput 0)]
+      holderTerm = call "Holding" [variable 1 [],constructor "hold" [variable 0 []]] []
+      expected = P.Named "Holding" [contextual,P.Runtime (P.Named "Holder" [contextual])
+        (P.IndexConstructor "hold" [contextual] [P.IndexInput 5])]
+  check (P.readType inv [Just (P.Runtime contextual (P.IndexInput 5)),Just contextual] holderTerm == Right expected)
+    "constructor substitution captured an index belonging to its caller's static argument"
+  check (isLeft (P.readType inv [Just (P.Runtime (P.Named "Wrapped" [P.Runtime bool (P.IndexInput 1)]) (P.IndexInput 5)),Just contextual] holderTerm))
+    "constructor substitution admitted a payload at a different caller index"
 
 familyParameterChecks :: IO ()
 familyParameterChecks = do
