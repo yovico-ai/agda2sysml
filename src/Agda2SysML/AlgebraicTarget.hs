@@ -117,7 +117,8 @@ located rule input premises e = Annotated (D.origin rule input premises parents)
   where parents = case e of Annotated o _ -> [o]; _ -> []
 
 data Calculation = Calculation
-  { calculationSymbol :: Text, inputs :: [Carrier], result :: Carrier, body :: Expression }
+  { calculationSymbol :: Text, inputs :: [Carrier], result :: Carrier, body :: Expression
+  , staticIndexEquations :: [(Carrier,Expression,Expression)] }
   deriving (Eq, Show)
 
 retain :: Text -> Expression -> Expression -> Expression
@@ -522,7 +523,7 @@ functions inv finite shapes = functionsWith (indexHelpers inv finite shapes (fin
 finiteHelpers :: Inventory -> M.Map Text F.Domain -> Helpers
 finiteHelpers inv finite = close acyclic
   where
-    admitted = M.mapMaybe (either (const Nothing) Just) (functionsWith M.empty inv finite M.empty)
+    admitted = M.filter (null . staticIndexEquations) $ M.mapMaybe (either (const Nothing) Just) (functionsWith M.empty inv finite M.empty)
     acyclic = M.fromList [(calculationSymbol c,c) | AcyclicSCC c <- stronglyConnComp
       [(c,s,S.toList (dependencies c)) | (s,c) <- M.toList admitted]]
     close table = let next = M.filter (\c -> dependencies c `S.isSubsetOf` M.keysSet table) table
@@ -536,7 +537,7 @@ indexHelpers :: Inventory -> M.Map Text F.Domain -> Shapes -> Helpers -> Helpers
 indexHelpers inv finite shapes initial = close candidates
   where
     independent = M.filter (null . indexTypes) shapes
-    admitted = M.mapMaybe (either (const Nothing) Just) (functionsWith initial inv finite independent)
+    admitted = M.filter (null . staticIndexEquations) $ M.mapMaybe (either (const Nothing) Just) (functionsWith initial inv finite independent)
     groups = stronglyConnComp [(c,s,S.toList (dependencies c)) | (s,c) <- M.toList admitted]
     candidates = M.union initial (M.fromList (concatMap select groups))
     select (AcyclicSCC c) = [(calculationSymbol c,c)]
@@ -593,6 +594,7 @@ functionsWith helpers inv finite shapes = close checkedCycles
 dependencies :: Calculation -> S.Set Text
 dependencies calc = calls (body calc) `S.union` S.unions
   [S.unions (map calls xs) | Fibre _ xs <- result calc : inputs calc]
+  `S.union` S.unions [calls left `S.union` calls right | (_,left,right) <- staticIndexEquations calc]
 
 calls :: Expression -> S.Set Text
 calls (Call s args) = S.insert s (S.unions (map calls args))
@@ -612,6 +614,12 @@ functionWith inv finite helpers shapes signatures d = do
     (refuse Semantics "Opaque helper body cannot justify a native calculation")
   let s = string (get "name" d)
   (ins,out) <- signature inv finite helpers shapes d
+  equations <- forM (array (get "closureIndexEquations" d)) $ \equation -> do
+    let env = reverse (zip ins (map Input [0..]))
+    domain <- carrierIn inv finite helpers shapes env (get "domain" equation)
+    left <- indexExpression inv finite helpers shapes env domain (get "left" equation)
+    right <- indexExpression inv finite helpers shapes env domain (get "right" equation)
+    pure (domain,left,right)
   lowered <- if get "kind" d == String "primitive" then do
     let operation = primitiveOperation (string (get "primitive" d))
     (op,typ) <- maybe (refuse Semantics "Primitive has no native arithmetic rule") Right operation
@@ -632,8 +640,8 @@ functionWith inv finite helpers shapes signatures d = do
       dropped <- if p == Null then Right 0 else subtract 1 <$> integer (get "index" p)
       unless (dropped >= 0 && dropped <= length ins)
         (refuse Representation "Unsupported omitted runtime indices")
-      lower Nothing [] out (drop dropped (zip ins (map Input [0..]))) tree
-  pure (Calculation s ins out lowered)
+      lower Nothing [(left,right) | (_,left,right) <- equations] out (drop dropped (zip ins (map Input [0..]))) tree
+  pure (Calculation s ins out lowered equations)
   where
     constructors = constructorTable shapes
     projections = projectionTable shapes
@@ -776,15 +784,19 @@ functionWith inv finite helpers shapes signatures d = do
         orient (NumberLiteral a,Numeric "+" y (NumberLiteral b)) | a >= b = orient (NumberLiteral (a-b),y)
         orient (Numeric "+" x (NumberLiteral a),NumberLiteral b) | b >= a = orient (x,NumberLiteral (b-a))
         orient (Construct s [(f,x)],Construct t [(g,y)])
-          | s == t && f == sequenceField && g == sequenceField = orientSequence (x,y)
+          | s == t && f == sequenceField && g == sequenceField = orientSequence s (x,y)
         orient (Sequence (x:xs),Sequence (y:ys)) = orient (x,y) ++ orient (Sequence xs,Sequence ys)
         orient (x,y) | x == y = []
                      | isReference x = [(x,y)]
                      | isReference y = [(y,x)]
                      | otherwise = []
-        orientSequence (Sequence [x,Project xs f],Sequence [y,Project ys g])
+        orientSequence _ (Sequence [x,Project xs f],Sequence [y,Project ys g])
           | f == sequenceField && g == sequenceField = orient (x,y) ++ orient (xs,ys)
-        orientSequence values = orient values
+        orientSequence owner (Sequence (x:xs),Sequence [y,Project ys f])
+          | f == sequenceField = orient (x,y) ++ orient (Construct owner [(sequenceField,Sequence xs)],ys)
+        orientSequence owner (Sequence [x,Project xs f],Sequence (y:ys))
+          | f == sequenceField = orient (x,y) ++ orient (xs,Construct owner [(sequenceField,Sequence ys)])
+        orientSequence _ values = orient values
     branchEquations Boolean selected c = Right [(selected,Literal (c == builtin inv "true"))]
     branchEquations Natural selected c | c == builtin inv "zero" = Right [(selected,NumberLiteral 0)]
     branchEquations Natural selected c | c == builtin inv "suc" =
@@ -1238,6 +1250,8 @@ calculationContractsIn :: Shapes -> (Text -> Text) -> Calculation -> [Text]
 calculationContractsIn shapes label c = concat
   [refinementTextIn shapes label input binding (input i) t | (i,t) <- zip [0 :: Int ..] (inputs c)]
   ++ refinementTextIn shapes label input binding returned (result c)
+  ++ [indexEquality shapes label input binding domain (renderWith label input left) right
+     | (domain,left,right) <- staticIndexEquations c]
   where
     input i = quote (label (calculationSymbol c)) <> "::" <> quote ("input" <> T.pack (show i))
     returned = quote (label (calculationSymbol c)) <> "::'result'"
@@ -1425,7 +1439,7 @@ constructorCalculations inv shapes =
              ,"arity" .= length (payload c)]) []
          _ -> D.generated "native.constructor-helper"
    in Calculation (constructorSymbol c) (map snd (payload c)) (familyCarrier sh (resultIndices c))
-        (Annotated rootOrigin (Construct (shapeSymbol sh) (construction Nothing sh c values)))
+        (Annotated rootOrigin (Construct (shapeSymbol sh) (construction Nothing sh c values))) []
     | sh <- M.elems shapes,c <- variants sh,M.member (constructorSymbol c) (declarations inv)]
 
 primitiveOperation :: Text -> Maybe (Text,Carrier)
@@ -1435,7 +1449,7 @@ primitiveOperation p = lookup p
 
 naturalCalculations :: Inventory -> [Calculation]
 naturalCalculations inv =
-  [Calculation s args Natural (Annotated (D.derived "native.natural-constructor" [D.root s "type"] Null []) expr)
+  [Calculation s args Natural (Annotated (D.derived "native.natural-constructor" [D.root s "type"] Null []) expr) []
   | (key,args,expr) <- [("zero",[],NumberLiteral 0),("suc",[Natural],Numeric "+" (Input 0) (NumberLiteral 1))]
   , let s = builtin inv key, not (T.null s), any ((== s) . fst) (S.toList (required inv))]
 

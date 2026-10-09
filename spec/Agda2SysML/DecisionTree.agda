@@ -16,6 +16,20 @@ evaluate (branch predicate positive negative) input with predicate input
 ... | true = evaluate positive input
 ... | false = evaluate negative input
 
+-- First-order use of a known decision tree. Captured outcomes remain arbitrary
+-- complete domain values; specialization must not reduce them to truth values.
+choose : {O : Set} → Bool → O → O → O
+choose input positive negative = evaluate
+  (branch (λ flag → flag) (leaf (λ _ → positive)) (leaf (λ _ → negative))) input
+
+choose-true : {O : Set} (positive negative : O)
+  → choose true positive negative ≡ positive
+choose-true positive negative = refl
+
+choose-false : {O : Set} (positive negative : O)
+  → choose false positive negative ≡ negative
+choose-false positive negative = refl
+
 record Rule (Input Output : Set) : Set where
   constructor rule
   field
@@ -33,6 +47,20 @@ select [] input = nothing
 select (rule guard effect ∷ rest) input with guard input
 ... | true = just (effect input)
 ... | false = select rest input
+
+-- A known rule container retains a captured effect and an explicit runtime
+-- guard. A failed guard means no result, rather than a fabricated effect.
+guardedValue : {O : Set} → Bool → O → Maybe O
+guardedValue input output = select
+  (rule (λ flag → flag) (λ _ → output) ∷ []) input
+
+guardedValue-accepts : {O : Set} (output : O)
+  → guardedValue true output ≡ just output
+guardedValue-accepts output = refl
+
+guardedValue-refuses : {O : Set} (output : O)
+  → guardedValue false output ≡ nothing
+guardedValue-refuses output = refl
 
 normalize : {I O : Set} → Tree I O → List (Rule I O)
 normalize (leaf result) = rule (λ _ → true) result ∷ []

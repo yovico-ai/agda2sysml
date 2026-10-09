@@ -224,6 +224,20 @@ dispatch : ∀ {schema Result} → Handlers Result schema → Sum schema → Res
 dispatch (branch f fs) (here xs) = f xs
 dispatch (branch f fs) (there value) = dispatch fs value
 
+-- Two nullary alternatives with arbitrary captured outcomes. This exposes a
+-- first-order consumer of constructor-held handlers without runtime functions.
+constantDispatch : {Result : Set} → Result → Result → Sum ([] ∷ [] ∷ []) → Result
+constantDispatch positive negative = dispatch
+  (branch (λ _ → positive) (branch (λ _ → negative) none))
+
+constantDispatch-first : {Result : Set} (positive negative : Result)
+  → constantDispatch positive negative (here nil) ≡ positive
+constantDispatch-first positive negative = refl
+
+constantDispatch-second : {Result : Set} (positive negative : Result)
+  → constantDispatch positive negative (there (here nil)) ≡ negative
+constantDispatch-second positive negative = refl
+
 nativeDispatch : ∀ {schema Result} → Handlers Result schema → Native schema → Result
 nativeDispatch (branch f fs) (tagged selected (slot (just xs) _) at-selected) = f (decodeFields xs)
 nativeDispatch (branch f fs) (tagged (later t) (slot nothing ss) (at-later proof)) =
