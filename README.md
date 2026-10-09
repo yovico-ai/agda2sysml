@@ -41,8 +41,10 @@ browser review and the official SysML notebook tools.
   report. The alpha emits their native types, calculations, and constraints;
   automatic SysML `state def` synthesis and state-transition diagrams are
   future work.
-- Retain formal statements and proofs as inspectable source contracts.
-  Retention is distinguished from executable translation.
+- Emit supported equality theorem statements as native SysML constraints,
+  retaining their inputs, hypotheses, index contracts, and proof-source links.
+  Unsupported statements and proof bodies remain inspectable source contracts;
+  native statements and executable calculations have separate coverage counts.
 - Write validated SysML, completeness diagnostics, source correspondence,
   artifact hashes, and a self-contained `review.html` with search and filters.
 
@@ -93,10 +95,13 @@ levels, arbitrary higher-order values, unsupported recursive families, general
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model currently has 74 native project functions and 740
-unresolved requirements. These are coverage observations, not a completion
-percentage or an end-to-end correctness claim. Formal proof contracts can be
-retained even when associated ordinary calculations remain unsupported.
+The default self model has 166 native calculation functions out of 722 (23.0%)
+and 42 native equality statements, including 7 compiler-generated helpers.
+Two functions have both representations: 206/722 function declarations (28.5%)
+have a native calculation or statement constraint. This is declaration
+coverage, not a percentage of application behavior or a correctness claim.
+There are still 608 unresolved requirements. Source-only proof retention is
+excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove
 equivalence or guarantee that a downstream tool can execute every calculation.

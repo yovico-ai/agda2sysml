@@ -5,7 +5,8 @@
 module Agda2SysML.AlgebraicTarget
   ( Carrier(..), Shape(..), pattern Shape, Constructor(..), Calculation(..), Expression(Input, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Apply, Absent)
   , discover, function, symbols, renderShapes, renderShapesIn, renderCalculation, renderCalculationDoc, references
-  , constructorCalculations, naturalCalculations, generatedNames, carrierReport, functions, calls, calculationContracts, calculationContractsIn, dependencies ) where
+  , constructorCalculations, naturalCalculations, generatedNames, carrierReport, functions, calls, calculationContracts, calculationContractsIn, dependencies
+  , EqualityStatement(..), equalityStatements, renderStatementDoc ) where
 
 import qualified Agda2SysML.Derivation as D
 import Agda2SysML.Inventory hiding (field)
@@ -193,10 +194,18 @@ applicationValue e | get "tag" e == String "apply" = Right (get "value" (get "ar
 indexExpression :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes -> [(Carrier,Expression)] -> Carrier -> Value -> Either Refusal Expression
 indexExpression inv finite helpers shapes env expected t = do
   (actual,e) <- infer t
-  unless (actual == expected) (refuse Semantics "Index expression has the wrong admitted domain")
+  unless (canonical actual == canonical expected) (refuse Semantics "Index expression has the wrong admitted domain")
   pure (normalize e)
   where
     projections = projectionTable shapes
+    canonical (Fibre family indices) = case M.lookup family shapes of
+      Just sh | length indices == length (indexTypes sh) -> Fibre family [case domain of
+          Named owner | Just shape <- M.lookup owner shapes,Just _ <- sequenceElement shape ->
+            normalize (Project (expand helpers value) sequenceField)
+          _ -> expand helpers value
+        | (domain,value) <- zip (indexTypes sh) indices]
+      _ -> mapCarrier (expand helpers) (Fibre family indices)
+    canonical typ = typ
     infer term = fmap (\(typ,e) -> (typ,located "native.index-term" term (toJSON [renderWith id (T.pack . show) x | (_,x) <- env]) e)) $ do
       let es = array (get "eliminations" term)
       case string (get "tag" term) of
@@ -250,7 +259,7 @@ indexExpression inv finite helpers shapes env expected t = do
             unless (length es == length (inputs helper)) (refuse Syntax "Computed index helper arity mismatch")
             args <- foldM (\prior (domain,arg) -> do
               value <- applicationValue arg >>= infer
-              unless (fst value == mapCarrier (instantiate (map snd prior)) domain)
+              unless (canonical (fst value) == canonical (mapCarrier (instantiate (map snd prior)) domain))
                 (refuse Semantics "Computed index helper argument domain mismatch")
               pure (prior ++ [value])) [] (zip (inputs helper) es)
             let bindings = case M.lookup (calculationSymbol helper) (declarations inv) of
@@ -590,6 +599,47 @@ signature inv finite helpers shapes d = do
 -- A failed/recursive helper prevents every caller from acquiring a native rule.
 functions :: Inventory -> M.Map Text F.Domain -> Shapes -> M.Map Text (Either Refusal Calculation)
 functions inv finite shapes = functionsWith (indexHelpers inv finite shapes (finiteHelpers inv finite)) inv finite shapes
+
+-- A theorem statement is lowered from its checked type, independently of its
+-- proof body. Proof-valued inputs remain ordinary, constrained domain values.
+data EqualityStatement = EqualityStatement
+  { statementCalculation :: Calculation, statementDomain :: Carrier } deriving (Eq,Show)
+
+equalityStatements :: Inventory -> M.Map Text F.Domain -> Shapes
+  -> M.Map Text (Either Refusal Calculation) -> M.Map Text (Either Refusal EqualityStatement)
+equalityStatements inv finite shapes results = M.map (equalityStatement inv finite helpers shapes results)
+  (M.filter ((== String "native-equality-statement") . get "kind") (declarations inv))
+  -- Statements are checked after calculation admission. Unlike shape discovery,
+  -- they may refer to any fully admitted calculation (including unindexed safe
+  -- recursion), without using its body to justify admission of its own carrier.
+  where helpers = M.union (M.mapMaybe (either (const Nothing) Just) results)
+          (indexHelpers inv finite shapes (finiteHelpers inv finite))
+
+equalityStatement :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes
+  -> M.Map Text (Either Refusal Calculation) -> Value -> Either Refusal EqualityStatement
+equalityStatement inv finite helpers shapes results d = do
+  unless (get "kind" d == String "native-equality-statement")
+    (refuse Syntax "Statement lacks checked equality preparation")
+  ty <- field inv "type" d
+  (ins,env,out) <- typedTelescope inv finite helpers shapes ty
+  resultType <- carrierIn inv finite helpers shapes env out
+  (symbol,values) <- case resultType of
+    Fibre s xs | length xs >= 2 -> Right (s,xs)
+    _ -> refuse Representation "Statement result is not an admitted equality family"
+  eq <- maybe (refuse Syntax "Missing checked equality carrier") Right (M.lookup symbol (declarations inv))
+  unless (not (T.null (builtin inv "equality")) &&
+    (symbol == builtin inv "equality" || get "specializationOrigin" eq == String (builtin inv "equality")))
+    (refuse Semantics "Statement result is not Agda's registered equality")
+  sh <- maybe (refuse Representation "Equality carrier is not admitted") Right (M.lookup symbol shapes)
+  domain <- at (length values-2) (indexTypes sh)
+  left <- at (length values-2) values
+  right <- at (length values-1) values
+  let c = Calculation (string (get "name" d)) ins Boolean
+        (located "native.equality-statement" out Null (Equal left right)) []
+      admitted = M.keysSet (M.mapMaybe (either (const Nothing) Just) results)
+  unless (dependencies c `S.isSubsetOf` admitted)
+    (refuse Representation "Statement depends on an untranslated calculation")
+  pure (EqualityStatement c (mapCarrier (instantiate values) domain))
 
 -- Finite-only signatures do not depend on family admission. Validate their
 -- bodies and acyclic dependency closure before exposing them to index parsing.
@@ -1183,13 +1233,20 @@ renderCalculation :: Inventory -> Shapes -> (Text -> Text) -> Calculation -> [Te
 renderCalculation inv shapes label = T.lines . D.render . renderCalculationDoc inv shapes label
 
 renderCalculationDoc :: Inventory -> Shapes -> (Text -> Text) -> Calculation -> D.Doc
-renderCalculationDoc inv shapes label c = D.mark owner "calculation"
-  (D.derived "native.calculation" [D.root owner "type"] Null []) $
-  D.linesDoc ([D.text ("  calc def " <> quote (label owner) <> " {")]
+renderCalculationDoc = renderOperationDoc Nothing
+
+renderStatementDoc :: Inventory -> Shapes -> (Text -> Text) -> EqualityStatement -> D.Doc
+renderStatementDoc inv shapes label law =
+  renderOperationDoc (Just (statementDomain law)) inv shapes label (statementCalculation law)
+
+renderOperationDoc :: Maybe Carrier -> Inventory -> Shapes -> (Text -> Text) -> Calculation -> D.Doc
+renderOperationDoc statement inv shapes label c = D.mark owner (if isStatement then "statement-constraint" else "calculation")
+  (D.derived (if isStatement then "native.equality-statement" else "native.calculation") [D.root owner "type"] Null []) $
+  D.linesDoc ([D.text ("  " <> (if isStatement then "constraint" else "calc") <> " def " <> quote (label owner) <> " {")]
   ++ [D.text ("    in " <> quote (parameterName i) <> " : Base::Anything [0..*];") | i <- parameters]
   ++ [D.text ("    in " <> quote (familyName i) <> " : " <> quote (label (familyRow s)) <> " [0..*];") | (i,s) <- families]
   ++ concat [renderInput i typ | (i,typ) <- zip [0 :: Int ..] (inputs c)]
-  ++ renderResult
+  ++ (if isStatement then [] else renderResult)
   ++ [D.mark owner "family-domain-contract" (D.derived "native.family-domain-contract" [D.root owner "type"] Null [])
       (D.text ("    assert constraint { " <> condition <> " }")) | condition <- familyDomainConstraints shapes label binding families]
   ++ [D.mark owner "parameter-contract" (D.derived "native.open-parameter-contract" [D.root owner "type"] Null [])
@@ -1200,8 +1257,10 @@ renderCalculationDoc inv shapes label c = D.mark owner "calculation"
             Just evidence -> ("index-contract",evidence)
             Nothing -> ("index-contract-boundary",D.generated "native.index-contract")
       in D.mark owner role origin (D.text ("    assert constraint " <> quote ("index-contract-" <> T.pack (show i)) <> " { " <> condition <> " }"))
-     | (i,condition) <- zip [0 :: Int ..] (calculationContractsIn shapes label c)] ++ ["  }"])
+     | (i,condition) <- zip [0 :: Int ..] (calculationContractsIn shapes label c)]
+  ++ (if isStatement then ["    " <> statementBody] else []) ++ ["  }"])
   where
+    isStatement = case statement of Just _ -> True; Nothing -> False
     owner = calculationSymbol c
     calcParameters s = maybe [] Specialize.nativeParameters (M.lookup s (declarations inv))
     calcFamilies s = maybe [] Specialize.nativeFamilies (M.lookup s (declarations inv))
@@ -1213,6 +1272,13 @@ renderCalculationDoc inv shapes label c = D.mark owner "calculation"
     contractOrigins = M.union (constructorInputContracts inv shapes c) (constructorResultContracts inv shapes c)
     input i = quote (label owner) <> "::" <> quote ("input" <> T.pack (show i))
     resultBody = renderParameterizedDoc label input owner calcBindings shapeBindings binding (body c)
+    statementBody = case (statement,body c) of
+      (Just (Named s),Equal left right) | Just sh <- M.lookup s shapes,Just _ <- sequenceElement sh ->
+        D.mark owner "statement-equality" (annotation (body c)) $
+          "SequenceFunctions::equals(" <> expression (Project left sequenceField) <> ", "
+            <> expression (Project right sequenceField) <> ")"
+      _ -> resultBody
+    expression = renderParameterizedDoc label input owner calcBindings shapeBindings binding
     renderResult = case result c of
       Callable domain out ->
         ["    return ref calc 'result' [1] = " <> resultBody <> " {"]

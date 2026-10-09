@@ -52,6 +52,42 @@ required by a transition, its additional executable or structural requirement
 must be discharged independently. Record structure includes its constructor
 and every declared field.
 
+## Native equality statements
+
+`native.equality-statement` emits a SysML `constraint def` for a checked
+function signature ending in Agda's registered equality type. Recognition uses
+the builtin's resolved identity, never the theorem's spelling or project.
+The constraint retains the supported telescope as typed inputs and compares
+the two checked conclusion expressions. It does not execute the proof body
+or replace the conclusion with `true`.
+
+Preparation uses the existing type, family, specialization and calculation
+rules. Every calculation referenced by the conclusion or input indices must
+be admitted. Open type/family bindings and index contracts remain explicit.
+Proof-valued hypotheses remain full indexed evidence inputs, with their
+constructor payloads and validity constraints. They are not erased or replaced
+by Boolean flags. Ordered list conclusions compare their ordered, nonunique
+contents rather than their extent-binding metadata.
+
+The proof-source obligation remains `source.proof`, with source and dependency
+provenance. Native statement coverage is distinct from calculation coverage:
+emitting a constraint does not translate a proof implementation or prove the
+constraint in SysML. Unsupported statement preparation or dependencies keep
+the exact textual statement and report the reason. An unsuccessful optional
+statement attempt does not introduce new required runtime obligations.
+
+`correspondence.json.nativeStatements` lists the checked symbol, equality kind,
+`translated` or `textual` status, native target when available, refusal reason
+and code otherwise, and proof-source link. The coverage fields
+`nativeEqualityStatements` and `textualEqualityStatements` count these attempts
+separately. Generated Agda helper declarations can be among them; an authored
+law count must identify those separately.
+
+Record equality uses SysML data-value equality, retaining every declared field.
+The parsed-model oracle respects field ordering/uniqueness, while the pinned
+Pilot has a reproduced limitation comparing equivalent constructed records. See the
+[interactive execution limits](interactive-sysml.md#execution-limits).
+
 ## Dependent families and abstract parameters
 
 The governing `DependentFamilies` law is universe-polymorphic: a member of a
