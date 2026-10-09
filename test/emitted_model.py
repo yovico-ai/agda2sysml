@@ -24,6 +24,27 @@ class Extent:
     member: object
 
 
+@dataclass(frozen=True)
+class CalculationValue:
+    """A native calculation usage bound to a parsed calculation definition."""
+    symbol: str
+
+
+@dataclass(frozen=True)
+class CallableSignature:
+    argument: str
+    result: str
+    assertions: tuple
+
+
+@dataclass
+class BoundCalculation:
+    value: object
+    signature: CallableSignature
+    scope: str
+    environment: dict
+
+
 def sequence(value):
     return value if isinstance(value, tuple) else (value,)
 
@@ -193,6 +214,22 @@ class Model:
                     assertions.append(parser.expression())
                     parser.expect('}')
                 elif parser.take('in') or parser.take('attribute'):
+                    if parser.take('calc'):
+                        field = parser.qualified()
+                        parser.expect('{')
+                        parser.expect('in'); parser.expect("'argument'"); parser.expect(':')
+                        domain = parser.qualified()
+                        parser.expect('['); parser.expect('1'); parser.expect(']'); parser.expect(';')
+                        parser.expect('return'); parser.expect("'result'"); parser.expect(':')
+                        codomain = parser.qualified()
+                        parser.expect('['); parser.expect('1'); parser.expect(']'); parser.expect(';')
+                        contracts = []
+                        while parser.take('assert'):
+                            parser.expect('constraint'); parser.expect('{')
+                            contracts.append(parser.expression()); parser.expect('}')
+                        parser.expect('}')
+                        inputs.append((field, CallableSignature(domain, codomain, tuple(contracts)), 1, 1))
+                        continue
                     if parser.take('redefines'):
                         while parser.pop() != ';':
                             pass
@@ -239,6 +276,11 @@ class Model:
         assert len(inputs) == len(arguments), ('native arity mismatch', symbol, len(arguments), len(inputs))
         env = {field: value for (field, _, _, _), value in zip(inputs, arguments)}
         env.update({symbol + '::' + field: value for field, value in list(env.items())})
+        for (field, carrier, _, _), value in zip(inputs, arguments):
+            if isinstance(carrier, CallableSignature):
+                assert isinstance(value, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
+                binding = BoundCalculation(value, carrier, symbol + '::' + field, dict(env))
+                env[field] = env[symbol + '::' + field] = binding
         if check and symbol not in self.constraints:
             for (_, carrier, low, high), value in zip(inputs, arguments):
                 self.boundary(carrier, low, high, value, depth)
@@ -250,6 +292,15 @@ class Model:
         return result
 
     def boundary(self, carrier, low, high, value, depth=0):
+        if isinstance(carrier, CallableSignature):
+            assert isinstance(value, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
+            while isinstance(value, BoundCalculation):
+                value = value.value
+            inputs = self.calculations[value.symbol][0]
+            assert len(inputs) == 1, 'callback arity mismatch'
+            for expected, actual in ((carrier.argument, inputs[0][1]), (carrier.result, self.results[value.symbol])):
+                assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
+            return
         if carrier in ('Boolean', 'Natural'):
             carrier = 'ScalarValues::' + carrier
         if isinstance(value, Extent):
@@ -294,6 +345,9 @@ class Model:
         if op == 'call':
             symbol, nodes = args
             values = [ev(node) for node in nodes]
+            if symbol in env:
+                assert len(values) == 1, 'callback invocation arity mismatch'
+                return self.invoke_callback(env[symbol], values[0], check, depth + 1)
             if symbol.startswith('SequenceFunctions::'):
                 method = symbol.split('::')[-1]
                 if method == 'includes': return includes(*values)
@@ -326,3 +380,18 @@ class Model:
         if op == '-': return left - right
         if op == '*': return left * right
         raise AssertionError(('unsupported native expression', ast))
+
+    def invoke_callback(self, binding, argument, check=True, depth=0):
+        if isinstance(binding, CalculationValue):
+            return self.invoke(binding.symbol, [argument], check, depth)
+        assert isinstance(binding, BoundCalculation), 'invocation target is not callable'
+        signature = binding.signature
+        if check:
+            self.boundary(signature.argument, 1, 1, argument, depth)
+        result = self.invoke_callback(binding.value, argument, check, depth)
+        if check:
+            self.boundary(signature.result, 1, 1, result, depth)
+            env = {**binding.environment, binding.scope + '::argument': argument,
+                   binding.scope + '::result': result}
+            assert all(self.evaluate(c, env, True, depth) is True for c in signature.assertions), 'callback contract failed'
+        return result

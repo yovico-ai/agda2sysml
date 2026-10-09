@@ -20,6 +20,7 @@ from dependent_record_path import verify_dependent_record_path
 from natural_values import verify_natural_values
 from tagged_sums import verify_tagged_sums
 from report_accounting import verify_report_accounting
+from native_callbacks import verify_native_callbacks
 
 
 def check(condition, message):
@@ -300,6 +301,10 @@ models:
           "finite-natural adapters lack complete arithmetic results and inconsistent-evidence refusals")
     sum_evidence = verify_tagged_sums(self_output)
     accounting_evidence = verify_report_accounting(self_output)
+    native_callback_evidence = verify_native_callbacks(self_output)
+    check(native_callback_evidence['operations'] == 8 and native_callback_evidence['comparisons'] >= 400
+          and native_callback_evidence['invalidCasesRejected'] >= 15,
+          'native unary callbacks lack complete results and invalid-binding checks')
     check(accounting_evidence['operations'] == 4 and accounting_evidence['comparisons'] >= 200
           and accounting_evidence['invalidCasesRejected'] == 28 and accounting_evidence['unusedRuntimeInputs'] == 0,
           'existing report accounting lacks complete counts, identity preservation or invalid-input refusals')

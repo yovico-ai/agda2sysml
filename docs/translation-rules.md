@@ -238,7 +238,8 @@ matches. Forwarding into another unused parameter is allowed only after the
 callee and its dependencies pass the same analysis. Carrier parameters also
 require every constructor to leave the parameter unused. Unknown or partial
 applications, missing metadata, opaque bodies and unsupported case trees prevent
-omission. Stored function payloads and live callbacks retain their usual refusal.
+omission. Stored function payloads remain outside the native callback-input rule;
+live unary callbacks use the rule below rather than being omitted.
 
 An admitted unused parameter occupies a static bookkeeping slot during
 specialization and contributes no runtime SysML input. The original quantified
@@ -776,6 +777,44 @@ function-valued result families, opaque or unchecked helper computations remain 
 boundaries. Static callback expansion is bounded to 128 active helper frames;
 exhausting that bound refuses rather than assumes semantic preservation.
 
+## Native unary callback inputs
+
+A checked input of type `A → B` is represented by a native `in calc` usage
+with one typed argument and one typed result. Applications invoke that usage
+directly. Passing the input to another admitted operation preserves the same
+binding, including through recursive helpers. The compiler checks both domain
+and result types before admitting an application; it retains open type extents,
+record payloads, indices and result contracts.
+
+The binding must denote a total, deterministic, side-effect-free mathematical
+function, as required when using SysML calculations mathematically. Its argument
+and result have multiplicity one, their declared carriers, and the applicable
+native extent/refinement constraints. These contracts do not prove purity or
+termination of an arbitrary externally supplied calculation. No function table,
+Agda value encoding, or target interpreter is emitted. See the native invocation
+mechanism in [KerML 1.0 §7.4.9.4](https://www.omg.org/spec/KerML/1.0/PDF) and
+calculations in [SysML 2.0 §7.19](https://www.omg.org/spec/SysML/2.0/Language/PDF).
+
+This rule covers unary callbacks with supported first-order domains and results.
+Dependent or multiargument callbacks, runtime function containers, and arbitrary
+function-valued results remain outside its boundary. Existing static closure
+specialization continues to handle supported concrete callbacks separately.
+
+The self specification exercises the rule through `BooleanLowering.map`,
+`Diagnostics.Accounting.mapEntry` and `mapReport`, `Diagnostics.Located.annotate`,
+`NaturalValues.caseNat` and `nativeCase`, and `SourceAlignment.Direct.mapMaybe`
+and `rename`. Tests vary supplied calculations, preserve complete evidence and
+opaque payloads, and use unbounded natural extents.
+
+**Pilot execution limitation:** the pinned Pilot 0.58.0 validates this native
+representation, but invocation through a bound callback can remain an unresolved
+`InvocationExpression` even when direct invocation of the supplied calculation
+works. Interactive callback execution is therefore not supported by this pinned
+toolchain. The independent test oracle parses the emitted SysML, invokes supplied
+native calculations, and checks complete results and contracts; this is distinct
+from official Pilot execution. Pilot can also report incompatible callback
+bindings as warnings, so validator acceptance alone is not refusal evidence.
+
 ## Checked reduction and retained source dependencies
 
 Demand-driven reduction follows transparent, terminating checked definitions,
@@ -785,6 +824,12 @@ fields by spelling. A projection may discard an unused evidence field because
 of its checked computational definition. Bounded reduction may refuse; exhausting
 the budget is never semantic evidence. `DefinitionalReduction` states the
 reduction, projection, closure, and record-field laws.
+
+For module-copy constructors, the inventory retains Agda's canonical constructor
+head. Reduction uses that checked identity and preserves the complete payload
+spine. It does not guess omitted phantom module parameters from names or choose
+an arbitrary type to fill them. Missing identity metadata and abstract aliases
+remain refused.
 
 The report retains the original conservative dependency obligations. After every
 selected root and its entire prepared dependency graph pass native admission,

@@ -28,6 +28,10 @@ browser review and the official SysML notebook tools.
   recursive carriers. Checked recursive calculations preserve their inputs.
 - Specialize supported concrete higher-order calls and perform checked
   definitional reduction at generation time.
+- Translate supported unary, nondependent callback inputs as native SysML
+  calculations, including invocation and forwarding through recursive helpers.
+  Callback behavior is independently tested; the pinned Pilot validates these
+  models but cannot execute the callback bindings reliably.
 - Describe **state machines** using Agda state/command types and transition
   functions or supported finite relations. YAML roles connect the state,
   commands, transition, outcomes, and selected contracts in the correspondence

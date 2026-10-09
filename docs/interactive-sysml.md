@@ -177,6 +177,15 @@ quantifier, or arbitrary-precision natural arithmetic. A result that remains
 an expression or feature reference is **unevaluated**, not a successful value.
 Evaluate small supported examples and inspect the returned result explicitly.
 
+Native unary callback inputs use `in calc` and invoke the bound calculation
+directly. Pilot 0.58.0 accepts these models but may leave callback invocations
+unevaluated, including forwarded bindings whose direct calculations evaluate
+successfully. Inspect their signatures, bodies and contracts interactively;
+do not treat an unresolved `InvocationExpression` as the callback's result.
+The independent parsed-model tests cover these operations; they are not evidence
+that Pilot can execute the same bindings. See the
+[callback rule and limitations](translation-rules.md#native-unary-callback-inputs).
+
 The project's independent tests parse emitted SysML and compare complete results
 for supported algorithms, including recursive and parameterized ones. That
 evidence is distinct from Pilot runtime execution. Retained Agda proofs remain

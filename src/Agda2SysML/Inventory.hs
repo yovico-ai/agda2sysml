@@ -99,8 +99,9 @@ dependencies inv d = do
   constructors <- field inv "constructors" d
   fields <- field inv "fields" d
   constructor <- field inv "constructor" d
+  canonicalConstructor <- field inv "canonicalConstructor" d
   pure (map string (array statement ++ array body ++ array constructors ++ array fields)
-    ++ [s | String s <- [constructor]])
+    ++ [s | String s <- [constructor,canonicalConstructor],s /= string (get "name" d)])
 
 required :: Inventory -> S.Set (Text,Text)
 required = S.unions . M.elems . modelRequirements
