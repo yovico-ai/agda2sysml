@@ -30,6 +30,9 @@ browser review and the official SysML notebook tools.
   definitional reduction at generation time.
 - Translate supported unary, nondependent callback inputs as native SysML
   calculations, including invocation and forwarding through recursive helpers.
+  Store these callbacks in records and constructor payloads: supplied decision
+  trees and ordered rule lists can retain guards, complete outcomes, and fallback
+  behavior through `evaluate`, `evaluatePartial`, `select`, and `withFallback`.
   Callback behavior is independently tested; the pinned Pilot validates these
   models but cannot execute the callback bindings reliably.
 - Describe **state machines** using Agda state/command types and transition

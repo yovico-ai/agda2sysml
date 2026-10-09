@@ -432,7 +432,11 @@ discover inv finite = go M.empty candidates
     deps sh = S.fromList [s | t <- indexTypes sh ++ case sequenceElement sh of
         Just element -> [element]
         Nothing -> [t | c <- variants sh,(_,t) <- payload c]
-      ,s <- case t of Named s -> [s]; Fibre s _ -> [s]; _ -> []]
+      ,s <- carrierDependencies t]
+    carrierDependencies (Callable a b) = carrierDependencies a ++ carrierDependencies b
+    carrierDependencies (Named s) = [s]
+    carrierDependencies (Fibre s _) = [s]
+    carrierDependencies _ = []
     close accepted table = let next = M.filter (\sh -> deps sh `S.isSubsetOf` (M.keysSet accepted `S.union` M.keysSet table `S.union` M.keysSet finite)) table
       in if M.keysSet next == M.keysSet table then table else close accepted next
     go accepted pending = let
@@ -447,6 +451,9 @@ discover inv finite = go M.empty candidates
           && maybe False (inductiveChecked inv) (M.lookup (shapeSymbol sh) (declarations inv))) shapes')
           (refuse Semantics "Recursive carrier component lacks safe inductive positivity evidence")
         let peers = map shapeSymbol shapes'
+        unless (null [s | sh <- shapes',c <- variants sh,(_,Callable a b) <- payload c
+          ,s <- carrierDependencies a ++ carrierDependencies b,s `elem` peers])
+          (refuse Representation "Recursive carrier through a callable requires a separate well-foundedness rule")
         pure [sh {recursivePeers = peers} | sh <- shapes']
       groups = map checked components
       members = close accepted (M.fromList [(shapeSymbol sh,sh) | Right group <- groups,sh <- group])
@@ -468,6 +475,9 @@ shape inv finite helpers shapes d | get "nativeFamily" d /= Null = do
   pure (member {typeParameters = Specialize.nativeParameters d,familyParameters = [(slot,symbol)],relationParameter = Just slot})
 shape inv finite helpers shapes d | get "nativeSequence" d /= Null = do
   element <- carrierIn inv finite helpers shapes [] (get "nativeSequence" d)
+  case element of
+    Callable{} -> refuse Representation "Sequences of callables require a separate representation rule"
+    _ -> pure ()
   cs <- map string . array <$> field inv "constructors" d
   let s = string (get "name" d)
       provisional = (Shape s False [] []) {sequenceElement = Just element,typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d}
@@ -1145,6 +1155,8 @@ renderParameterizedDoc label input owner calcParameters shapeParameters paramete
         (map (D.text . parameter) bindings ++ map go args) <> ")"
       Call sym args -> D.text (quote (label sym)) <> "(" <> D.joinDoc ", "
         (map (D.text . parameter) (calcParameters sym) ++ map go args) <> ")"
+      Apply (Project receiver member) value -> D.text (quote (label (callableInvoker member)))
+        <> "(" <> go receiver <> ", " <> go value <> ")"
       Apply fn value -> go fn <> "(" <> go value <> ")"
       Absent -> "null"
     evidence e@(Call sym _) = D.derived "native.call-site" [] (object ["callee" .= sym]) [annotation e]
@@ -1177,8 +1189,7 @@ renderCalculationDoc inv shapes label c = D.mark owner "calculation"
   ++ [D.text ("    in " <> quote (parameterName i) <> " : Base::Anything [0..*];") | i <- parameters]
   ++ [D.text ("    in " <> quote (familyName i) <> " : " <> quote (label (familyRow s)) <> " [0..*];") | (i,s) <- families]
   ++ concat [renderInput i typ | (i,typ) <- zip [0 :: Int ..] (inputs c)]
-  ++ [D.text ("    return 'result' : " <> renderCarrier label (result c) <> " [1] = ")
-    <> renderParameterizedDoc label input owner calcBindings shapeBindings binding (body c) <> ";"]
+  ++ renderResult
   ++ [D.mark owner "family-domain-contract" (D.derived "native.family-domain-contract" [D.root owner "type"] Null [])
       (D.text ("    assert constraint { " <> condition <> " }")) | condition <- familyDomainConstraints shapes label binding families]
   ++ [D.mark owner "parameter-contract" (D.derived "native.open-parameter-contract" [D.root owner "type"] Null [])
@@ -1201,17 +1212,24 @@ renderCalculationDoc inv shapes label c = D.mark owner "calculation"
     binding p = quote (label owner) <> "::" <> quote p
     contractOrigins = M.union (constructorInputContracts inv shapes c) (constructorResultContracts inv shapes c)
     input i = quote (label owner) <> "::" <> quote ("input" <> T.pack (show i))
+    resultBody = renderParameterizedDoc label input owner calcBindings shapeBindings binding (body c)
+    renderResult = case result c of
+      Callable domain out ->
+        ["    return ref calc 'result' [1] = " <> resultBody <> " {"]
+        ++ map D.text (callableBody (quote (label owner) <> "::'result'") domain out) ++ ["    }"]
+      typ -> [D.text ("    return 'result' : " <> renderCarrier label typ <> " [1] = ") <> resultBody <> ";"]
     renderInput i (Callable domain out) = map D.text $
-      ["    in calc " <> quote ("input" <> T.pack (show i)) <> " {"
-      ,"      in 'argument' : " <> renderCarrier label domain <> " [1];"
+      ["    in calc " <> quote ("input" <> T.pack (show i)) <> " {"]
+      ++ callableBody (input i) domain out ++ ["    }"]
+    renderInput i typ = [D.text ("    in " <> quote ("input" <> T.pack (show i)) <> " : " <> renderCarrier label typ <> " [1];")]
+    callableBody scope domain out =
+      ["      in 'argument' : " <> renderCarrier label domain <> " [1];"
       ,"      return 'result' : " <> renderCarrier label out <> " [1];"]
       ++ ["      assert constraint { " <> condition <> " }"
          | (fieldName,typ) <- [("argument",domain),("result",out)]
-         ,let value = input i <> "::" <> quote fieldName
+         ,let value = scope <> "::" <> quote fieldName
          ,condition <- parameterRefinements shapes label binding value typ
            ++ refinementTextIn shapes label input binding value typ]
-      ++ ["    }"]
-    renderInput i typ = [D.text ("    in " <> quote ("input" <> T.pack (show i)) <> " : " <> renderCarrier label typ <> " [1];")]
 
 
 -- This rule creates evidence for a fresh assertion, independently of the
@@ -1422,6 +1440,12 @@ hasValidity sh = not (null (familyParameters sh)) || not (null (typeParameters s
         refined Fibre{} = True
         refined _ = False
 
+-- SysML invocation names must be feature chains, not arbitrary receiver
+-- expressions. A typed member helper gives computed receivers a named input
+-- while keeping the invocation inside the caller's selected branch.
+callableInvoker :: Text -> Text
+callableInvoker member = member <> ".invoke"
+
 renderShapes :: (Text -> Text) -> Shapes -> [Text]
 renderShapes label shapes = renderShapesIn label shapes shapes
 
@@ -1458,9 +1482,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
         ["    attribute " <> quote (label tagField) <> " : " <> quote (label (tagType (shapeSymbol sh))) <> " [1];"])
       ++ ["    attribute " <> quote (label (indexField (shapeSymbol sh) i)) <> " : " <> renderCarrier label t <> " [1];"
          | (i,t) <- zip [0..] (indexTypes sh)]
-      ++ ["    attribute " <> quote (label f) <> " : " <> renderCarrier label ty
-           <> (if isRecord sh then " [1];" else " [0..1];")
-         | c <- variants sh,(f,ty) <- payload c]
+      ++ concat [renderField sh f ty | c <- variants sh,(f,ty) <- payload c]
       ++ (if not (hasValidity sh) then [] else
         ["    assert constraint 'valid-payload' { " <> quote (label (validitySymbol (shapeSymbol sh)))
           <> "(" <> quote (label (shapeSymbol sh)) <> "::self) }"])
@@ -1470,6 +1492,38 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
         ,"    in 'value' : " <> quote (label (shapeSymbol sh)) <> " [1];"
         ,"    " <> validity shapes label sh
         ,"  }"])
+      ++ concat [renderInvoker sh f a b | c <- variants sh,(f,Callable a b) <- payload c]
+    renderField sh f (Callable domain out) =
+      ["    ref calc " <> quote (label f) <> multiplicity sh <> " {"
+      ,"      in 'argument' : " <> renderCarrier label domain <> " [1];"
+      ,"      return 'result' : " <> renderCarrier label out <> " [1];"]
+      ++ ["      assert constraint { " <> condition <> " }"
+         | (member,typ) <- [("argument",domain),("result",out)]
+         ,let owner = quote (label (shapeSymbol sh))
+              binding p = owner <> "::" <> quote p
+              value = owner <> "::" <> quote (label f) <> "::" <> quote member
+         ,condition <- parameterRefinements shapes label binding value typ
+           ++ refinementTextIn shapes label (T.pack . show) binding value typ]
+      ++ ["    }"]
+    renderField sh f ty = ["    attribute " <> quote (label f) <> " : " <> renderCarrier label ty <> multiplicity sh <> ";"]
+    multiplicity sh = if isRecord sh then " [1]" else " [0..1]"
+    renderInvoker sh f domain out =
+      let scope = quote (label (callableInvoker f))
+          receiver = scope <> "::'receiver'"
+          argument = scope <> "::'argument'"
+          returned = scope <> "::'result'"
+          binding p = receiver <> "." <> quote p
+      in ["  calc def " <> scope <> " {"
+         ,"    in 'receiver' : " <> quote (label (shapeSymbol sh)) <> " [1];"
+         ,"    in 'argument' : " <> renderCarrier label domain <> " [1];"
+         ,"    return 'result' : " <> renderCarrier label out <> " [1] = "
+           <> receiver <> "." <> quote (label f) <> "(" <> argument <> ");"
+         ,"    assert constraint { SequenceFunctions::size(" <> receiver <> "." <> quote (label f) <> ") == 1 }"]
+         ++ ["    assert constraint { " <> condition <> " }"
+            | (value,typ) <- [(argument,domain),(returned,out)]
+            ,condition <- parameterRefinements shapes label binding value typ
+              ++ refinementTextIn shapes label (T.pack . show) binding value typ]
+         ++ ["  }"]
 
 parameterRefinements :: Shapes -> (Text -> Text) -> (Text -> Text) -> Text -> Carrier -> [Text]
 parameterRefinements _ _ parameter value (TypeParameter i) =
@@ -1528,6 +1582,7 @@ validity shapes label sh = case constraints of
 references :: Shapes -> [Text]
 references shapes = concat
   [[shapeSymbol sh] ++ map constructorSymbol (variants sh) ++ concatMap (map fst . payload) (variants sh)
+    ++ [callableInvoker f | c <- variants sh,(f,Callable{}) <- payload c]
     ++ [countField (shapeSymbol sh) | not (null (recursivePeers sh))]
     ++ [indexField (shapeSymbol sh) i | i <- [0..length (indexTypes sh)-1]]
     ++ (if hasValidity sh then [validitySymbol (shapeSymbol sh)] else [])
@@ -1544,6 +1599,8 @@ generatedNames display shapes = M.fromList $ concat
     ++ [(familyRow (shapeSymbol sh),display (shapeSymbol sh) <> ".relation-row") | relationParameter sh /= Nothing]
     ++ [(f,display (constructorSymbol c) <> ".payload" <> T.pack (show i))
        | c <- variants sh,(i,(f,_)) <- zip [0 :: Int ..] (payload c),not (isRecord sh)]
+    ++ [(callableInvoker f,(if isRecord sh then display f else display (constructorSymbol c) <> ".payload" <> T.pack (show i)) <> ".invoke")
+       | c <- variants sh,(i,(f,Callable{})) <- zip [0 :: Int ..] (payload c)]
   | sh <- M.elems shapes]
 
 -- Helpers consume the already admitted shape without changing its semantics.

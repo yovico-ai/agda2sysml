@@ -112,6 +112,32 @@ class Parser:
             parts.append(name(self.pop()))
         return '::'.join(parts)
 
+    def multiplicity(self):
+        low = high = 1
+        if self.take('['):
+            low = int(self.pop())
+            high = low
+            if self.take('..'):
+                value = self.pop()
+                high = None if value == '*' else int(value)
+            self.expect(']')
+        return low, high
+
+    def callable_body(self):
+        self.expect('{')
+        self.expect('in'); assert self.qualified() == 'argument'; self.expect(':')
+        domain = self.qualified()
+        assert self.multiplicity() == (1, 1); self.expect(';')
+        self.expect('return'); assert self.qualified() == 'result'; self.expect(':')
+        codomain = self.qualified()
+        assert self.multiplicity() == (1, 1); self.expect(';')
+        contracts = []
+        while self.take('assert'):
+            self.expect('constraint'); self.expect('{')
+            contracts.append(self.expression()); self.expect('}')
+        self.expect('}')
+        return CallableSignature(domain, codomain, tuple(contracts))
+
     PRECEDENCE = {'or': 1, 'and': 2, '==': 3, '!=': 3, '<': 4, '>': 4,
                   '<=': 4, '>=': 4, 'hastype': 4, 'istype': 4, 'as': 4, '+': 5, '-': 5, '*': 6}
 
@@ -164,6 +190,15 @@ class Parser:
         while True:
             if self.take('.'):
                 left = ('project', left, self.qualified())
+            elif self.take('('):
+                arguments = []
+                if not self.take(')'):
+                    while True:
+                        arguments.append(self.expression())
+                        if self.take(')'):
+                            break
+                        self.expect(',')
+                left = ('apply', left, arguments)
             elif self.take('->'):
                 quantifier = self.pop()
                 assert quantifier in ('forAll', 'exists'), ('unsupported native quantifier', quantifier)
@@ -213,22 +248,14 @@ class Model:
                     parser.expect('{')
                     assertions.append(parser.expression())
                     parser.expect('}')
-                elif parser.take('in') or parser.take('attribute'):
+                elif parser.peek() in ('in', 'attribute', 'ref'):
+                    prefix = parser.pop()
+                    assert prefix != 'ref' or parser.peek() == 'calc', 'unsupported reference field'
                     if parser.take('calc'):
                         field = parser.qualified()
-                        parser.expect('{')
-                        parser.expect('in'); parser.expect("'argument'"); parser.expect(':')
-                        domain = parser.qualified()
-                        parser.expect('['); parser.expect('1'); parser.expect(']'); parser.expect(';')
-                        parser.expect('return'); parser.expect("'result'"); parser.expect(':')
-                        codomain = parser.qualified()
-                        parser.expect('['); parser.expect('1'); parser.expect(']'); parser.expect(';')
-                        contracts = []
-                        while parser.take('assert'):
-                            parser.expect('constraint'); parser.expect('{')
-                            contracts.append(parser.expression()); parser.expect('}')
-                        parser.expect('}')
-                        inputs.append((field, CallableSignature(domain, codomain, tuple(contracts)), 1, 1))
+                        low, high = parser.multiplicity()
+                        carrier = parser.callable_body()
+                        (fields if kind == 'attribute' else inputs).append((field, carrier, low, high))
                         continue
                     if parser.take('redefines'):
                         while parser.pop() != ';':
@@ -249,6 +276,13 @@ class Model:
                         assert parser.pop() in ('ordered', 'nonunique'), 'unsupported multiplicity qualifier'
                     (fields if kind == 'attribute' else inputs).append((field, carrier, low, high))
                 elif parser.take('return'):
+                    if parser.take('ref'):
+                        parser.expect('calc'); assert parser.qualified() == 'result'
+                        assert parser.multiplicity() == (1, 1)
+                        parser.expect('=')
+                        result = parser.expression()
+                        self.results[symbol] = parser.callable_body()
+                        continue
                     parser.qualified()
                     parser.expect(':')
                     self.results[symbol] = parser.qualified()
@@ -285,6 +319,8 @@ class Model:
             for (_, carrier, low, high), value in zip(inputs, arguments):
                 self.boundary(carrier, low, high, value, depth)
         result = self.evaluate(body, env, check, depth)
+        if isinstance(self.results[symbol], CallableSignature):
+            result = BoundCalculation(result, self.results[symbol], symbol + '::result', dict(env))
         env['result'] = env[symbol + '::result'] = result
         if check:
             self.boundary(self.results[symbol], 1, 1, result, depth)
@@ -293,13 +329,16 @@ class Model:
 
     def boundary(self, carrier, low, high, value, depth=0):
         if isinstance(carrier, CallableSignature):
-            assert isinstance(value, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
-            while isinstance(value, BoundCalculation):
-                value = value.value
-            inputs = self.calculations[value.symbol][0]
-            assert len(inputs) == 1, 'callback arity mismatch'
-            for expected, actual in ((carrier.argument, inputs[0][1]), (carrier.result, self.results[value.symbol])):
-                assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
+            values = sequence(value)
+            assert len(values) >= low and (high is None or len(values) <= high), 'callback cardinality mismatch'
+            for callback in values:
+                assert isinstance(callback, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
+                while isinstance(callback, BoundCalculation):
+                    callback = callback.value
+                inputs = self.calculations[callback.symbol][0]
+                assert len(inputs) == 1, 'callback arity mismatch'
+                for expected, actual in ((carrier.argument, inputs[0][1]), (carrier.result, self.results[callback.symbol])):
+                    assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
             return
         if carrier in ('Boolean', 'Natural'):
             carrier = 'ScalarValues::' + carrier
@@ -333,7 +372,15 @@ class Model:
                 assert len(value) == 1, ('projection multiplicity', value)
                 value = value[0]
             assert isinstance(value, Record), ('projection from non-record', value)
-            return value.get(args[1])
+            member = value.get(args[1])
+            fields = self.carriers.get(value.type, (None, [], []))[1]
+            signature = next((typ for field, typ, _, _ in fields if field == args[1]), None)
+            if isinstance(signature, CallableSignature) and member != ():
+                context = dict(value.fields)
+                context.update({value.type + '::' + f: v for f, v in value.fields})
+                context['self'] = context[value.type + '::self'] = value
+                return BoundCalculation(member, signature, value.type + '::' + args[1], context)
+            return member
         if op == 'new': return Record(args[0], tuple((field, ev(value)) for field, value in args[1]))
         if op == 'if': return ev(args[1] if ev(args[0]) else args[2])
         if op == 'not': return not ev(args[0])
@@ -362,6 +409,9 @@ class Model:
                 if method == 'isEmpty': return not seq
                 raise AssertionError(('unsupported native library operation', symbol))
             return self.invoke(symbol, values, check, depth + 1)
+        if op == 'apply':
+            assert len(args[1]) == 1, 'callback invocation arity mismatch'
+            return self.invoke_callback(ev(args[0]), ev(args[1][0]), check, depth + 1)
         if op in ('as', 'hastype', 'istype'):
             value, typ = ev(args[0]), args[1][1]
             matches = typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)

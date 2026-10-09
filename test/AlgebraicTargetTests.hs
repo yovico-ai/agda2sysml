@@ -272,6 +272,7 @@ main = do
   computedChecks inv
   indexedLookupChecks inv
   unusedParameterChecks inv
+  callbackModel <- callableFieldChecks inv
   moduleAliasChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
@@ -286,7 +287,7 @@ main = do
         first = cmd "first" p "true" "null"
         second = cmd "second" "null" "null" "'Tone'::'blue'"
         none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated)
+    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel)
     callProcess (root </> "bin/agda2sysml-validate") [file]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -1009,7 +1010,68 @@ unusedParameterChecks base = do
   let stored = inv {declarations = M.adjust (set "type" (signature [callback,callback]
         (ty "PhantomCallback" [v 1]))) "wrapUnused" (declarations inv)}
   -- The second function is a stored payload, not an unused module parameter.
-  check (M.member "PhantomCallback" (P.failures (P.prepare stored))) "stored function payload was erased"
+  let storedPrepared = P.prepare stored
+      storedInventory = P.inventory storedPrepared
+      storedShapes = fst (A.discover storedInventory M.empty)
+  storedKey <- maybe (fail (show (P.failures storedPrepared))) pure (M.lookup "PhantomCallback" (P.openRoots storedPrepared))
+  storedShape <- maybe (fail "stored callback carrier missing") pure (M.lookup storedKey storedShapes)
+  check ([t | c <- A.variants storedShape,(_,t) <- A.payload c] == [A.Callable A.Boolean A.Boolean])
+    "stored function payload was erased or changed"
+
+callableFieldChecks :: Inventory -> IO Text
+callableFieldChecks base = do
+  let callback = signature [named "Bool"] (named "Bool")
+      box = set "constructor" (String "makeCallbackBox") $ set "fields" (toJSON (["callbackField"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "CallbackBox" "record" (universeAt (level 0))
+      ctor = set "family" (String "CallbackBox") $ declaration "makeCallbackBox" "constructor"
+        (signature [callback] (named "CallbackBox"))
+      projection = set "projection" (object ["proper" .= ("CallbackBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration "callbackField" "function" (signature [named "CallbackBox"] callback)
+      applied = set "eliminations" (toJSON (array (get "eliminations" (variable 1 ["callbackField"]))
+        ++ [application (variable 0 [])])) (variable 1 [])
+      use = operation "useCallbackBox" ["CallbackBox","Bool"] "Bool" (done 2 applied)
+      rebuild = operation "rebuildCallbackBox" ["CallbackBox"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [variable 0 ["callbackField"]]))
+      ds = [box,ctor,projection,use,rebuild]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "callbacks" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  shape <- maybe (fail "callable record not admitted") pure (M.lookup "CallbackBox" shapes)
+  check (A.isRecord shape && map snd (A.payload (head (A.variants shape))) == [A.Callable A.Boolean A.Boolean])
+    "callable member changed its containing value carrier"
+  sig <- either (fail . show) pure (P.signature inv projection)
+  check (P.inputs sig == [P.Named "CallbackBox" []] && P.output sig == P.Callable (P.Named "Bool" []) (P.Named "Bool" []))
+    "proper projection flattened its callable result into additional inputs"
+  let identity = A.Calculation "fieldIdentity" [A.Boolean] A.Boolean (A.Input 0) []
+      invert = A.Calculation "fieldInvert" [A.Boolean] A.Boolean
+        (A.Conditional (A.Input 0) (A.Literal False) (A.Literal True)) []
+      table = M.union (M.fromList [("fieldIdentity",identity),("fieldInvert",invert)])
+        (M.mapMaybe (either (const Nothing) Just) results)
+  forM_ ["useCallbackBox","rebuildCallbackBox","callbackField"] $ \s ->
+    check (M.member s table) (show (s,M.lookup s results))
+  forM_ [("fieldIdentity",id),("fieldInvert",not)] $ \(fn,expected) -> forM_ [False,True] $ \value -> do
+    let record = R "CallbackBox" (M.singleton "callbackField" (Fn fn))
+    check (evalWith table [record,B value] (A.body (table M.! "useCallbackBox")) == B (expected value))
+      "projected callback invoked the wrong binding"
+    check (evalWith table [record] (A.body (table M.! "rebuildCallbackBox")) == record)
+      "reconstruction changed the stored callable reference"
+  check ("ref calc 'callbackField' [1]" `Text.isInfixOf` Text.unlines (A.renderShapes id shapes))
+    "callable member was emitted as an attribute or composite occurrence"
+  check ("return ref calc 'result'" `Text.isInfixOf` Text.unlines
+      (A.renderCalculation expanded shapes id (table M.! "callbackField")))
+    "projection dropped its returned callback signature"
+  forM_ [set "index" (Number 2),set "proper" (String "WrongOwner")] $ \change -> do
+    let invalid = inv {declarations = M.adjust (set "projection" (change (get "projection" projection))) "callbackField" (declarations inv)}
+    check (M.notMember "CallbackBox" (fst (A.discover (P.inventory (P.prepare invalid)) M.empty)))
+      "malformed proper callable projection admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  pure (Text.replace "package AgdaModel {" "package CallableFieldFixture {" (T.modelText generated))
 
 -- Recursive lookups with indexed inputs reduce only under justified branch
 -- facts. Different caller expressions must meet at the same residual call.
