@@ -37,14 +37,19 @@ def verify_structured_indices(output):
     def call(operation, values, binding):
         return model.invoke(prefix + operation + suffix, [*binding, *values])
 
+    def family_field(carrier, suffix):
+        matches = [f for f, _, _, _ in model.carriers[carrier][1]
+                   if f.split('#', 1)[0].endswith(suffix)]
+        assert len(matches) == 1, ('ambiguous family field', carrier, suffix, matches)
+        return matches[0]
+
     member_type = model.results[roots['project']]
     member_fields = model.carriers[member_type][1]
     row_type = next(t for f, t, _, _ in member_fields if f == 'familyArgument1')
-    row_fields = model.carriers[row_type][1]
-    row_index = next(f for f, _, _, _ in row_fields if f.endswith('.index0'))
-    row_payload = next(f for f, _, _, _ in row_fields if f.endswith('.value'))
-    member_index = next(f for f, _, _, _ in member_fields if f.endswith('.index0'))
-    member_payload = next(f for f, _, _, _ in member_fields if f.endswith('.value'))
+    row_index = family_field(row_type, '.index0')
+    row_payload = family_field(row_type, '.value')
+    member_index = family_field(member_type, '.index0')
+    member_payload = family_field(member_type, '.value')
     schema_type = model.calculations[roots['encodeFields']][0][-2][1]
     comparisons = repeated_positions = rejected = binding_cases = append_comparisons = 0
 

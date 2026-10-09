@@ -229,6 +229,37 @@ payload comparison stops at a repeated carrier and remains conservative.
 
 ## First-order helper calls
 
+### Unused higher-order module parameters
+
+The checked inventory records each declaration's module-parameter count. Before
+specialization, a conservative dependency analysis identifies function-valued
+module parameters unused by the declaration's retained types, calculations and
+matches. Forwarding into another unused parameter is allowed only after the
+callee and its dependencies pass the same analysis. Carrier parameters also
+require every constructor to leave the parameter unused. Unknown or partial
+applications, missing metadata, opaque bodies and unsupported case trees prevent
+omission. Stored function payloads and live callbacks retain their usual refusal.
+
+An admitted unused parameter occupies a static bookkeeping slot during
+specialization and contributes no runtime SysML input. The original quantified
+source signature stays in the inventory: the generated behavior is independent
+of the choice of any well-typed source function argument. Type parameters,
+payloads, dependent indices and evidence retain their existing checks.
+
+Agda module instantiation can create carrier aliases and function aliases.
+Carrier identity follows the compiler's recorded alias clause, requiring a
+transparent module copy with an ordinary variable telescope. Checked function
+aliases can retain their source identity through a supported call to the original
+calculation, even though they have no separate handwritten definition. Missing
+equations, unsupported callees and unanchored ordinary functions remain refused.
+
+These rules translate the existing `Diagnostics.Accounting.before-count`,
+`after-count`, `Before.sources` and `After.sources` operations without changing
+their Agda definitions. Parsed-model tests check mixed translated/textual reports,
+repeated and reordered identities, empty reports, open evidence families and
+unbounded natural identities. Mismatched source lists, reasons and evidence must
+fail the emitted contracts.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known

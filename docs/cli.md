@@ -175,6 +175,13 @@ Equivalent closed level expressions use the same identity. The
 `static.universe-level` rule records compiler level dependencies without a runtime
 target; unresolved or ambiguous levels prevent complete generation.
 
+An unused function-valued module parameter appears in specialization arguments
+as `{"unusedModuleParameter": true}`. It retains its source telescope position
+for traceability and contributes no native input. The inventory's
+`moduleParameters` count comes from Agda; carrier module copies also retain their
+checked `moduleAlias` clause. The dependency and alias checks are described in
+the [translation rules](translation-rules.md#unused-higher-order-module-parameters).
+
 For finite indexed families, `algebraicCarriers[].indices` records each index's
 position, native domain and field target. Constructors record `resultIndices`,
 and constrained payload/record fields record `refinements`. `indexContracts`

@@ -8,6 +8,7 @@ module Agda2SysML.Specialize
 import Agda2SysML.Inventory hiding (prepare, field)
 import Agda2SysML.Diagnostic
 import qualified Agda2SysML.Reduction as Reduction
+import qualified Agda2SysML.UnusedParameters as UnusedParameters
 import Agda2SysML.Sharing (digest)
 import Control.Monad (forM, forM_, unless, when, foldM, (>=>))
 import Control.Monad.Except
@@ -23,7 +24,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 data LevelExpr = LevelExpr Integer (M.Map Int Integer) deriving (Eq,Ord,Show)
-data Type = Parameter Int | Open Int Integer | Named Text [Type] | Level LevelExpr
+data Type = Unused | Parameter Int | Open Int Integer | Named Text [Type] | Level LevelExpr
   | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] Integer | FamilyApplication Type [Type]
   | FamilyExpression Type Int Type LevelExpr
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
@@ -137,7 +138,7 @@ materializeCaptures = mapIndices go
 
 staticArguments :: [Type] -> [Type]
 staticArguments = takeWhile (\x -> case x of Runtime{} -> False; _ -> True)
-data ParameterKind = LevelKind | TypeKind LevelExpr | FamilyKind [Type] LevelExpr deriving (Eq,Show)
+data ParameterKind = UnusedKind | LevelKind | TypeKind LevelExpr | FamilyKind [Type] LevelExpr deriving (Eq,Show)
 data Signature = Signature { parameters :: Int, inputs :: [Type], output :: Type, dropped :: Int
   , parameterKinds :: [ParameterKind] }
   deriving (Eq,Show)
@@ -252,6 +253,11 @@ readType inv env t = case string (get "tag" t) of
     let name = string (get "symbol" t)
         es = array (get "eliminations" t)
     case M.lookup name (declarations inv) of
+      Just d | get "moduleInstanceCopy" d == Bool True
+        ,get "kind" d `elem` map String ["datatype","record"] ->
+          case Reduction.reduceHead inv t of
+            Just (reduced,_) -> readType inv env reduced
+            Nothing -> refuse Representation "Module carrier alias lacks a checked reducible equation"
       Just d | get "kind" d == String "function" -> do
         declared <- field inv "type" d
         if returnsUniverse declared then do
@@ -298,7 +304,7 @@ readType inv env t = case string (get "tag" t) of
           let count = parameters sig
           unless (dropped sig <= count && length es == count + length (inputs sig))
             (refuse Representation "Computed index helper must supply its complete runtime argument list")
-          args <- traverse (app >=> readType inv env) (take count es)
+          args <- readStaticArguments inv env (parameterKinds sig) (take count es)
           domains <- traverse (substitute args) (inputs sig)
           out <- substitute args (output sig)
           values <- sequence [app e >>= readIndex inv env domain | (e,domain) <- zip (drop count es) domains]
@@ -311,6 +317,7 @@ returnsUniverse ty | get "tag" (get "term" ty) == String "pi" = returnsUniverse 
 readStaticArguments :: Inventory -> [Maybe Type] -> [ParameterKind] -> [Value] -> Either Refusal [Type]
 readStaticArguments inv env kinds elims = foldM step [] (zip kinds elims)
   where
+    step prior (UnusedKind,e) = app e >> pure (prior ++ [Unused])
     step prior (FamilyKind domains level,e) = do
       term <- app e
       inputs <- traverse (substitute prior) domains
@@ -421,6 +428,7 @@ readConstructorIndex inv env expected term = do
     -- parameters are symbolic. Only concrete carriers determine a level here.
     complete sig known = foldM step known (zip [0..] (parameterKinds sig))
       where
+        step table (i,UnusedKind) = Right (M.insert i Unused table)
         step table (i,TypeKind level) = case M.lookup i table of
           Just ty | closed ty -> universeOf inv ty >>= constrainLevel table level
           _ -> Right table
@@ -487,6 +495,7 @@ parameterKind inv env ty
               familyKind next (domains ++ [domain]) (get "body" cod)
       | otherwise = Right Nothing
 parameterSlot :: Int -> ParameterKind -> Type
+parameterSlot _ UnusedKind = Unused
 parameterSlot i LevelKind = Level (levelParameter i)
 parameterSlot i TypeKind{} = Parameter i
 parameterSlot i (FamilyKind domains level) = FamilyParameter i domains level
@@ -503,7 +512,8 @@ signature inv d = do
     go env kinds ins ty = let t = get "term" ty in if get "tag" t == String "pi" then do
       let dom = get "domain" t; cod = get "codomain" t
           extend x = if get "binds" cod == Bool False then env else x:env
-      kind <- parameterKind inv env (get "type" dom)
+      kind <- if null ins && toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
+        then pure (Just UnusedKind) else parameterKind inv env (get "type" dom)
       case kind of
         Just k | null ins -> go (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
         _ -> do
@@ -523,6 +533,7 @@ substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscLis
         Level l -> Right (joinLevel total (shiftLevel offset l))
         _ -> refuse Semantics "Type argument used in a universe-level position"
 substitute :: [Type] -> Type -> Either Refusal Type
+substitute _ Unused = Right Unused
 substitute args (Parameter i) = at i args
 substitute _ t@Open{} = Right t
 substitute args (FamilyParameter i _ _) = at i args
@@ -543,6 +554,7 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
     go (IndexSuccessor i) = IndexSuccessor <$> go i
     go i = Right i
 closed :: Type -> Bool
+closed Unused = True
 closed Parameter{} = False
 closed Open{} = True
 closed FamilyParameter{} = False
@@ -582,7 +594,8 @@ familySignature inv d = do
     go env kinds n ty = do
       let t = get "term" ty; cod = get "codomain" t
       unless (get "tag" t == String "pi") (refuse Syntax "Missing carrier parameter telescope")
-      kind <- parameterKind inv env (get "type" (get "domain" t))
+      kind <- if toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
+        then pure (Just UnusedKind) else parameterKind inv env (get "type" (get "domain" t))
       case kind of
         Just k -> do
           let extended = if get "binds" cod == Bool False then env else Just (parameterSlot (length kinds) k):env
@@ -625,6 +638,7 @@ validateArguments :: Inventory -> [ParameterKind] -> [Type] -> Either Refusal ()
 validateArguments inv kinds args = do
   unless (length kinds == length args && all closed args) (refuse Representation "Unresolved static arguments")
   forM_ (zip kinds args) $ \(kind,arg) -> case (kind,arg) of
+    (UnusedKind,Unused) -> pure ()
     (LevelKind,Level l) -> () <$ levelNumber l
     (TypeKind expected,t) | case t of Named{} -> True; Open{} -> True; FamilyApplication{} -> True; _ -> False -> do
       actual <- universeOf inv arg
@@ -666,12 +680,17 @@ completeKnown inv sig known = do
   next <- foldM step known (zip [0..] (parameterKinds sig))
   if next == known then Right known else completeKnown inv sig next
   where
+    step table (i,UnusedKind) = case M.lookup i table of
+      Nothing -> Right (M.insert i Unused table)
+      Just Unused -> Right table
+      _ -> refuse Semantics "Live argument in an unused parameter slot"
     step table (i,TypeKind l) = case M.lookup i table of
       Just t -> universeOf inv t >>= constrainLevel table l
       Nothing -> Right table
     step table _ = Right table
 
 typeValue :: Type -> Value
+typeValue Unused = object ["unusedModuleParameter" .= True]
 typeValue (Level (LevelExpr n xs)) = if M.null xs then object ["level" .= n]
   else object ["levelConstant" .= n,"levelParameters" .= M.toAscList xs]
 typeValue (Parameter i) = object ["parameter" .= i]
@@ -701,6 +720,7 @@ instanceKey :: Text -> [Type] -> Text
 instanceKey s [] = s
 instanceKey s ts = s <> "@" <> digest (BL.toStrict (encode (object ["symbol" .= s,"arguments" .= map typeValue (fst (captureArguments ts))])))
 typeKey :: Type -> Text
+typeKey Unused = "$unused-module-parameter"
 typeKey (Named s ts) = instanceKey s (staticArguments ts)
 typeKey (Level (LevelExpr n _)) = "level:" <> T.pack (show n)
 typeKey Runtime{} = "runtime-index-has-no-static-key"
@@ -772,9 +792,10 @@ application :: Value -> Value
 application x = object ["tag" .= ("apply" :: Text),"argument" .= object ["info" .= info,"value" .= x]]
 
 prepare :: Inventory -> Result
-prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
+prepare source | not active = Result source [] M.empty roots S.empty M.empty
             | otherwise = Result expanded entries errors roots runtime open
   where
+    inv = UnusedParameters.annotate source
     needs = required inv
     active = any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
       || r == "behavior" && callbackSignature s) (S.toList needs)
@@ -801,9 +822,10 @@ prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
     generic s = case M.lookup s (declarations inv) of
       Nothing -> False
       Just d -> case field inv "type" d of
-        Right ty -> get "tag" (get "term" ty) == String "pi" && case parameterKind inv [] (get "type" (get "domain" (get "term" ty))) of
-          Right (Just _) -> True
-          _ -> False
+        Right ty -> get "tag" (get "term" ty) == String "pi" &&
+          (Number 0 `elem` array (get "unusedModuleParameters" d) || case parameterKind inv [] (get "type" (get "domain" (get "term" ty))) of
+            Right (Just _) -> True
+            _ -> False)
         _ -> False
     seeds = S.toAscList (S.map fst (S.filter (\(_,r) -> r `elem` ["structure","behavior"]) needs))
     openProfile = get "selectionProfile" (document inv) == String "declarations"
@@ -817,6 +839,7 @@ prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
             else parameterKinds <$> liftEither (signature inv d)
           foldM (\prior (i,k) -> do
             arg <- case k of
+              UnusedKind -> pure Unused
               TypeKind level -> Open i <$> liftEither (substituteLevel prior level >>= levelNumber)
               FamilyKind domains level -> OpenFamily i <$> liftEither (traverse (substitute prior) domains)
                 <*> liftEither (substituteLevel prior level >>= levelNumber)
@@ -893,6 +916,7 @@ prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
 definition :: Inventory -> Text -> Build Value
 definition inv s = maybe (abort Syntax ("Missing checked declaration: " <> s)) pure (M.lookup s (declarations inv))
 showType :: Inventory -> Type -> Text
+showType _ Unused = "unused module parameter"
 showType _ (Level (LevelExpr n xs)) = if M.null xs then "level " <> T.pack (show n) else "unresolved level"
 showType inv (Runtime _ index) = showIndex index
   where
@@ -943,6 +967,7 @@ cached inv s args = do
   pure exists
 
 ensureType :: Inventory -> [Text] -> Type -> Build ()
+ensureType _ _ Unused = abort Semantics "Unused module parameter used as a runtime carrier"
 ensureType _ _ Level{} = abort Semantics "Universe level cannot be a runtime carrier"
 ensureType _ _ Runtime{} = abort Semantics "Runtime index cannot be a static carrier"
 ensureType _ _ Parameter{} = abort Representation "Unresolved type parameter"
@@ -1012,7 +1037,7 @@ ensureType inv stack ty@(Named s allArgs) = do
       prefix = length captures
       instantiate sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
   unless (all closed args) (abort Representation "Carrier specialization requires concrete static arguments")
-  forM_ args $ \arg -> case arg of Level{} -> pure (); _ -> ensureType inv stack arg
+  forM_ args $ \arg -> case arg of Level{} -> pure (); Unused -> pure (); _ -> ensureType inv stack arg
   forM_ (drop (length args) allArgs) $ \arg -> case arg of
     Runtime domain index -> ensureType inv stack domain >> ensureIndex inv index
     _ -> abort Representation "Static argument follows a runtime family index"
@@ -1295,6 +1320,7 @@ specializeTree inv stack env out tree = case string (get "tag" tree) of
   _ -> abort Syntax "Specialization requires a supported finite compiled body"
 
 unify :: M.Map Int Type -> Type -> Type -> Either Refusal (M.Map Int Type)
+unify known Unused Unused = Right known
 unify known (Level l) (Level actual) = levelNumber actual >>= constrainLevel known l
 -- This pass infers only static substitutions. Runtime equalities are retained
 -- in serialized signatures and checked by AlgebraicTarget after specialization.
@@ -1451,7 +1477,9 @@ expression inv stack env expected term = do
         sig <- liftEither (either (Left . context ("Signature of " <> s <> ": ")) Right (signature inv d))
         let supplied = max 0 (parameters sig - dropped sig)
         unless (length es >= supplied) (abort Representation "Partially applied type parameters")
-        actualTypes <- liftEither (traverse (app >=> readType inv (runtimeBindings env)) (take supplied es))
+        actualTypes <- liftEither (sequence [if kind == UnusedKind then app e >> pure Unused
+          else app e >>= readType inv (runtimeBindings env)
+          | (kind,e) <- zip (drop (min (parameters sig) (dropped sig)) (parameterKinds sig)) (take supplied es)])
         let explicit = M.fromList (zip [min (parameters sig) (dropped sig)..] actualTypes)
             valueElims = drop supplied es
         known <- if length valueElims == length (inputs sig) then

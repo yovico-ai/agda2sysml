@@ -10,6 +10,7 @@ import qualified Agda2SysML.FiniteTarget as F
 import qualified Agda2SysML.Target as T
 import qualified Agda2SysML.Specialize as P
 import qualified Agda2SysML.Reduction as Reduction
+import qualified Agda2SysML.UnusedParameters as UnusedParameters
 import Control.Monad (forM_, unless)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -267,6 +268,8 @@ main = do
   indexedChecks inv
   computedChecks inv
   indexedLookupChecks inv
+  unusedParameterChecks inv
+  moduleAliasChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
   root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
@@ -882,6 +885,96 @@ composedChecks base = do
     "static specialization changed projection ownership"
   bad (set "compiled" (done 1 (call "gcopy" [get "term" (named "Tone"),variable 0 []] []))
     (use "copyBoolPacket" "gcopy" (named "Bool"))) "different static payload types unified"
+
+-- Compiler-provided module equations determine carrier identity; names and
+-- structurally similar constructor results do not establish an alias.
+moduleAliasChecks :: Inventory -> IO ()
+moduleAliasChecks base = do
+  let alias = set "moduleInstanceCopy" (Bool True) $ set "moduleAlias"
+        (object ["telescope" .= ([] :: [Value]),"patterns" .= ([] :: [Value]),"body" .= call "Pair" [] []]) $
+        declaration "CopiedPair" "record" (universeAt (level 0))
+      inv = base {declarations = M.insert "CopiedPair" alias (declarations base)}
+      readAlias i = P.readType i [] (call "CopiedPair" [] [])
+  check (readAlias inv == Right (P.Named "Pair" [])) "checked module carrier alias was not followed"
+  forM_ [set "moduleAlias" Null,set "abstract" (Bool True)
+        ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= constructor "true" []]]
+            ,"body" .= call "Pair" [] []])] $ \change ->
+    check (isLeft (readAlias inv {declarations = M.adjust change "CopiedPair" (declarations inv)}))
+      "absent, opaque or matching carrier equation was assumed to be an alias"
+  let safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "Copied")
+      original = safe $ operation "sourceIdentity" ["Bool"] "Bool" (done 1 (variable 0 []))
+      copied = safe $ set "moduleInstanceCopy" (Bool True) $ set "sourceSyntax" (toJSON ([] :: [Value])) $
+        operation "copiedIdentity" ["Bool"] "Bool" (done 1 (call "sourceIdentity" [variable 0 []] []))
+      functions = inv {declarations = M.insert "sourceIdentity" original $ M.insert "copiedIdentity" copied (declarations inv)
+        ,document = set "checking" (toJSON [object ["module" .= ("Copied" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document inv)
+        ,modelRequirements = M.singleton "copy" (S.fromList [("sourceIdentity","behavior"),("copiedIdentity","behavior")])}
+      calculations i = A.functions i M.empty M.empty
+  check (either (const False) (const True) (calculations functions M.! "copiedIdentity"))
+    "checked module function alias requires nonexistent standalone syntax"
+  forM_ [set "moduleInstanceCopy" (Bool False),set "terminates" (Bool False)
+        ,set "compiled" (done 1 (call "missing" [variable 0 []] []))] $ \change ->
+    check (isLeft (calculations functions {declarations = M.adjust change "copiedIdentity" (declarations functions)} M.! "copiedIdentity"))
+      "unanchored or unsupported module alias was accepted"
+
+-- Unused higher-order module parameters are static only after dependency checks.
+unusedParameterChecks :: Inventory -> IO ()
+unusedParameterChecks base = do
+  let callback = signature [named "Bool"] (named "Bool")
+      ty s args = object ["term" .= call s args []]
+      v i = variable i []
+      parameterized = set "moduleParameters" (Number 1)
+      safe = parameterized . set "opaque" (Bool False) . set "terminates" (Bool True)
+        . set "sourceModule" (String "UnusedChecked")
+      carrier = parameterized $ set "parameters" (Number 1) $ set "constructors" (toJSON (["wrapUnused"] :: [Text])) $
+        declaration "PhantomCallback" "datatype" (signature [callback] (universeAt (level 0)))
+      ctor = parameterized $ set "parameters" (Number 1) $ set "family" (String "PhantomCallback") $
+        declaration "wrapUnused" "constructor" (signature [callback,named "Bool"] (ty "PhantomCallback" [v 1]))
+      passthrough = safe $ set "type" (signature [callback,ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1])) $
+        operation "passUnused" [] "Bool" (done 2 (v 0))
+      forwarded = safe $ set "type" (signature [callback,ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1])) $
+        operation "forwardUnused" [] "Bool" (done 2 (call "passUnused" [v 1,v 0] []))
+      used = safe $ set "type" (signature [callback,named "Bool"] (named "Bool")) $
+        operation "usedCallback" [] "Bool" (done 2 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      transitivelyUsed = safe $ set "type" (signature [callback,named "Bool"] (named "Bool")) $
+        operation "forwardUsed" [] "Bool" (done 2 (call "usedCallback" [v 1,v 0] []))
+      declarations' = [carrier,ctor,passthrough,forwarded,used,transitivelyUsed]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- declarations']) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "test") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("test" :: Text)],"definitions" .= declarations']]) $
+          set "checking" (toJSON [object ["module" .= ("UnusedChecked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "unused" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- declarations'])}
+      omitted inventory s = get "unusedModuleParameters" (declarations (UnusedParameters.annotate inventory) M.! s)
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      calculations = A.functions expanded M.empty shapes
+  forM_ ["PhantomCallback","wrapUnused","passUnused","forwardUnused"] $ \s ->
+    check (omitted inv s == toJSON ([0] :: [Int])) ("unused forwarding not established: " ++ show s)
+  forM_ ["usedCallback","forwardUsed"] $ \s -> do
+    check (omitted inv s == toJSON ([] :: [Int])) "live callback was classified unused"
+    check (M.member s (P.failures prepared)) "arbitrary runtime callback was admitted"
+  forM_ ["passUnused","forwardUnused"] $ \s -> do
+    key <- maybe (fail (show (s,P.failures prepared))) pure (M.lookup s (P.openRoots prepared))
+    calc <- either (fail . show) pure (calculations M.! key)
+    check (length (A.inputs calc) == 1) "unused callback leaked into runtime arguments"
+    forM_ [False,True] $ \b -> do
+      let owner = case head (A.inputs calc) of A.Named name -> name; _ -> error "missing carrier"
+          con = head (A.variants (shapes M.! owner))
+          value = R owner (M.fromList [("constructor",E (owner <> ".constructor-tag") (A.constructorSymbol con))
+            ,(fst (head (A.payload con)),B b)])
+          table = M.mapMaybe (either (const Nothing) Just) calculations
+      check (evalWith table [value] (A.body calc) == value) "unused callback omission changed retained payload"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null
+        ,set "moduleParameters" Null] $ \change -> do
+    let altered = inv {declarations = M.adjust change "passUnused" (declarations inv)}
+    check (omitted altered "passUnused" == toJSON ([] :: [Int])
+      && omitted altered "forwardUnused" == toJSON ([] :: [Int]))
+      "missing metadata or opaque dependency allowed omission"
+  let stored = inv {declarations = M.adjust (set "type" (signature [callback,callback]
+        (ty "PhantomCallback" [v 1]))) "wrapUnused" (declarations inv)}
+  -- The second function is a stored payload, not an unused module parameter.
+  check (M.member "PhantomCallback" (P.failures (P.prepare stored))) "stored function payload was erased"
 
 -- Recursive lookups with indexed inputs reduce only under justified branch
 -- facts. Different caller expressions must meet at the same residual call.

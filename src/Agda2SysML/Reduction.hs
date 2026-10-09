@@ -88,7 +88,19 @@ reduceHead inv original = do
                   | get "tag" term == String "definition" = do
         let s = string (get "symbol" term)
         d <- definition s
-        if get "kind" d /= String "function" || not (terminationChecked inv d)
+        if get "moduleInstanceCopy" d == Bool True && get "abstract" d == Bool False
+          && get "kind" d `elem` map String ["datatype","record"] then do
+          alias <- fld "moduleAlias" d
+          let patterns = map (get "value") (array (get "patterns" alias))
+              n = length (array (get "telescope" alias))
+          guard (length patterns == n && get "body" alias /= Null
+            && and [get "tag" p == String "variable" && get "index" p == toJSON i
+              | (p,i) <- zip patterns (reverse [0..n-1])])
+          let tree = object ["tag" .= ("done" :: Text),"binders" .= replicate n Null,"body" .= get "body" alias]
+          (value,steps) <- runTree (fuel-1) tree (array (get "eliminations" term))
+          (result,more) <- whnf (fuel-1) value
+          pure (result,s:steps ++ more)
+        else if get "kind" d /= String "function" || not (terminationChecked inv d)
           || get "abstract" d /= Bool False || get "opaque" d /= Bool False then pure (term,[]) else do
           tree <- fld "compiled" d
           case runTree (fuel-1) tree (array (get "eliminations" term)) of
