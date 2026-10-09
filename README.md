@@ -24,7 +24,7 @@ browser review and the official SysML notebook tools.
   payloads, Boolean and finite-domain calculations, first-order helper calls,
   finite natural arithmetic, and ordered lists.
 - Retain supported dependent indices, type parameters, indexed family
-  parameters, concrete type/universe specializations, and safe inductive
+  parameters, concrete and symbolic static universe levels, and safe inductive
   recursive carriers. Checked recursive calculations preserve their inputs.
 - Specialize supported concrete higher-order calls and perform checked
   definitional reduction at generation time.
@@ -90,17 +90,17 @@ of native and untranslated self-specification declarations.
 ## Alpha limitations
 
 The alpha is useful for model inspection and for supported executable
-fragments. It does **not** translate arbitrary Agda completely. Open universe
-levels, arbitrary higher-order values, unsupported recursive families, general
+fragments. It does **not** translate arbitrary Agda completely. Unsolved universe
+constraints, arbitrary higher-order values, unsupported recursive families, general
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 166 native calculation functions out of 722 (23.0%)
-and 42 native equality statements, including 7 compiler-generated helpers.
-Two functions have both representations: 206/722 function declarations (28.5%)
+The default self model has 176 native calculation functions out of 722 (24.4%)
+and 49 native equality statements, including 8 compiler-generated helpers.
+Two functions have both representations: 223/722 function declarations (30.9%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 608 unresolved requirements. Source-only proof retention is
+There are still 595 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

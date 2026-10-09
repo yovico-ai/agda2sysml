@@ -3,7 +3,7 @@
 -- inventory is retained; generated identities carry explicit origin/arguments.
 module Agda2SysML.Specialize
   ( Result(..), Instance(..), Type(..), prepare, typeKey, typeValue, signature
-  , Signature(..), IndexExpr(..), LevelExpr(..), ParameterKind(..), substitute, readType, constrainLevel, levelSymbols, typeAlias, nativeParameters, nativeFamilies ) where
+  , Signature(..), IndexExpr(..), LevelAtom(..), LevelExpr(..), ParameterKind(..), substitute, readType, constrainLevel, levelSymbols, typeAlias, nativeParameters, nativeFamilies ) where
 
 import Agda2SysML.Inventory hiding (prepare, field)
 import Agda2SysML.Diagnostic
@@ -23,10 +23,13 @@ import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
 
-data LevelExpr = LevelExpr Integer (M.Map Int Integer) deriving (Eq,Ord,Show)
-data Type = Unused | Parameter Int | Open Int Integer | Named Text [Type] | Level LevelExpr
+-- Template variables can be substituted; open-schema levels are rigid names
+-- in the caller's scope and must survive a callee's static substitution.
+data LevelAtom = BoundLevel Int | RigidLevel Int deriving (Eq,Ord,Show)
+data LevelExpr = LevelExpr Integer (M.Map LevelAtom Integer) deriving (Eq,Ord,Show)
+data Type = Unused | Parameter Int | Open Int LevelExpr | Named Text [Type] | Level LevelExpr
   | Callable Type Type
-  | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] Integer | FamilyApplication Type [Type]
+  | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] LevelExpr | FamilyApplication Type [Type]
   | FamilyExpression Type Int Type LevelExpr
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
 -- Runtime positions are absolute within a value telescope. Static arguments
@@ -181,14 +184,35 @@ natural _ = refuse Syntax "Missing universe-level natural"
 levelConstant :: Integer -> LevelExpr
 levelConstant n = LevelExpr n M.empty
 levelParameter :: Int -> LevelExpr
-levelParameter i = LevelExpr 0 (M.singleton i 0)
+levelParameter i = LevelExpr 0 (M.singleton (BoundLevel i) 0)
+openLevel :: Int -> LevelExpr
+openLevel i = LevelExpr 0 (M.singleton (RigidLevel i) 0)
+normalLevel :: LevelExpr -> LevelExpr
+normalLevel (LevelExpr n xs) = LevelExpr (if any (>= n) (M.elems xs) then 0 else n) xs
 joinLevel :: LevelExpr -> LevelExpr -> LevelExpr
-joinLevel (LevelExpr n xs) (LevelExpr m ys) = LevelExpr (max n m) (M.unionWith max xs ys)
+joinLevel (LevelExpr n xs) (LevelExpr m ys) = normalLevel (LevelExpr (max n m) (M.unionWith max xs ys))
 shiftLevel :: Integer -> LevelExpr -> LevelExpr
-shiftLevel n (LevelExpr m xs) = LevelExpr (n+m) (M.map (+n) xs)
+shiftLevel n (LevelExpr m xs) = normalLevel (LevelExpr (n+m) (M.map (+n) xs))
 levelNumber :: LevelExpr -> Either Refusal Integer
 levelNumber (LevelExpr n xs) | M.null xs = Right n
 levelNumber _ = refuse Representation "Unresolved universe level"
+levelValue :: LevelExpr -> Value
+levelValue l@(LevelExpr n xs) = case levelNumber l of
+  Right value -> toJSON value
+  Left _ -> object ["constant" .= n,"parameters" .= [(i,k) | (BoundLevel i,k) <- M.toAscList xs]
+    ,"openParameters" .= [(i,k) | (RigidLevel i,k) <- M.toAscList xs]]
+readLevelValue :: Value -> Either Refusal LevelExpr
+readLevelValue value@(Number _) = levelConstant <$> natural value
+readLevelValue value = do
+  n <- natural (get "constant" value)
+  bound <- entries BoundLevel (get "parameters" value)
+  rigid <- entries RigidLevel (get "openParameters" value)
+  pure (normalLevel (LevelExpr n (M.fromListWith max (bound ++ rigid))))
+  where
+    entries atom (Array xs) = forM (foldr (:) [] xs) $ \x -> case array x of
+      [slot,offset] -> (,) <$> (atom <$> number slot) <*> natural offset
+      _ -> refuse Syntax "Invalid symbolic universe-level term"
+    entries _ _ = refuse Syntax "Missing symbolic universe-level terms"
 builtin :: Inventory -> Text -> Text
 builtin inv key = string (get key (get "builtins" (document inv)))
 levelSymbols :: Inventory -> S.Set Text
@@ -211,6 +235,7 @@ readLevel inv env value = do
 
 readLevelTerm :: Inventory -> [Maybe Type] -> Value -> Either Refusal LevelExpr
 readLevelTerm inv env t = case string (get "tag" t) of
+  "native-open-level" -> openLevel <$> number (get "slot" t)
   "level" -> readLevel inv env (get "level" t)
   "variable" -> do
     unless (null (array (get "eliminations" t))) (refuse Representation "Applied universe-level variable")
@@ -242,10 +267,10 @@ readType inv env t = case string (get "tag" t) of
       (get "term" (get "body" cod))
     unless (firstOrder a && firstOrder b) (refuse Representation "Callback requires unary nondependent first-order input and result")
     pure (Callable a b)
-  "native-open-type" -> Open <$> number (get "slot" t) <*> natural (get "universe" t)
+  "native-open-type" -> Open <$> number (get "slot" t) <*> readLevelValue (get "universe" t)
   "native-open-family" -> do
     domains <- traverse (readType inv env) (array (get "domains" t))
-    family <- OpenFamily <$> number (get "slot" t) <*> pure domains <*> natural (get "universe" t)
+    family <- OpenFamily <$> number (get "slot" t) <*> pure domains <*> readLevelValue (get "universe" t)
     applyFamily family domains (array (get "eliminations" t))
   "level" -> Level <$> readLevelTerm inv env t
   "variable" -> do
@@ -455,7 +480,7 @@ readConstructorIndex inv env expected term = do
       where
         step table (i,UnusedKind) = Right (M.insert i Unused table)
         step table (i,TypeKind level) = case M.lookup i table of
-          Just ty | closed ty -> universeOf inv ty >>= constrainLevel table level
+          Just ty | closed ty -> universeOf inv ty >>= constrainUniverse table level
           _ -> Right table
         step table _ = Right table
 
@@ -559,7 +584,8 @@ signature inv d = do
 substituteLevel :: [Type] -> LevelExpr -> Either Refusal LevelExpr
 substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscList xs)
   where
-    step total (i,offset) = do
+    step total (RigidLevel i,offset) = Right (joinLevel total (shiftLevel offset (openLevel i)))
+    step total (BoundLevel i,offset) = do
       actual <- at i args
       case actual of
         Level l -> Right (joinLevel total (shiftLevel offset l))
@@ -590,9 +616,9 @@ closed :: Type -> Bool
 closed (Callable a b) = closed a && closed b
 closed Unused = True
 closed Parameter{} = False
-closed Open{} = True
+closed (Open _ level) = closed (Level level)
 closed FamilyParameter{} = False
-closed (OpenFamily _ domains _) = all closed domains
+closed (OpenFamily _ domains level) = all closed domains && closed (Level level)
 closed (FamilyApplication family indices) = closed family && all closed indices
 closed (FamilyExpression domain slot body level) = closed domain && closed (Level level)
   && closed (mapIndices erase body)
@@ -614,7 +640,8 @@ closed (Runtime ty index) = closed ty && go index
     go (IndexSuccessor i) = go i
     go IndexNatural{} = True
 closed (Named _ ts) = all closed ts
-closed (Level (LevelExpr _ xs)) = M.null xs
+closed (Level (LevelExpr _ xs)) = all rigid (M.keys xs)
+  where rigid RigidLevel{} = True; rigid _ = False
 
 -- Read the actual family telescope and result universe, preserving binders
 -- even when a parameter is phantom in all runtime fields.
@@ -657,7 +684,7 @@ familySignature inv d = do
           let extended = if get "binds" cod == Bool False then env else Just (Runtime a (IndexInput (length ins))):env
           indices extended kinds (ins ++ [a]) (get "body" cod)
 
-universeOf :: Inventory -> Type -> Either Refusal Integer
+universeOf :: Inventory -> Type -> Either Refusal LevelExpr
 universeOf _ (Open _ level) = Right level
 universeOf _ (FamilyApplication (OpenFamily _ _ level) _) = Right level
 universeOf inv (FamilyExpression _ _ body _) = universeOf inv body
@@ -665,7 +692,7 @@ universeOf inv (Named s args) = do
   d <- maybe (refuse Syntax "Unknown concrete type universe") Right (M.lookup s (declarations inv))
   (kinds,indices,l) <- familySignature inv d
   unless (length kinds + length indices == length args) (refuse Syntax "Concrete type arity mismatch")
-  substituteLevel (staticArguments args) l >>= levelNumber
+  substituteLevel (staticArguments args) l
 universeOf _ _ = refuse Semantics "Static level is not a runtime type"
 
 validateArguments :: Inventory -> [ParameterKind] -> [Type] -> Either Refusal ()
@@ -673,38 +700,53 @@ validateArguments inv kinds args = do
   unless (length kinds == length args && all closed args) (refuse Representation "Unresolved static arguments")
   forM_ (zip kinds args) $ \(kind,arg) -> case (kind,arg) of
     (UnusedKind,Unused) -> pure ()
-    (LevelKind,Level l) -> () <$ levelNumber l
+    (LevelKind,Level _) -> pure ()
     (TypeKind expected,t) | case t of Named{} -> True; Open{} -> True; FamilyApplication{} -> True; _ -> False -> do
       actual <- universeOf inv arg
-      resolved <- substituteLevel args expected >>= levelNumber
+      resolved <- substituteLevel args expected
       unless (actual == resolved) (refuse Semantics "Concrete type argument has the wrong universe")
     (FamilyKind domains level,OpenFamily _ actualDomains actualLevel) -> do
       expectedDomains <- traverse (substitute args) domains
-      expectedLevel <- substituteLevel args level >>= levelNumber
+      expectedLevel <- substituteLevel args level
       unless (actualDomains == expectedDomains && actualLevel == expectedLevel)
         (refuse Semantics "Type-family argument has incompatible index domains or universe")
     (FamilyKind domains level,FamilyExpression domain _ body actualLevel) -> do
       expectedDomains <- traverse (substitute args) domains
-      expectedLevel <- substituteLevel args level >>= levelNumber
+      expectedLevel <- substituteLevel args level
       actual <- universeOf inv body
-      declared <- levelNumber actualLevel
-      unless (expectedDomains == [domain] && expectedLevel == actual && declared == actual)
+      unless (expectedDomains == [domain] && expectedLevel == actual && actualLevel == actual)
         (refuse Semantics "Type-family lambda has incompatible domain or universe")
     _ -> refuse Semantics "Static level/type argument kind mismatch"
 
 -- Solve only a uniquely determined level. Non-injective maxima remain
 -- pending until other arguments determine them; no arbitrary level is chosen.
 constrainLevel :: M.Map Int Type -> LevelExpr -> Integer -> Either Refusal (M.Map Int Type)
-constrainLevel known (LevelExpr n xs) target = do
+constrainLevel known expected = constrainUniverse known expected . levelConstant
+
+constrainUniverse :: M.Map Int Type -> LevelExpr -> LevelExpr -> Either Refusal (M.Map Int Type)
+constrainUniverse known (LevelExpr n xs) target0 = do
   partial <- foldM collect (levelConstant n) (M.toList xs)
   let LevelExpr c remaining = partial
-  unless (c <= target && all (<= target) (M.elems remaining)) (refuse Semantics "Inconsistent universe-level constraint")
-  case M.toList remaining of
-    [] -> if c == target then Right known else refuse Semantics "Universe-level mismatch"
-    [(i,offset)] | c < target || offset == target -> Right (M.insert i (Level (levelConstant (target-offset))) known)
-    _ -> Right known
+      target@(LevelExpr t atoms) = normalLevel target0
+      unknown = [(i,k) | (BoundLevel i,k) <- M.toList remaining]
+      rigid = M.filterWithKey (\key _ -> case key of RigidLevel{} -> True; _ -> False) remaining
+      assign i value = Right (M.insert i (Level value) known)
+  case unknown of
+    [] -> if partial == target then Right known else refuse Semantics "Universe-level mismatch"
+    [(i,offset)] | M.null rigid -> case M.null atoms of
+      True -> do
+        unless (c <= t && offset <= t) (refuse Semantics "Inconsistent universe-level constraint")
+        if c < t || offset == t then assign i (levelConstant (t-offset)) else Right known
+      False | c <= offset && (t == 0 || t >= offset) && all (>= offset) (M.elems atoms)
+        , all (\key -> case key of RigidLevel{} -> True; _ -> False) (M.keys atoms) ->
+          assign i (normalLevel (LevelExpr (max 0 (t-offset)) (M.map (subtract offset) atoms)))
+      _ -> Right known
+    _ | M.null atoms && (c > t || any (> t) (M.elems remaining)) ->
+          refuse Semantics "Inconsistent universe-level constraint"
+      | otherwise -> Right known
   where
-    collect total (i,offset) = case M.lookup i known of
+    collect total (RigidLevel i,offset) = Right (joinLevel total (shiftLevel offset (openLevel i)))
+    collect total (BoundLevel i,offset) = case M.lookup i known of
       Nothing -> Right (joinLevel total (shiftLevel offset (levelParameter i)))
       Just (Level l) -> Right (joinLevel total (shiftLevel offset l))
       _ -> refuse Semantics "Type argument used as a level"
@@ -719,19 +761,20 @@ completeKnown inv sig known = do
       Just Unused -> Right table
       _ -> refuse Semantics "Live argument in an unused parameter slot"
     step table (i,TypeKind l) = case M.lookup i table of
-      Just t -> universeOf inv t >>= constrainLevel table l
+      Just t -> universeOf inv t >>= constrainUniverse table l
       Nothing -> Right table
     step table _ = Right table
 
 typeValue :: Type -> Value
 typeValue (Callable a b) = object ["callableInput" .= typeValue a,"callableResult" .= typeValue b]
 typeValue Unused = object ["unusedModuleParameter" .= True]
-typeValue (Level (LevelExpr n xs)) = if M.null xs then object ["level" .= n]
-  else object ["levelConstant" .= n,"levelParameters" .= M.toAscList xs]
+typeValue (Level l) = case levelNumber l of
+  Right n -> object ["level" .= n]
+  Left _ -> object ["levelExpression" .= levelValue l]
 typeValue (Parameter i) = object ["parameter" .= i]
-typeValue (Open i level) = object ["openParameter" .= i,"universe" .= level]
+typeValue (Open i level) = object ["openParameter" .= i,"universe" .= levelValue level]
 typeValue (FamilyParameter i domains level) = object ["familyParameter" .= i,"domains" .= map typeValue domains,"level" .= typeValue (Level level)]
-typeValue t@(OpenFamily i domains level) = object ["openFamily" .= i,"domains" .= map typeValue domains,"universe" .= level,"familySymbol" .= typeKey t]
+typeValue t@(OpenFamily i domains level) = object ["openFamily" .= i,"domains" .= map typeValue domains,"universe" .= levelValue level,"familySymbol" .= typeKey t]
 typeValue (FamilyApplication family indices) = object ["family" .= typeValue family,"indices" .= map typeValue indices]
 typeValue family@FamilyExpression{} = case canonicalFamilies family of
   FamilyExpression domain slot body level -> object ["familyExpression" .= object
@@ -758,15 +801,18 @@ typeKey :: Type -> Text
 typeKey ty@Callable{} = "$native-callable:" <> digest (BL.toStrict (encode (typeValue ty)))
 typeKey Unused = "$unused-module-parameter"
 typeKey (Named s ts) = instanceKey s (staticArguments ts)
-typeKey (Level (LevelExpr n _)) = "level:" <> T.pack (show n)
+typeKey (Level l) = "level:" <> levelKey l
 typeKey Runtime{} = "runtime-index-has-no-static-key"
 typeKey (Parameter i) = "unresolved-parameter-" <> T.pack (show i)
-typeKey (Open i level) = "$native-type-parameter:" <> T.pack (show i) <> ":" <> T.pack (show level)
+typeKey (Open i level) = "$native-type-parameter:" <> T.pack (show i) <> ":" <> levelKey level
 typeKey (FamilyParameter i _ _) = "unresolved-family-" <> T.pack (show i)
 typeKey (OpenFamily i domains level) = "$native-type-family:" <> T.pack (show i) <> ":"
-  <> digest (BL.toStrict (encode (map typeValue domains,level)))
+  <> digest (BL.toStrict (encode (map typeValue domains,levelValue level)))
 typeKey (FamilyApplication family _) = typeKey family
 typeKey family@FamilyExpression{} = "$native-family-expression:" <> digest (BL.toStrict (encode (typeValue family)))
+
+levelKey :: LevelExpr -> Text
+levelKey l = either (const (digest (BL.toStrict (encode (levelValue l))))) (T.pack . show) (levelNumber l)
 
 -- Parameters remain distinct even when two native classifiers have equal
 -- extents. These slots are local to a calculation/container, not global types.
@@ -885,10 +931,10 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
           foldM (\prior (i,k) -> do
             arg <- case k of
               UnusedKind -> pure Unused
-              TypeKind level -> Open i <$> liftEither (substituteLevel prior level >>= levelNumber)
+              TypeKind level -> Open i <$> liftEither (substituteLevel prior level)
               FamilyKind domains level -> OpenFamily i <$> liftEither (traverse (substitute prior) domains)
-                <*> liftEither (substituteLevel prior level >>= levelNumber)
-              LevelKind -> abort Representation "Open universe-level parameters require a separate representation rule"
+                <*> liftEither (substituteLevel prior level)
+              LevelKind -> pure (Level (openLevel i))
             pure (prior ++ [arg])) [] (zip [0..] kinds)
         case string (get "kind" d) of
           "record" -> ensureType inv [] (Named s args)
@@ -921,10 +967,10 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
         args <- foldM (\prior (i,k) -> do
           arg <- case k of
             UnusedKind -> pure Unused
-            TypeKind level -> Open i <$> liftEither (substituteLevel prior level >>= levelNumber)
+            TypeKind level -> Open i <$> liftEither (substituteLevel prior level)
             FamilyKind domains level -> OpenFamily i <$> liftEither (traverse (substitute prior) domains)
-              <*> liftEither (substituteLevel prior level >>= levelNumber)
-            LevelKind -> abort Representation "Open universe-level parameters require a separate representation rule"
+              <*> liftEither (substituteLevel prior level)
+            LevelKind -> pure (Level (openLevel i))
           pure (prior ++ [arg])) [] (zip [0..] (parameterKinds sig))
         ins <- liftEither (traverse (substitute args) (inputs sig))
         out <- liftEither (substitute args (output sig))
@@ -1015,7 +1061,14 @@ definition inv s = maybe (abort Syntax ("Missing checked declaration: " <> s)) p
 showType :: Inventory -> Type -> Text
 showType inv (Callable a b) = "(" <> showType inv a <> " → " <> showType inv b <> ")"
 showType _ Unused = "unused module parameter"
-showType _ (Level (LevelExpr n xs)) = if M.null xs then "level " <> T.pack (show n) else "unresolved level"
+showType _ (Level (LevelExpr n xs)) = "level " <> case terms of
+    [term] -> term
+    _ -> "max(" <> T.intercalate ", " terms <> ")"
+  where
+    terms = [T.pack (show n) | n > 0 || M.null xs] ++
+      [name atom <> if offset == 0 then "" else "+" <> T.pack (show offset) | (atom,offset) <- M.toAscList xs]
+    name (BoundLevel i) = "parameter " <> T.pack (show i)
+    name (RigidLevel i) = "ℓ" <> T.pack (show i)
 showType inv (Runtime _ index) = showIndex index
   where
     showIndex (IndexCaptured i) = "captured index " <> T.pack (show i)
@@ -1094,12 +1147,12 @@ ensureType inv stack family@(OpenFamily slot domains level) = do
   mapM_ (ensureType inv stack) domains
   modify' $ \st -> st {ready = M.insert key (object ["name" .= key,"displayName" .= ("type family " <> T.pack (show slot))
     ,"kind" .= ("native-family-parameter" :: Text),"nativeFamily" .= slot,"familyDomains" .= map (asType 0) domains
-    ,"specializationArguments" .= [typeValue family],"universe" .= level]) (ready st)}
+    ,"specializationArguments" .= [typeValue family],"universe" .= levelValue level]) (ready st)}
 ensureType inv _ ty@(Open i level) = do
   let key = typeKey ty
   when (M.member key (declarations inv)) (abort Syntax "Native parameter identity collides with a source declaration")
   modify' $ \st -> st {ready = M.insert key (object ["name" .= key
-    ,"kind" .= ("native-type-parameter" :: Text),"nativeParameter" .= i,"universe" .= level]) (ready st)}
+    ,"kind" .= ("native-type-parameter" :: Text),"nativeParameter" .= i,"universe" .= levelValue level]) (ready st)}
 ensureType inv _ (Named s []) | s == builtin inv "nat" && not (T.null s) = do
   d <- definition inv s
   save s [] d
@@ -1112,7 +1165,7 @@ ensureType inv stack ty@(Named s args) | s == builtin inv "list" && not (T.null 
     liftEither (validateArguments inv kinds args)
     element <- case args of
       [Level{},t] | null indices && (case t of Named{} -> True; Open{} -> True; _ -> False) -> pure t
-      _ -> abort Representation "List requires a closed level and element type"
+      _ -> abort Representation "List requires a bound level and element type"
     ensureType inv stack element
     let nil = builtin inv "nil"; cons = builtin inv "cons"
     cs <- map string . array <$> liftEither (field inv "constructors" d)
@@ -1422,7 +1475,7 @@ specializeTree inv stack env out tree = case string (get "tag" tree) of
 unify :: M.Map Int Type -> Type -> Type -> Either Refusal (M.Map Int Type)
 unify known (Callable a b) (Callable c d) = unify known a c >>= \next -> unify next b d
 unify known Unused Unused = Right known
-unify known (Level l) (Level actual) = levelNumber actual >>= constrainLevel known l
+unify known (Level l) (Level actual) = constrainUniverse known l actual
 -- This pass infers only static substitutions. Runtime equalities are retained
 -- in serialized signatures and checked by AlgebraicTarget after specialization.
 -- Varying runtime indices share a family instance; fixed fibres used as static
@@ -1475,9 +1528,9 @@ sourceTypeTerm inv = sourceTypeAt
     sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
       ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
     sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
-      ,"slot" .= slot,"universe" .= level]]
+      ,"slot" .= slot,"universe" .= levelValue level]]
     sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
-      ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= level]]
+      ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= levelValue level]]
     sourceTypeAt depth (FamilyApplication family values) = let t = get "term" (sourceTypeAt depth family) in
       object ["term" .= set "eliminations" (toJSON (array (get "eliminations" t)
         ++ map (application . get "term" . sourceTypeAt depth) values)) t]
@@ -1489,8 +1542,10 @@ sourceTypeTerm inv = sourceTypeAt
     sourceTypeAt depth (Runtime _ index) = object ["term" .= sourceIndex depth index]
     sourceTypeAt _ (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
       ,"level" .= object ["constant" .= n,"maximum" .=
-        [object ["offset" .= offset,"term" .= Reduction.variable i] | (i,offset) <- M.toAscList terms]]]]
+        [object ["offset" .= offset,"term" .= levelAtomTerm atom] | (atom,offset) <- M.toAscList terms]]]]
     sourceTypeAt depth t = asType depth t
+    levelAtomTerm (BoundLevel i) = Reduction.variable i
+    levelAtomTerm (RigidLevel i) = object ["tag" .= ("native-open-level" :: Text),"slot" .= i]
     sourceIndex depth (IndexConstructor c _ values) = object ["tag" .= ("constructor" :: Text)
       ,"symbol" .= c,"eliminations" .= map (application . sourceIndex depth) values]
     sourceIndex depth (IndexNatural value) = indexTerm depth (IndexNatural value)

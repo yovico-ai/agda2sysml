@@ -248,7 +248,7 @@ independent comparisons of parsed emitted SysML. The recursive core contributes
 24,542 result comparisons, including unequal source/target contexts, ten
 invalid-case rejections, and a removed-constraint mutation.
 
-Open universe levels, arbitrary higher-order values, unsupported recursive
+Unsolved universe constraints, arbitrary higher-order values, unsupported recursive
 families, general dependent computation, and some source correspondence remain
 unfinished. The formal laws are general, but they do not constitute an
 end-to-end proof of the Haskell adapter or renderer. SysML validation and actual

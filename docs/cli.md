@@ -177,7 +177,17 @@ Closed universe-level arguments appear in `specializations[].arguments` as
 `{"level": 2}`, interleaved with type arguments in checked telescope order.
 Equivalent closed level expressions use the same identity. The
 `static.universe-level` rule records compiler level dependencies without a runtime
-target; unresolved or ambiguous levels prevent complete generation.
+target; unsolved or ambiguous level constraints prevent complete generation.
+
+Open declaration schemas retain symbolic levels in the same argument list as
+`{"levelExpression":{"constant":0,"parameters":[],"openParameters":[[0,0]]}}`.
+Each pair identifies a level slot and successor offset; `parameters` are
+substitutable template slots and `openParameters` are bound schema slots.
+The expression is the maximum of its constant and all offset level terms.
+Open type/family argument metadata uses the same expression object in its
+`universe` field, while closed universes retain their numeric format.
+These levels affect checked compatibility and specialization identity, but
+do not add runtime SysML inputs. Native type and family bindings remain explicit.
 
 An unused function-valued module parameter appears in specialization arguments
 as `{"unusedModuleParameter": true}`. It retains its source telescope position

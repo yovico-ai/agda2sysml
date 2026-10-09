@@ -556,14 +556,14 @@ universeChecks base = do
   check (P.readType inv [] primitiveTwo == Right two) "registered zero/successor/maximum not normalized"
   check (isLeft (P.readType inv [] (levelTerm (-1)))) "negative universe accepted"
   check (isLeft (P.readType inv [] (object ["tag" .= ("meta" :: Text)]))) "unresolved meta accepted"
-  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 0)) 2 == Right M.empty)
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton (P.BoundLevel 0) 0)) 2 == Right M.empty)
     "ambiguous maximum guessed a level"
-  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 2)) 2 == Right (M.singleton 0 zero))
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton (P.BoundLevel 0) 2)) 2 == Right (M.singleton 0 zero))
     "uniquely determined zero level was not inferred"
   check (isLeft (P.constrainLevel M.empty (P.LevelExpr 3 M.empty) 2)) "inconsistent level constraint accepted"
   forM_ [0..4] $ \constant -> forM_ [0..4] $ \offset -> forM_ [0..4] $ \target -> do
     let solutions = [x | x <- [0..target],max constant (x+offset) == target]
-        solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton 0 offset)) target
+        solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton (P.BoundLevel 0) offset)) target
     case solutions of
       [] -> check (isLeft solved) "unsatisfiable maximum constraint accepted"
       [x] -> check (solved == Right (M.singleton 0 (P.Level (P.LevelExpr x M.empty)))) "unique level solution lost"
@@ -584,6 +584,46 @@ universeChecks base = do
         (object ["constant" .= (2 :: Int),"maximum" .= [object ["offset" .= (0 :: Int),"term" .= variable 0 []]]]))
         (piType False (varType 0) (varType 0)))) inferred
   bad ambiguous "ambiguous omitted level accepted"
+  -- The same checked operations must work with symbolic levels, without
+  -- choosing a concrete level or merging caller and template level slots.
+  let relay = function "openRelay" (generic (piType False (varType 0) (varType 0)))
+        (done 3 (call "inferredIdentity" [variable 0 []] []))
+      openInv = inv {document = set "selectionProfile" (String "declarations") $ set "library" (String "test") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("test" :: Text)]
+            ,"definitions" .= [ident,inferred,pick,relay]]]) (document inv)
+        ,declarations = M.insert "openRelay" relay (declarations inv)
+        ,modelRequirements = M.singleton "open" (S.fromList [(s,"behavior") | s <- ["polyIdentity","inferredIdentity","polyPick","openRelay"]])}
+      openPrepared = P.prepare openInv
+      openGenerated = T.generate openInv
+      rigid i = P.LevelExpr 0 (M.singleton (P.RigidLevel i) 0)
+      openType = P.Open 1 (rigid 0)
+      openTable = M.mapMaybe (either (const Nothing) Just) $ A.functions (P.inventory openPrepared) finite
+        (fst (A.discover (P.inventory openPrepared) finite))
+      openCalc s = openTable M.! (P.openRoots openPrepared M.! s)
+  check (T.complete openGenerated) (show (T.diagnostics openGenerated))
+  check (all (\s -> P.arguments s == [P.Level (rigid 0),openType])
+      [s | s <- P.instances openPrepared,P.origin s `elem` ["polyIdentity","inferredIdentity","polyPick"]])
+    "symbolic levels were concretized or changed scope"
+  forM_ [False,True] $ \x -> do
+    forM_ ["polyIdentity","inferredIdentity","openRelay"] $ \s ->
+      check (evalWith openTable [B x] (A.body (openCalc s)) == B x) "open level changed identity/call behavior"
+    forM_ [False,True] $ \y -> forM_ [False,True] $ \z ->
+      check (eval [B x,B y,B z] (A.body (openCalc "polyPick")) == B (if x then y else z))
+        "open level changed a runtime case position"
+  check (P.substitute [two] (P.Level (rigid 0)) == Right (P.Level (rigid 0)))
+    "callee substitution captured a caller's open level"
+  check (P.typeKey (P.Level (rigid 0)) /= P.typeKey (P.Level (rigid 1)))
+    "distinct symbolic levels shared a static identity"
+  let maxOpen = maxLevel (variable 0 []) (suc (variable 0 []))
+      shifted = P.LevelExpr 0 (M.singleton (P.RigidLevel 0) 1)
+  check (P.readType inv [Just (P.Level (rigid 0))] maxOpen == Right (P.Level shifted))
+    "symbolic successor/maximum did not canonicalize"
+  check (P.readType inv [Just (P.Level (rigid 0))] (maxLevel (levelTerm 1) (suc (variable 0 [])))
+      == Right (P.Level shifted)) "dominated level constant changed symbolic identity"
+  let wrong = set "compiled" (done 3 (call "polyIdentity"
+        [suc (variable 2 []),variable 1 [],variable 0 []] [])) ident
+      invalid = openInv {declarations = M.insert "polyIdentity" wrong (declarations openInv)}
+  check (not (T.complete (T.generate invalid))) "mismatched symbolic universe was accepted"
 
 indexedChecks :: Inventory -> IO ()
 indexedChecks base = do
@@ -1754,7 +1794,7 @@ familyParameterChecks = do
       inv = Inventory (object []) M.empty M.empty M.empty
       bool = P.Named "Bool" []
       schema = P.FamilyParameter 0 [bool] (P.LevelExpr 0 M.empty)
-      family = P.OpenFamily 0 [bool] 0
+      family = P.OpenFamily 0 [bool] (P.LevelExpr 0 M.empty)
       value = P.Runtime bool (P.IndexInput 0)
       applicationTerm = get "term" resultType
   sig <- either (fail . show) pure (P.signature inv declaration')
@@ -1834,7 +1874,7 @@ familyParameterChecks = do
         (P.FamilyApplication family [P.Runtime bool (P.IndexLocal slot)]) (P.LevelExpr 0 M.empty)
   check (P.typeKey (closure 0) == P.typeKey (closure 7)) "alpha-renaming a family binder changed its instance identity"
   check (P.typeKey (closure 0) /= P.typeKey (P.FamilyExpression bool 0
-    (P.FamilyApplication (P.OpenFamily 1 [bool] 0) [P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)))
+    (P.FamilyApplication (P.OpenFamily 1 [bool] (P.LevelExpr 0 M.empty)) [P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)))
     "distinct family bindings were merged"
 
 reductionChecks :: IO ()
@@ -1976,7 +2016,7 @@ closureChecks base = do
     check (M.member "recordCaller" (P.failures (P.prepare (altered "runCallback" change))))
       "opaque, unchecked or missing callback computation was admitted"
   let bindingEvidence = set "closureSpecialization" (object ["types" .= map P.typeValue
-        [P.Open 2 0,P.OpenFamily 1 [P.Open 0 0] 0]]) (object [])
+        [P.Open 2 (P.LevelExpr 0 M.empty),P.OpenFamily 1 [P.Open 0 (P.LevelExpr 0 M.empty)] (P.LevelExpr 0 M.empty)]]) (object [])
   check (P.nativeParameters bindingEvidence == [0,2] && map fst (P.nativeFamilies bindingEvidence) == [1])
     "generated callback signature lost open capture/result bindings"
   let constrained = set "closureIndexEquations" (toJSON [object ["domain" .= named "Bool"
