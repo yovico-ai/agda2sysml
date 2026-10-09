@@ -1372,6 +1372,28 @@ familyParameterChecks = do
   let dependent = arrow True (named "Bool") (arrow False (variableType 0 []) universe)
       unsupported = set "type" (arrow True dependent (named "Bool")) declaration'
   check (isLeft (P.signature inv unsupported)) "dependent family argument domain silently flattened"
+  let pairType = set "parameters" (Number 2) $ declaration "DependentPair" "record"
+        (arrow True universe (arrow True (arrow False (variableType 0 []) universe) universe))
+      pairInv = inv {declarations = M.singleton "DependentPair" pairType}
+      lambda slot = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True
+        ,"body" .= get "term" (variableType 1 [get "term" (variableType slot [])])]]
+      pairTerm body = get "term" (set "term" (call "DependentPair" [get "term" (named "Bool"),body] []) (object []))
+      contextual = P.Runtime bool (P.IndexInput 0)
+  parsed <- either (fail . show) pure (P.readType pairInv [Just family] (pairTerm (lambda 0)))
+  case parsed of
+    P.Named "DependentPair" [_,closure] -> do
+      resolved <- either (fail . show) pure (P.substitute [closure]
+        (P.FamilyApplication (P.FamilyParameter 0 [bool] (P.LevelExpr 0 M.empty)) [contextual]))
+      check (resolved == P.FamilyApplication family [contextual]) "first-order family beta substitution lost its member index"
+    _ -> fail "type-family lambda did not retain its domain and member"
+  check (isLeft (P.readType pairInv [Just family] (pairTerm (lambda 1))))
+    "type-family binder confused its own argument with the preceding family parameter"
+  let closure slot = P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool (P.IndexLocal slot)]) (P.LevelExpr 0 M.empty)
+  check (P.typeKey (closure 0) == P.typeKey (closure 7)) "alpha-renaming a family binder changed its instance identity"
+  check (P.typeKey (closure 0) /= P.typeKey (P.FamilyExpression bool 0
+    (P.FamilyApplication (P.OpenFamily 1 [bool] 0) [P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)))
+    "distinct family bindings were merged"
 
 reductionChecks :: IO ()
 reductionChecks = do

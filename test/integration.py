@@ -16,6 +16,7 @@ from dependent_evidence import verify_dependent_evidence
 from recursive_core import verify_recursive_core
 from structured_indices import verify_structured_indices
 from callbacks import verify_callbacks
+from dependent_record_path import verify_dependent_record_path
 
 
 def check(condition, message):
@@ -308,6 +309,9 @@ models:
     callback_evidence = verify_callbacks(self_output)
     check(callback_evidence == {'comparisons': 218, 'invalidCasesRejected': 5, 'operations': 3},
           "callback consumers lack complete outcomes and binding/schema refusals")
+    record_path_evidence = verify_dependent_record_path(self_output)
+    check(record_path_evidence == {'comparisons': 120, 'invalidCasesRejected': 12, 'operations': 4},
+          "dependent-record path lacks complete members and projected index refusals")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
           and self_manifest["selectionProfile"] == "declarations", "default generation required a hidden mapping")
