@@ -618,6 +618,10 @@ addition, multiplication, truncated subtraction, equality, and comparison.
 Successor and natural case analysis retain zero and predecessor semantics.
 `NaturalValues` proves both carrier round trips and the operation laws for every
 natural. No machine-integer bound is imposed on source or target values.
+Its existing `encode`, `decode`, `successor`, `add`, `multiply`, `subtract`,
+`equal`, and `less` operations translate directly. Parsed SysML tests retain
+the complete finite-value evidence, exercise large integers, and reject
+infinity, negative values, missing evidence and inconsistent evidence indices.
 
 The pinned Pilot stores integer literals as Java `int`; its evaluation is not
 an arbitrary-precision arithmetic oracle. The renderer decomposes large literal
@@ -741,6 +745,10 @@ branches refine constructor fibres; a positive natural branch justifies the
 predecessor/successor equality only inside that branch. Inherited equations are
 rebased through subsequent splits. An absurd leaf is admitted only after the
 refined environment contains a carrier fibre with no possible constructor.
+For ordinary sum carriers, a checked constructor branch also establishes its
+tag. When such a value indexes another carrier, incompatible constructor tags
+can establish an empty fibre. This fact is local to that scrutinee and branch;
+an unknown payload or an unrelated input cannot establish impossibility.
 Lazy matches require a record or a uniquely determined constructor.
 
 ## Captured runtime indices in type arguments

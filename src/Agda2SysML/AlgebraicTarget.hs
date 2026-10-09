@@ -684,7 +684,7 @@ functionWith inv finite helpers shapes signatures d = do
         ,"equations" .= [(renderWith id (T.pack . show) a,renderWith id (T.pack . show) b) | (a,b) <- equationsInScope]])) $ case string (get "tag" tree) of
       "absurd" -> do
         unless (length (array (get "binders" tree)) == length env) (refuse Syntax "Absurd leaf binder count mismatch")
-        let impossible = any (\(typ,value) -> case alternatives (mapCarrier (rewrite equationsInScope) typ) value of
+        let impossible = any (\(typ,value) -> case alternatives equationsInScope (mapCarrier (rewrite equationsInScope) typ) value of
               Right [] -> True
               _ -> False) env
         unless impossible (refuse Semantics "Absurd branch has no established empty index fibre")
@@ -714,7 +714,7 @@ functionWith inv finite helpers shapes signatures d = do
         i <- integer (get "value" (get "argument" tree))
         (typ,rawSelected) <- at i env
         let selected = located "native.algebraic-discriminant" tree (toJSON i) rawSelected
-        options <- alternatives typ selected
+        options <- alternatives equationsInScope typ selected
         let eta = get "eta" tree
             ordinary = array (get "constructors" tree)
             available = if eta == Null then ordinary else
@@ -766,20 +766,20 @@ functionWith inv finite helpers shapes signatures d = do
     runtimeParameters c = case M.lookup c (declarations inv) of
       Just def | get "runtimeParameters" def /= Null -> integer (get "runtimeParameters" def)
       _ -> Right 0
-    alternatives Boolean _ = Right [(builtin inv "true",[]),(builtin inv "false",[])]
-    alternatives Natural value = let
+    alternatives _ Boolean _ = Right [(builtin inv "true",[]),(builtin inv "false",[])]
+    alternatives _ Natural value = let
       options = [(builtin inv "zero",[]),(builtin inv "suc",[("predecessor",Natural)])]
       in Right $ case normalize value of
         NumberLiteral 0 -> take 1 options
         NumberLiteral k | k > 0 -> drop 1 options
         Numeric "+" _ (NumberLiteral k) | k > 0 -> drop 1 options
         _ -> options
-    alternatives TypeParameter{} _ = refuse Semantics "Cannot inspect constructors of an open type parameter"
-    alternatives AnyValue _ = refuse Semantics "Cannot inspect a native relation payload"
-    alternatives (Fibre s indices) selected = do
+    alternatives _ TypeParameter{} _ = refuse Semantics "Cannot inspect constructors of an open type parameter"
+    alternatives _ AnyValue _ = refuse Semantics "Cannot inspect a native relation payload"
+    alternatives equations (Fibre s indices) selected = do
       sh <- maybe (refuse Representation "Missing indexed carrier") Right (M.lookup s shapes)
-      pure [(constructorSymbol c,payload c) | c <- variants sh,compatible indices (endpoints selected c)]
-    alternatives (Named s) selected = case M.lookup s shapes of
+      pure [(constructorSymbol c,payload c) | c <- variants sh,compatible equations (indexTypes sh) indices (endpoints selected c)]
+    alternatives _ (Named s) selected = case M.lookup s shapes of
       Just sh -> let options = [(constructorSymbol c,payload c) | c <- variants sh]
         in Right $ case (sequenceElement sh,normalize (Project selected sequenceField)) of
           (Just _,Sequence []) -> take 1 options
@@ -795,7 +795,14 @@ functionWith inv finite helpers shapes signatures d = do
     distinct (Construct s [(f,Sequence xs)]) (Construct t [(g,Sequence ys)])
       | s == t && f == sequenceField && g == sequenceField = null xs /= null ys
     distinct _ _ = False
-    compatible xs ys = length xs == length ys && not (or (zipWith distinct (map (expand helpers) xs) (map (expand helpers) ys)))
+    compatible equations domains xs ys = length xs == length ys && length domains == length xs
+      && not (or (zipWith3 separated domains xs ys))
+      where
+        reduced = normalize . expand helpers . rewrite equations
+        separated domain x y = distinct (reduced x) (reduced y) || case domain of
+          Named owner | Just sh <- M.lookup owner shapes, not (isRecord sh), sequenceElement sh == Nothing ->
+            distinct (reduced (Project x tagField)) (reduced (Project y tagField))
+          _ -> False
     branchEquations (Fibre s xs) selected c = do
       sh <- maybe (refuse Representation "Missing family") Right (M.lookup s shapes)
       con <- case filter ((== c) . constructorSymbol) (variants sh) of
@@ -831,6 +838,8 @@ functionWith inv finite helpers shapes signatures d = do
         Sequence [_,Project tailValue field] | field == sequenceField ->
           [(Construct s [(sequenceField,Project tailValue sequenceField)],tailValue)]
         _ -> []
+    branchEquations (Named s) selected c | Just sh <- M.lookup s shapes, not (isRecord sh) =
+      Right [(Project selected tagField,Enumeration (tagType s) c)]
     branchEquations _ _ _ = Right []
     isReference Input{} = True
     isReference Project{} = True

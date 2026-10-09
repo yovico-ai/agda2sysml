@@ -17,6 +17,7 @@ from recursive_core import verify_recursive_core
 from structured_indices import verify_structured_indices
 from callbacks import verify_callbacks
 from dependent_record_path import verify_dependent_record_path
+from natural_values import verify_natural_values
 
 
 def check(condition, message):
@@ -292,6 +293,9 @@ models:
     self_inventory = json.loads((self_output / "inventory.json").read_text())
     check_source_catalog(self_inventory)
     self_report = json.loads((self_output / "correspondence.json").read_text())
+    natural_evidence = verify_natural_values(self_output)
+    check(natural_evidence == {'operations': 8, 'comparisons': 344, 'invalidCasesRejected': 6},
+          "finite-natural adapters lack complete arithmetic results and inconsistent-evidence refusals")
     open_evidence = verify_open_parameters(self_output)
     check(open_evidence["comparisons"] >= 700 and open_evidence["invalidBindingsRejected"] == 5,
           "open algorithms lack parsed-target behavior and parameter checks")
