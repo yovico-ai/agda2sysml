@@ -1336,6 +1336,64 @@ unify known (Named s xs) (Named t ys) | s == t && length xs == length ys =
   foldM (\m (a,b) -> unify m a b) known (zip xs ys)
 unify _ expected actual = refuse Semantics ("Concrete carrier mismatch: expected " <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
 
+-- Reconstruct source identities for checked definitional comparison. This is
+-- also used when specializing static closures; emitted calls keep their own
+-- specialized identities.
+sourceTypeTerm :: Inventory -> Int -> Type -> Value
+sourceTypeTerm inv = sourceTypeAt
+  where
+    sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
+      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
+    sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
+      ,"slot" .= slot,"universe" .= level]]
+    sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
+      ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= level]]
+    sourceTypeAt depth (FamilyApplication family values) = let t = get "term" (sourceTypeAt depth family) in
+      object ["term" .= set "eliminations" (toJSON (array (get "eliminations" t)
+        ++ map (application . get "term" . sourceTypeAt depth) values)) t]
+    sourceTypeAt depth (FamilyExpression domain slot body _) = case applyTypeFamily
+        (FamilyExpression domain slot body (levelConstant 0)) [Runtime domain (IndexInput depth)] of
+      Right result -> object ["term" .= object ["tag" .= ("lambda" :: Text)
+        ,"abstraction" .= object ["binds" .= True,"body" .= get "term" (sourceTypeAt (depth+1) result)]]]
+      Left _ -> object ["term" .= Null]
+    sourceTypeAt depth (Runtime _ index) = object ["term" .= sourceIndex depth index]
+    sourceTypeAt _ (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
+      ,"level" .= object ["constant" .= n,"maximum" .=
+        [object ["offset" .= offset,"term" .= Reduction.variable i] | (i,offset) <- M.toAscList terms]]]]
+    sourceTypeAt depth t = asType depth t
+    sourceIndex depth (IndexConstructor c _ values) = object ["tag" .= ("constructor" :: Text)
+      ,"symbol" .= c,"eliminations" .= map (application . sourceIndex depth) values]
+    sourceIndex depth (IndexNatural value) = indexTerm depth (IndexNatural value)
+    sourceIndex depth (IndexSuccessor value) = object ["tag" .= ("constructor" :: Text)
+      ,"symbol" .= builtin inv "suc","eliminations" .= [application (sourceIndex depth value)]]
+    sourceIndex depth (IndexCall f types values) = object ["tag" .= ("definition" :: Text),"symbol" .= f
+      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ map (sourceIndex depth) values)]
+    sourceIndex depth (IndexProject f types receiver) = object ["tag" .= ("definition" :: Text),"symbol" .= f
+      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ [sourceIndex depth receiver])]
+    sourceIndex depth index = indexTerm depth index
+
+-- Static type arguments can contain computed fibres. Compare their checked
+-- definitional forms without discarding indices or assuming helper injectivity.
+-- A blocked reduction leaves the original expression intact.
+unifyIn :: Inventory -> [Binding] -> M.Map Int Type -> Type -> Type -> Either Refusal (M.Map Int Type)
+unifyIn inv bindings known expected actual = case unify known expected actual of
+  Right result -> Right result
+  Left original -> case unify (M.map normal known) (normal expected) (normal actual) of
+    Right result -> Right (M.union known result)
+    Left _ -> Left original
+  where
+    env = runtimeBindings (filter isDynamic bindings)
+    depth = length (filter isDynamic bindings)
+    normal (Named s xs) = Named s (map normal xs)
+    normal (FamilyApplication f xs) = FamilyApplication (normal f) (map normal xs)
+    normal (OpenFamily i xs l) = OpenFamily i (map normal xs) l
+    normal (Runtime domain ix) =
+      let ty = Runtime (normal domain) ix
+      in case Reduction.reduceHead inv (get "term" (sourceTypeTerm inv depth ty)) of
+        Just (reduced,_) -> either (const ty) id (readIndex inv env (normal domain) reduced)
+        Nothing -> ty
+    normal t = t
+
 expression :: Inventory -> [Text] -> [Binding] -> Maybe Type -> Value -> Build (Type,Value)
 expression inv stack env expected term = do
   result <- infer `catchError` \failure ->
@@ -1344,7 +1402,7 @@ expression inv stack env expected term = do
       Just (reduced,premises) -> do
         (ty,value) <- expression inv stack env expected reduced
         pure (ty,set "reductionEvidence" (object ["before" .= term,"after" .= reduced,"declarations" .= premises]) value)
-  forM_ expected $ \ty -> liftEither (either (Left . context "Specialized expression carrier mismatch: ") Right (unify M.empty ty (fst result)))
+  forM_ expected $ \ty -> liftEither (either (Left . context "Specialized expression carrier mismatch: ") Right (unifyIn inv env M.empty ty (fst result)))
   pure result
   where
     es = array (get "eliminations" term)
@@ -1372,7 +1430,7 @@ expression inv stack env expected term = do
         -- Constructor terms omit their family parameters. Expected result types
         -- recover phantom parameters too; otherwise infer from ordered payloads.
         known <- if length es == length (inputs valueSig) then
-          maybe (pure M.empty) (liftEither . unify M.empty (output sig)) expected else pure M.empty
+          maybe (pure M.empty) (liftEither . unifyIn inv env M.empty (output sig)) expected else pure M.empty
         (types,values,indices,rest) <- argumentsFor valueSig runtimeParameters (take runtimeParameters contextualIndices) known es
         let tyArgs = types
         schemaOut <- liftEither (substitute tyArgs (replaceKnownInputs indices (output sig)))
@@ -1397,7 +1455,7 @@ expression inv stack env expected term = do
         let explicit = M.fromList (zip [min (parameters sig) (dropped sig)..] actualTypes)
             valueElims = drop supplied es
         known <- if length valueElims == length (inputs sig) then
-          maybe (pure explicit) (liftEither . unify explicit (output sig)) expected else pure explicit
+          maybe (pure explicit) (liftEither . unifyIn inv env explicit (output sig)) expected else pure explicit
         let runtimeDropped = max 0 (dropped sig - parameters sig)
         (types,values,indices,rest) <- argumentsFor (sig {inputs = drop runtimeDropped (inputs sig)}) runtimeDropped [] known valueElims
         ensureFunction inv stack s types
@@ -1415,7 +1473,7 @@ expression inv stack env expected term = do
       unless (all closed (fst (captureArguments args))) (abort Representation "Unresolved concrete type arguments")
       liftEither (validateArguments inv (parameterKinds sig) (fst (captureArguments args)))
       expectedInputs <- liftEither (traverse (substitute args) (inputs sig))
-      unless (length actuals == length expectedInputs && all (either (const False) (const True) . uncurry (unify M.empty)) (zip expectedInputs actuals))
+      unless (length actuals == length expectedInputs && all (either (const False) (const True) . uncurry (unifyIn inv env M.empty)) (zip expectedInputs actuals))
         (abort Semantics "Specialized argument constraints do not agree")
       pure (args,values,indices,drop (length (inputs sig)) elims)
       where
@@ -1438,7 +1496,7 @@ expression inv stack env expected term = do
               resolvedIndex (IndexSuccessor x) = resolvedIndex x
               resolvedIndex _ = True
           (actual,v) <- expression inv stack env (fill patternType) value
-          known' <- liftEither (unify known patternType actual)
+          known' <- liftEither (unifyIn inv env known patternType actual)
           completed <- liftEither (completeKnown inv sig known')
           let concrete = substitute [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
                 (replaceKnownInputs indices patternType)
@@ -1564,35 +1622,7 @@ higherOrder inv stack env term = do
   pure (out,object ["tag" .= ("definition" :: Text),"symbol" .= key,"eliminations" .= map application (captureValues ++ values)])
   where
     sourceType = sourceTypeAt 0
-    sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
-      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
-    sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
-      ,"slot" .= slot,"universe" .= level]]
-    sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
-      ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= level]]
-    sourceTypeAt depth (FamilyApplication family values) = let t = get "term" (sourceTypeAt depth family) in
-      object ["term" .= set "eliminations" (toJSON (array (get "eliminations" t)
-        ++ map (application . get "term" . sourceTypeAt depth) values)) t]
-    sourceTypeAt depth (FamilyExpression domain slot body _) = case applyTypeFamily
-        (FamilyExpression domain slot body (levelConstant 0)) [Runtime domain (IndexInput depth)] of
-      Right result -> object ["term" .= object ["tag" .= ("lambda" :: Text)
-        ,"abstraction" .= object ["binds" .= True,"body" .= get "term" (sourceTypeAt (depth+1) result)]]]
-      Left _ -> object ["term" .= Null]
-    sourceTypeAt depth (Runtime _ index) = object ["term" .= sourceIndex depth index]
-    sourceTypeAt _ (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
-      ,"level" .= object ["constant" .= n,"maximum" .=
-        [object ["offset" .= offset,"term" .= Reduction.variable i] | (i,offset) <- M.toAscList terms]]]]
-    sourceTypeAt depth t = asType depth t
-    sourceIndex depth (IndexConstructor c _ values) = object ["tag" .= ("constructor" :: Text)
-      ,"symbol" .= c,"eliminations" .= map (application . sourceIndex depth) values]
-    sourceIndex depth (IndexNatural value) = indexTerm depth (IndexNatural value)
-    sourceIndex depth (IndexSuccessor value) = object ["tag" .= ("constructor" :: Text)
-      ,"symbol" .= builtin inv "suc","eliminations" .= [application (sourceIndex depth value)]]
-    sourceIndex depth (IndexCall f types values) = object ["tag" .= ("definition" :: Text),"symbol" .= f
-      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ map (sourceIndex depth) values)]
-    sourceIndex depth (IndexProject f types receiver) = object ["tag" .= ("definition" :: Text),"symbol" .= f
-      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ [sourceIndex depth receiver])]
-    sourceIndex depth index = indexTerm depth index
+    sourceTypeAt = sourceTypeTerm inv
     sourceArrow = go 0
       where
         go depth [] out = sourceTypeAt depth out

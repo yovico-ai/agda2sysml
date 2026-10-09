@@ -610,11 +610,15 @@ helpers over those carriers. Indexed families consuming their results do not
 justify their own helpers. Every helper still needs a supported body and complete
 call closure; a signature alone is insufficient.
 
-Checked recursive helpers with indexed results, such as the existing `absent`
-slot constructor, may also appear in indices after their carriers are admitted.
+Checked recursive helpers with indexed inputs or results, such as the existing
+`schemaAt` lookup and `absent` slot constructor, may also appear in indices after
+their carriers are admitted.
 They require safe-module termination evidence and a supported complete call
 closure. Symbolic comparison unfolds a recursive symbol once along each path
 and leaves further calls opaque; native emission retains the recursive call.
+Constructor facts apply to the expressions exposed by unfolding. If a recursive
+helper still has an unknown outer branch, comparison retains the call, allowing
+both sides of a recursive equation to meet at the same residual lookup.
 This bounded comparison does not assume injectivity or prove arbitrary recursive
 equations. Unindexed recursive helpers continue to require the concatenation
 certificate below.
@@ -624,7 +628,7 @@ checked native body matches both constructor equations: the empty branch returns
 the second input, and the prepend branch retains the head and recursively joins
 the tail with the second input. Applicability uses checked shapes, signatures,
 case semantics and safe termination evidence; it does not inspect function names.
-Mutual or other recursive index computations remain unsupported.
+Other recursion without indexed inputs or results remains unsupported.
 
 Comparison uses the certified concatenation form, flattens nested ordered
 sequences, and handles empty contributions. List indices compare their contents;
@@ -632,6 +636,20 @@ existing type/family binding checks remain. This permits dependent field append
 without inferring a split of inputs from an equal concatenated result. Native
 calculations and constraints retain the original helper calls and their lexical
 parameter bindings. No normalization evaluator is embedded in the target.
+
+This supports the existing `AlgebraicValues.slotAt`, `sourceConstructor` and
+`nativeConstructor` operations directly. A chosen tag computes the required
+payload schema; source and native construction preserve every payload field,
+and native construction retains the `Active` validity evidence. Lookup returns
+the selected slot, including `nothing` for an inactive slot. Fixed fibres used
+as static type arguments may be compared through checked source reduction;
+blocked computations remain distinct, and target checking still verifies their
+runtime indices. No project-specific declaration names are used by these rules.
+
+The parsed-SysML checks exercise every position in several schemas, including
+equal schemas at different constructor positions, empty and repeated fields,
+open payload families, and unbounded natural atoms. Wrong payload schemas,
+wrong tags and mismatched slot schemas must fail emitted constraints.
 
 `SchemaConcatenation` proves the characterization, source/native correspondence,
 and associative grouping laws for arbitrary atom carriers and finite lists.
@@ -675,7 +693,8 @@ be admitted. Failed members are removed to a fixed point, preventing a temporary
 cache entry from admitting a broken cycle. `RecursiveCalls` proves preservation
 by accessibility induction, conditional on step correspondence. The compiler
 adapter must justify that the checked source termination result applies to the
-specialized calls. Computed-index helper expansion remains acyclic.
+specialized calls. Computed-index comparison uses the bounded expansion rules
+described above.
 
 ## Record updates, value parameters, and closures
 
