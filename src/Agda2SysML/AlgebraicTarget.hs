@@ -12,7 +12,7 @@ import Agda2SysML.Inventory hiding (field)
 import Agda2SysML.Diagnostic (Refusal, Category(..), refuse, refusal, context, field)
 import qualified Agda2SysML.FiniteTarget as F
 import qualified Agda2SysML.Specialize as Specialize
-import Control.Monad (unless, forM, zipWithM, foldM, (>=>))
+import Control.Monad (unless, forM, foldM, (>=>))
 import Data.Graph (SCC(..), stronglyConnComp)
 import Data.Aeson
 import qualified Data.Map.Strict as M
@@ -165,7 +165,10 @@ carrierIn inv finite helpers shapes env ty = do
         then Right (Named s)
         else do
           unless (length args == length (indexTypes sh)) (refuse Syntax "Family index arity mismatch")
-          Fibre s <$> zipWithM (indexExpression inv finite helpers shapes env) (indexTypes sh) args
+          values <- foldM (\prior (domain,arg) -> do
+            value <- indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) domain) arg
+            pure (prior ++ [value])) [] (zip (indexTypes sh) args)
+          pure (Fibre s values)
     _ | not (null args) -> refuse Representation "Unadmitted indexed or parameterized carrier"
       | Just d <- M.lookup s (declarations inv),get "kind" d == String "native-type-parameter" ->
           TypeParameter <$> integer (get "nativeParameter" d)
@@ -213,10 +216,17 @@ indexExpression inv finite helpers shapes env expected t = do
           let c = string (get "symbol" term)
           case M.lookup c (constructorTable shapes) of
             Just (sh,con) -> do
-              unless (length es == length (payload con)) (refuse Syntax "Structured index constructor arity mismatch")
+              parameterCount <- case M.lookup c (declarations inv) of
+                Just def | get "runtimeParameters" def /= Null -> integer (get "runtimeParameters" def)
+                _ -> Right 0
+              prefix <- if parameterCount == 0 then pure [] else case expected of
+                Fibre owner indices | owner == shapeSymbol sh && length indices >= parameterCount -> pure (take parameterCount indices)
+                _ -> refuse Representation "Structured index constructor needs its contextual value parameters"
+              let supplied = drop parameterCount (payload con)
+              unless (length es == length supplied) (refuse Syntax "Structured index constructor arity mismatch")
               values <- foldM (\prior ((_,typ),arg) -> do
                 value <- applicationValue arg >>= indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) typ)
-                pure (prior ++ [value])) [] (zip (payload con) es)
+                pure (prior ++ [value])) prefix (zip supplied es)
               pure (familyCarrier sh (map (instantiate values) (resultIndices con)),
                 Construct (shapeSymbol sh) (construction (Just term) sh con values))
             Nothing -> do
@@ -229,13 +239,16 @@ indexExpression inv finite helpers shapes env expected t = do
         "definition" -> case M.lookup (string (get "symbol" term)) helpers of
           Just helper -> do
             unless (length es == length (inputs helper)) (refuse Syntax "Computed index helper arity mismatch")
-            args <- traverse (applicationValue >=> infer) es
-            unless (map fst args == inputs helper) (refuse Semantics "Computed index helper argument domain mismatch")
+            args <- foldM (\prior (domain,arg) -> do
+              value <- applicationValue arg >>= infer
+              unless (fst value == mapCarrier (instantiate (map snd prior)) domain)
+                (refuse Semantics "Computed index helper argument domain mismatch")
+              pure (prior ++ [value])) [] (zip (inputs helper) es)
             let bindings = case M.lookup (calculationSymbol helper) (declarations inv) of
                   Just def -> map parameterName (Specialize.nativeParameters def)
                     ++ map (familyName . fst) (Specialize.nativeFamilies def)
                   Nothing -> []
-            pure (result helper,BoundCall (calculationSymbol helper) bindings (map snd args))
+            pure (mapCarrier (instantiate (map snd args)) (result helper),BoundCall (calculationSymbol helper) bindings (map snd args))
           Nothing -> case es of
             arg:rest -> do
               receiver <- applicationValue arg >>= infer
@@ -330,7 +343,7 @@ normalizeStep (SequenceOp op xs) = case (op,normalize xs) of
   ("isEmpty",Sequence (_:_)) -> Literal False
   ("tail",Sequence (_:rest)) -> case rest of
     [Project value field] | field == sequenceField -> Project value field
-    _ -> Sequence rest
+    _ -> normalize (Sequence rest)
   (_,value) -> SequenceOp op value
 normalizeStep (SequenceHead t xs) = case normalize xs of
   Sequence (x:_) -> x
@@ -338,30 +351,31 @@ normalizeStep (SequenceHead t xs) = case normalize xs of
 normalizeStep (Conditional p x y) = Conditional (normalize p) (normalize x) (normalize y)
 normalizeStep e = e
 
--- Expansion uses independently admitted acyclic helpers and certified finite
--- normal forms for structural concatenation. Emission retains native calls.
+-- Expansion uses independently checked helpers and certified finite normal
+-- forms. A recursive symbol unfolds once per path; residual calls stay opaque.
+-- Emission retains the original native calls and their checked dependency graph.
 expand :: Helpers -> Expression -> Expression
-expand helpers = go
+expand helpers = go S.empty
   where
-    go (Call s args) = case M.lookup s helpers of
-      Just helper -> go (instantiate (map go args) (body helper))
-      Nothing -> Call s (map go args)
-    go (Project x f) = normalize (Project (go x) f)
-    go (Construct s fs) = Construct s [(f,go x) | (f,x) <- fs]
-    go (Sequence xs) = normalize (Sequence (map go xs))
-    go (SequenceOp op xs) = normalize (SequenceOp op (go xs))
-    go (SequenceHead t xs) = normalize (SequenceHead (mapCarrier go t) (go xs))
-    go (Equal x y) = case (go x,go y) of
+    go seen (Call s args) = case M.lookup s helpers of
+      Just helper | S.notMember s seen -> go (S.insert s seen) (instantiate (map (go seen) args) (body helper))
+      _ -> Call s (map (go seen) args)
+    go seen (Project x f) = normalize (Project (go seen x) f)
+    go seen (Construct s fs) = Construct s [(f,go seen x) | (f,x) <- fs]
+    go seen (Sequence xs) = normalize (Sequence (map (go seen) xs))
+    go seen (SequenceOp op xs) = normalize (SequenceOp op (go seen xs))
+    go seen (SequenceHead t xs) = normalize (SequenceHead (mapCarrier (go seen) t) (go seen xs))
+    go seen (Equal x y) = case (go seen x,go seen y) of
       (Literal a,Literal b) -> Literal (a == b)
       (Enumeration a x',Enumeration b y') -> Literal (a == b && x' == y')
       (x',y') | x' == y' -> Literal True
               | otherwise -> Equal x' y'
-    go (Conditional p yes no) = case go p of
-      Literal True -> go yes
-      Literal False -> go no
-      p' -> let yes' = go yes; no' = go no in
+    go seen (Conditional p yes no) = case go seen p of
+      Literal True -> go seen yes
+      Literal False -> go seen no
+      p' -> let yes' = go seen yes; no' = go seen no in
         if yes' == no' then yes' else Conditional p' yes' no'
-    go e = e
+    go _ e = e
 
 recordFieldType :: Shape -> Expression -> Carrier -> Carrier
 recordFieldType sh receiver = mapCarrier (instantiate [Project receiver f | c <- variants sh,(f,_) <- payload c])
@@ -468,7 +482,9 @@ shape inv finite helpers shapes d = do
       (refuse Semantics "Constructor result does not match its family")
     endpoints <- traverse applicationValue (array (get "eliminations" resultTerm))
     unless (length endpoints == length familyArgs) (refuse Syntax "Constructor result index arity mismatch")
-    indices <- zipWithM (indexExpression inv finite helpers shapes env) familyArgs endpoints
+    indices <- foldM (\prior (domain,endpoint) -> do
+      value <- indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) domain) endpoint
+      pure (prior ++ [value])) [] (zip familyArgs endpoints)
     -- typedTelescope admits each payload in the preceding payload context.
     -- The same ordered dependency rule applies to records and sum variants;
     -- construction, branch expansion and guarded validity retain these links.
@@ -549,15 +565,15 @@ finiteHelpers inv finite = close acyclic
     close table = let next = M.filter (\c -> dependencies c `S.isSubsetOf` M.keysSet table) table
       in if M.keysSet next == M.keysSet table then table else close next
 
--- Index helpers are admitted independently of the families that consume their
--- results. Acyclic computations use already admitted, unindexed carriers.
+-- Index helpers use already admitted carriers, independently of families that
+-- consume their results. Indexed recursive results require checked termination;
+-- unindexed recursion still needs the structural concatenation certificate.
 -- Recursive concatenation has a checked structural equation certificate; its
 -- finite comparison normal form is separate from the emitted recursive body.
 indexHelpers :: Inventory -> M.Map Text F.Domain -> Shapes -> Helpers -> Helpers
 indexHelpers inv finite shapes initial = close candidates
   where
-    independent = M.filter (null . indexTypes) shapes
-    admitted = M.filter (null . staticIndexEquations) $ M.mapMaybe (either (const Nothing) Just) (functionsWith initial inv finite independent)
+    admitted = M.filter (null . staticIndexEquations) $ M.mapMaybe (either (const Nothing) Just) (functionsWith initial inv finite shapes)
     groups = stronglyConnComp [(c,s,S.toList (dependencies c)) | (s,c) <- M.toList admitted]
     candidates = M.union initial (M.fromList (concatMap select groups))
     select (AcyclicSCC c) = [(calculationSymbol c,c)]
@@ -565,8 +581,13 @@ indexHelpers inv finite shapes initial = close candidates
       Just expression -> [(calculationSymbol c,c {body = Annotated
         (D.derived "native.schema-concatenation" [D.root (calculationSymbol c) "compiled",D.root (calculationSymbol c) "type"]
           Null [annotation (body c)]) expression})]
-      Nothing -> []
-    select (CyclicSCC _) = []
+      Nothing | checked [c] -> [(calculationSymbol c,c)]
+              | otherwise -> []
+    select (CyclicSCC cs) | checked cs = [(calculationSymbol c,c) | c <- cs]
+                        | otherwise = []
+    checked = all (\c -> case result c of
+      Fibre{} -> maybe False (terminationChecked inv) (M.lookup (calculationSymbol c) (declarations inv))
+      _ -> False)
     close table = let next = M.filter (\c -> dependencies c `S.isSubsetOf` M.keysSet table) table
       in if M.keysSet next == M.keysSet table then table else close next
 
@@ -796,20 +817,34 @@ functionWith inv finite helpers shapes signatures d = do
       | s == t && f == sequenceField && g == sequenceField = null xs /= null ys
     distinct _ _ = False
     compatible equations domains xs ys = length xs == length ys && length domains == length xs
-      && not (or (zipWith3 separated domains xs ys))
+      && not (or (zipWith3 (separated S.empty) domains xs ys))
       where
         reduced = normalize . expand helpers . rewrite equations
-        separated domain x y = distinct (reduced x) (reduced y) || case domain of
-          Named owner | Just sh <- M.lookup owner shapes, not (isRecord sh), sequenceElement sh == Nothing ->
-            distinct (reduced (Project x tagField)) (reduced (Project y tagField))
+        separated seen domain x y = distinct (reduced x) (reduced y) || case ownerOf domain >>= (`M.lookup` shapes) of
+          Just sh | sequenceElement sh == Nothing, S.notMember (shapeSymbol sh) seen ->
+            let leftTag = reduced (Project x tagField)
+                rightTag = reduced (Project y tagField)
+                active con = isRecord sh || case (leftTag,rightTag) of
+                  (Enumeration _ a,Enumeration _ b) -> a == b && a == constructorSymbol con
+                  _ -> False
+                payloadSeparated con = any (\(f,typ) -> separated (S.insert (shapeSymbol sh) seen)
+                  (mapCarrier (instantiate [Project x field | (field,_) <- payload con]) typ)
+                  (Project x f) (Project y f)) (payload con)
+            in (not (isRecord sh) && distinct leftTag rightTag)
+              || any payloadSeparated (filter active (variants sh))
           _ -> False
+        ownerOf (Named owner) = Just owner
+        ownerOf (Fibre owner _) = Just owner
+        ownerOf _ = Nothing
     branchEquations (Fibre s xs) selected c = do
       sh <- maybe (refuse Representation "Missing family") Right (M.lookup s shapes)
       con <- case filter ((== c) . constructorSymbol) (variants sh) of
         [v] -> Right v
         _ -> refuse Representation "Missing family branch"
       -- Only replace symbolic references. Constants are never rewritten.
-      pure (concatMap orient (zip xs (endpoints selected con)))
+      let tagFact = [(Project selected tagField,Enumeration (tagType s) c)
+            | not (isRecord sh),sequenceElement sh == Nothing]
+      pure (tagFact ++ concatMap orient (zip xs (endpoints selected con)))
       where
         orient (Numeric "+" x (NumberLiteral a),Numeric "+" y (NumberLiteral b)) | a == b = orient (x,y)
         orient (NumberLiteral a,Numeric "+" y (NumberLiteral b)) | a >= b = orient (NumberLiteral (a-b),y)
@@ -833,8 +868,13 @@ functionWith inv finite helpers shapes signatures d = do
     branchEquations Natural selected c | c == builtin inv "suc" =
       Right [(Numeric "+" (Numeric "monus" selected (NumberLiteral 1)) (NumberLiteral 1),selected)]
     branchEquations (Named s) selected c | M.member s finite = Right [(selected,Enumeration s c)]
-    branchEquations (Named s) selected _ | Just sh <- M.lookup s shapes, Just _ <- sequenceElement sh =
-      Right $ case normalize (Project selected sequenceField) of
+    branchEquations (Named s) selected c | Just sh <- M.lookup s shapes, Just element <- sequenceElement sh =
+      Right $ case variants sh of
+       [nil,cons] | c == constructorSymbol nil -> [(selected,Construct s [(sequenceField,Sequence [])])]
+                 | c == constructorSymbol cons ->
+        [(selected,Construct s [(sequenceField,Sequence [SequenceHead element (Project selected sequenceField)
+          ,SequenceOp "tail" (Project selected sequenceField)])])]
+       _ -> case normalize (Project selected sequenceField) of
         Sequence [_,Project tailValue field] | field == sequenceField ->
           [(Construct s [(sequenceField,Project tailValue sequenceField)],tailValue)]
         _ -> []
@@ -938,14 +978,17 @@ functionWith inv finite helpers shapes signatures d = do
             mapM_ (\(expected,value) -> () <$ requireType equationsInScope (mapCarrier (instantiate args) expected) value) supplied
             eliminate (mapCarrier (instantiate args) out,Call callee args) rest
         _ -> refuse Syntax "Term requires a rule beyond algebraic construction and projection"
-    recover equations known (Fibre s xs,Fibre t ys) | s == t && length xs == length ys = foldM bind known (zip xs ys)
+    recover equations known (Fibre s xs,Fibre t ys) | s == t && length xs == length ys
+      ,Just sh <- M.lookup s shapes = foldM bind known (zip3 (indexTypes sh) xs ys)
       where
-        bind table (Input i,y) = case M.lookup i table of
+        bind table (domain,Input i,y) = case M.lookup i table of
           Nothing -> Right (M.insert i y table)
-          Just x | canonical x == canonical y -> Right table
+          Just x | canonical domain x == canonical domain y -> Right table
           _ -> refuse Semantics "Inconsistent omitted index"
         bind table _ = Right table
-        canonical = expand helpers . normalize . rewrite equations
+        canonical domain value = let expanded = expand helpers (normalize (rewrite equations value)) in case domain of
+          Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh -> normalize (Project expanded sequenceField)
+          _ -> normalize expanded
     recover _ known _ = Right known
     argument equationsInScope env typ a = do
       unless (get "tag" a == String "apply") (refuse Syntax "Constructor argument is not an application")

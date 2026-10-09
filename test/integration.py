@@ -18,6 +18,7 @@ from structured_indices import verify_structured_indices
 from callbacks import verify_callbacks
 from dependent_record_path import verify_dependent_record_path
 from natural_values import verify_natural_values
+from tagged_sums import verify_tagged_sums
 
 
 def check(condition, message):
@@ -296,6 +297,10 @@ models:
     natural_evidence = verify_natural_values(self_output)
     check(natural_evidence == {'operations': 8, 'comparisons': 344, 'invalidCasesRejected': 6},
           "finite-natural adapters lack complete arithmetic results and inconsistent-evidence refusals")
+    sum_evidence = verify_tagged_sums(self_output)
+    check(sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 18
+          and sum_evidence['repeatedConstructorSchemas'] > 0 and sum_evidence['completePayloadsAndEvidencePreserved'],
+          "tagged-sum adapters lack complete results, distinct equal-schema constructors or validity refusals")
     open_evidence = verify_open_parameters(self_output)
     check(open_evidence["comparisons"] >= 700 and open_evidence["invalidBindingsRejected"] == 5,
           "open algorithms lack parsed-target behavior and parameter checks")
