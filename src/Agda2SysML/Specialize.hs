@@ -25,10 +25,11 @@ import qualified Data.Text as T
 data LevelExpr = LevelExpr Integer (M.Map Int Integer) deriving (Eq,Ord,Show)
 data Type = Parameter Int | Open Int Integer | Named Text [Type] | Level LevelExpr
   | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] Integer | FamilyApplication Type [Type]
+  | FamilyExpression Type Int Type LevelExpr
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
 -- Runtime positions are absolute within a value telescope. Static arguments
 -- on proper projections are retained until those declarations are cloned.
-data IndexExpr = IndexInput Int | IndexCaptured Int | IndexConstructor Text [Type] [IndexExpr]
+data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexConstructor Text [Type] [IndexExpr]
   | IndexNatural Integer | IndexSuccessor IndexExpr
   | IndexProject Text [Type] IndexExpr | IndexCall Text [Type] [IndexExpr] deriving (Eq,Ord,Show)
 
@@ -40,22 +41,81 @@ mapIndices f (Named s xs) = Named s (map (mapIndices f) xs)
 mapIndices f (Runtime ty ix) = Runtime (mapIndices f ty) (f ix)
 mapIndices f (FamilyApplication ty xs) = FamilyApplication (mapIndices f ty) (map (mapIndices f) xs)
 mapIndices f (OpenFamily slot xs level) = OpenFamily slot (map (mapIndices f) xs) level
+mapIndices f (FamilyExpression domain slot body level) = FamilyExpression (mapIndices f domain) slot (mapIndices f body) level
 mapIndices _ ty = ty
 
-captureArguments :: [Type] -> ([Type],[(Type,IndexExpr)])
-captureArguments args = let (result,slots) = runState (traverse visit args) [] in (result,slots)
+-- Family lambda binders are distinct from runtime telescope positions. Their
+-- identities are local implementation details, normalized before caching.
+familyLocals :: Type -> S.Set Int
+familyLocals = free S.empty
   where
-    visit (Named symbol xs) = Named symbol <$> traverse visit xs
-    visit (FamilyApplication ty xs) = FamilyApplication <$> visit ty <*> traverse visit xs
-    visit (Runtime ty ix) = do
-      domain <- visit ty
-      if closed (Runtime domain ix) then pure (Runtime domain ix) else do
+    free bound (FamilyExpression domain slot body _) = free bound domain `S.union` free (S.insert slot bound) body
+    free bound (Named _ xs) = S.unions (map (free bound) xs)
+    free bound (FamilyApplication f xs) = S.unions (map (free bound) (f:xs))
+    free bound (OpenFamily _ xs _) = S.unions (map (free bound) xs)
+    free bound (Runtime domain index) = free bound domain `S.union` indices bound index
+    free _ _ = S.empty
+    indices bound (IndexLocal i) = if S.member i bound then S.empty else S.singleton i
+    indices bound (IndexConstructor _ ts xs) = S.unions (map (free bound) ts ++ map (indices bound) xs)
+    indices bound (IndexProject _ ts x) = S.unions (indices bound x:map (free bound) ts)
+    indices bound (IndexCall _ ts xs) = S.unions (map (free bound) ts ++ map (indices bound) xs)
+    indices bound (IndexSuccessor x) = indices bound x
+    indices _ _ = S.empty
+
+canonicalFamilies :: Type -> Type
+canonicalFamilies ty = go M.empty start ty
+  where
+    start = maybe 0 (+1) (S.lookupMax (familyLocals ty))
+    go names next (FamilyExpression domain slot body level) = FamilyExpression (go names next domain) next
+      (go (M.insert slot next names) (next+1) body) level
+    go names next (Named s xs) = Named s (map (go names next) xs)
+    go names next (FamilyApplication f xs) = FamilyApplication (go names next f) (map (go names next) xs)
+    go names next (OpenFamily i xs l) = OpenFamily i (map (go names next) xs) l
+    go names next (Runtime domain index) = Runtime (go names next domain) (ix names next index)
+    go _ _ t = t
+    ix names _ (IndexLocal i) = IndexLocal (M.findWithDefault i i names)
+    ix names next (IndexConstructor c ts xs) = IndexConstructor c (map (go names next) ts) (map (ix names next) xs)
+    ix names next (IndexProject f ts x) = IndexProject f (map (go names next) ts) (ix names next x)
+    ix names next (IndexCall f ts xs) = IndexCall f (map (go names next) ts) (map (ix names next) xs)
+    ix names next (IndexSuccessor x) = IndexSuccessor (ix names next x)
+    ix _ _ x = x
+
+applyTypeFamily :: Type -> [Type] -> Either Refusal Type
+applyTypeFamily (FamilyExpression domain slot body _) [Runtime actual value] | domain == actual =
+  Right (canonicalFamilies (mapIndices replace body))
+  where
+    replace (IndexLocal i) | i == slot = value
+    replace (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices replace) ts) (map replace xs)
+    replace (IndexProject f ts x) = IndexProject f (map (mapIndices replace) ts) (replace x)
+    replace (IndexCall f ts xs) = IndexCall f (map (mapIndices replace) ts) (map replace xs)
+    replace (IndexSuccessor x) = IndexSuccessor (replace x)
+    replace x = x
+applyTypeFamily FamilyExpression{} _ = refuse Semantics "Type-family lambda has incompatible index arguments"
+applyTypeFamily family xs = Right (FamilyApplication family xs)
+
+captureArguments :: [Type] -> ([Type],[(Type,IndexExpr)])
+captureArguments args = let (result,slots) = runState (traverse (visit S.empty . canonicalFamilies) args) [] in (result,slots)
+  where
+    visit locals (Named symbol xs) = Named symbol <$> traverse (visit locals) xs
+    visit locals (FamilyApplication ty xs) = FamilyApplication <$> visit locals ty <*> traverse (visit locals) xs
+    visit locals (FamilyExpression domain slot body level) = FamilyExpression <$> visit locals domain <*> pure slot
+      <*> visit (S.insert slot locals) body <*> pure level
+    visit locals (Runtime ty ix) = do
+      domain <- visit locals ty
+      let erase (IndexLocal slot) | S.member slot locals = IndexCaptured 0
+          erase (IndexConstructor c ts xs) = IndexConstructor c ts (map erase xs)
+          erase (IndexSuccessor x) = IndexSuccessor (erase x)
+          erase (IndexProject f ts x) = IndexProject f ts (erase x)
+          erase (IndexCall f ts xs) = IndexCall f ts (map erase xs)
+          erase x = x
+      if closed (Runtime domain (erase ix)) || not (S.null (familyLocals (Runtime domain ix)))
+        then pure (Runtime domain ix) else do
         slots <- gets id
         let value = (domain,ix)
             slot = length (takeWhile (/= value) slots)
         when (slot == length slots) (modify' (++ [value]))
         pure (Runtime domain (IndexCaptured slot))
-    visit ty = pure ty
+    visit _ ty = pure ty
 
 shiftIndices :: Int -> Type -> Type
 shiftIndices offset = mapIndices go
@@ -164,8 +224,10 @@ readLevelTerm inv env t = case string (get "tag" t) of
 readType :: Inventory -> [Maybe Type] -> Value -> Either Refusal Type
 readType inv env t = case string (get "tag" t) of
   "native-open-type" -> Open <$> number (get "slot" t) <*> natural (get "universe" t)
-  "native-open-family" -> OpenFamily <$> number (get "slot" t)
-    <*> traverse (readType inv env) (array (get "domains" t)) <*> natural (get "universe" t)
+  "native-open-family" -> do
+    domains <- traverse (readType inv env) (array (get "domains" t))
+    family <- OpenFamily <$> number (get "slot" t) <*> pure domains <*> natural (get "universe" t)
+    applyFamily family domains (array (get "eliminations" t))
   "level" -> Level <$> readLevelTerm inv env t
   "variable" -> do
     i <- number (get "index" t)
@@ -174,6 +236,7 @@ readType inv env t = case string (get "tag" t) of
     case value of
       FamilyParameter _ domains _ -> applyFamily value domains es
       OpenFamily _ domains _ -> applyFamily value domains es
+      FamilyExpression domain _ _ _ -> applyFamily value [domain] es
       _ -> foldM (projectIndex inv) value es
   "constructor" -> do
     let c = string (get "symbol" t)
@@ -190,17 +253,19 @@ readType inv env t = case string (get "tag" t) of
         es = array (get "eliminations" t)
     case M.lookup name (declarations inv) of
       Just d | get "kind" d == String "function" -> do
-        alias <- typeAlias inv d
-        case alias of
-          Just ty -> do
-            unless (null es) (refuse Representation "Closed type alias applied to arguments")
-            pure ty
-          Nothing -> readFunctionType d name es
+        declared <- field inv "type" d
+        if returnsUniverse declared then do
+          unless (get "abstract" d == Bool False && get "opaque" d == Bool False && terminationChecked inv d)
+            (refuse Semantics "Type alias is not transparently terminating")
+          case Reduction.reduceHead inv t of
+            Just (reduced,_) -> readType inv env reduced
+            Nothing -> refuse Representation "Type alias requires known checked arguments"
+        else readFunctionType d name es
       Just d | get "kind" d `elem` [String "record",String "datatype"] -> do
         (kinds,indices,_) <- familySignature inv d
         let count = length kinds
         unless (length es == count + length indices) (refuse Syntax "Family application arity mismatch")
-        args <- traverse (app >=> readType inv env) (take count es)
+        args <- readStaticArguments inv env kinds (take count es)
         domains <- traverse (substitute args) indices
         values <- sequence [app e >>= readIndex inv env domain | (e,domain) <- zip (drop count es) domains]
         pure (Named name (args ++ values))
@@ -212,15 +277,17 @@ readType inv env t = case string (get "tag" t) of
       | otherwise = do
           unless (length es == length domains) (refuse Representation "Type-family application must supply every index")
           args <- sequence [app e >>= readIndex inv env domain | (domain,e) <- zip domains es]
-          pure (FamilyApplication family args)
+          applyTypeFamily family args
     readFunctionType d name es = do
         projection <- field inv "projection" d
         if get "proper" projection /= Null then case es of
-          e:rest -> do
+          _ -> do
+            position <- subtract 1 <$> number (get "index" projection)
+            e <- at position es
+            let rest = drop (position+1) es
             receiver <- app e >>= readType inv env
             projected <- projectIndex inv receiver (object ["tag" .= ("project" :: Text),"symbol" .= name])
             foldM (projectIndex inv) projected rest
-          _ -> refuse Syntax "Missing index projection receiver"
         else do
           sig <- signature inv d
           let count = parameters sig
@@ -231,6 +298,30 @@ readType inv env t = case string (get "tag" t) of
           out <- substitute args (output sig)
           values <- sequence [app e >>= readIndex inv env domain | (e,domain) <- zip (drop count es) domains]
           pure (Runtime out (IndexCall name args [i | Runtime _ i <- values]))
+
+returnsUniverse :: Value -> Bool
+returnsUniverse ty | get "tag" (get "term" ty) == String "pi" = returnsUniverse (get "body" (get "codomain" (get "term" ty)))
+                   | otherwise = isUniverse ty
+
+readStaticArguments :: Inventory -> [Maybe Type] -> [ParameterKind] -> [Value] -> Either Refusal [Type]
+readStaticArguments inv env kinds elims = foldM step [] (zip kinds elims)
+  where
+    step prior (FamilyKind domains level,e) = do
+      term <- app e
+      inputs <- traverse (substitute prior) domains
+      expectedLevel <- substituteLevel prior level
+      value <- if get "tag" term == String "lambda" then case inputs of
+        [domain] -> do
+          let abstraction = get "abstraction" term
+              locals = S.unions [familyLocals t | Just t <- env]
+              slot = maybe 0 (+1) (S.lookupMax locals)
+              context = if get "binds" abstraction == Bool True then Just (Runtime domain (IndexLocal slot)):env else env
+          body <- readType inv context (get "body" abstraction)
+          pure (FamilyExpression domain slot body expectedLevel)
+        _ -> refuse Representation "Type-family lambda requires one first-order domain"
+        else readType inv env term
+      pure (prior ++ [value])
+    step prior (_,e) = (prior ++) . (:[]) <$> (app e >>= readType inv env)
 
 -- Only checked, transparent, terminating, nullary type definitions reduce here.
 -- The original declaration remains in the inventory and obligation report.
@@ -400,7 +491,12 @@ substitute args (Parameter i) = at i args
 substitute _ t@Open{} = Right t
 substitute args (FamilyParameter i _ _) = at i args
 substitute args (OpenFamily i domains level) = OpenFamily i <$> traverse (substitute args) domains <*> pure level
-substitute args (FamilyApplication family indices) = FamilyApplication <$> substitute args family <*> traverse (substitute args) indices
+substitute args (FamilyApplication family indices) = do
+  actual <- substitute args family
+  values <- traverse (substitute args) indices
+  applyTypeFamily actual values
+substitute args (FamilyExpression domain slot body level) = FamilyExpression <$> substitute args domain <*> pure slot
+  <*> substitute args body <*> substituteLevel args level
 substitute args (Named s ts) = Named s <$> traverse (substitute args) ts
 substitute args (Level l) = Level <$> substituteLevel args l
 substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
@@ -416,9 +512,19 @@ closed Open{} = True
 closed FamilyParameter{} = False
 closed (OpenFamily _ domains _) = all closed domains
 closed (FamilyApplication family indices) = closed family && all closed indices
+closed (FamilyExpression domain slot body level) = closed domain && closed (Level level)
+  && closed (mapIndices erase body)
+  where
+    erase (IndexLocal i) | i == slot = IndexCaptured 0
+    erase (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices erase) ts) (map erase xs)
+    erase (IndexProject f ts x) = IndexProject f (map (mapIndices erase) ts) (erase x)
+    erase (IndexCall f ts xs) = IndexCall f (map (mapIndices erase) ts) (map erase xs)
+    erase (IndexSuccessor x) = IndexSuccessor (erase x)
+    erase x = x
 closed (Runtime ty index) = closed ty && go index
   where
     go IndexCaptured{} = True
+    go IndexLocal{} = False
     go IndexInput{} = False
     go (IndexConstructor _ args xs) = all closed args && all go xs
     go (IndexProject _ ts receiver) = all closed ts && go receiver
@@ -471,6 +577,7 @@ familySignature inv d = do
 universeOf :: Inventory -> Type -> Either Refusal Integer
 universeOf _ (Open _ level) = Right level
 universeOf _ (FamilyApplication (OpenFamily _ _ level) _) = Right level
+universeOf inv (FamilyExpression _ _ body _) = universeOf inv body
 universeOf inv (Named s args) = do
   d <- maybe (refuse Syntax "Unknown concrete type universe") Right (M.lookup s (declarations inv))
   (kinds,indices,l) <- familySignature inv d
@@ -492,6 +599,13 @@ validateArguments inv kinds args = do
       expectedLevel <- substituteLevel args level >>= levelNumber
       unless (actualDomains == expectedDomains && actualLevel == expectedLevel)
         (refuse Semantics "Type-family argument has incompatible index domains or universe")
+    (FamilyKind domains level,FamilyExpression domain _ body actualLevel) -> do
+      expectedDomains <- traverse (substitute args) domains
+      expectedLevel <- substituteLevel args level >>= levelNumber
+      actual <- universeOf inv body
+      declared <- levelNumber actualLevel
+      unless (expectedDomains == [domain] && expectedLevel == actual && declared == actual)
+        (refuse Semantics "Type-family lambda has incompatible domain or universe")
     _ -> refuse Semantics "Static level/type argument kind mismatch"
 
 -- Solve only a uniquely determined level. Non-injective maxima remain
@@ -529,11 +643,16 @@ typeValue (Open i level) = object ["openParameter" .= i,"universe" .= level]
 typeValue (FamilyParameter i domains level) = object ["familyParameter" .= i,"domains" .= map typeValue domains,"level" .= typeValue (Level level)]
 typeValue t@(OpenFamily i domains level) = object ["openFamily" .= i,"domains" .= map typeValue domains,"universe" .= level,"familySymbol" .= typeKey t]
 typeValue (FamilyApplication family indices) = object ["family" .= typeValue family,"indices" .= map typeValue indices]
+typeValue family@FamilyExpression{} = case canonicalFamilies family of
+  FamilyExpression domain slot body level -> object ["familyExpression" .= object
+    ["domain" .= typeValue domain,"slot" .= slot,"body" .= typeValue body,"level" .= typeValue (Level level)]]
+  _ -> Null
 typeValue (Runtime ty index) = object ["runtimeType" .= typeValue ty,"index" .= indexValue index]
 typeValue (Named s ts) = object ["symbol" .= s,"arguments" .= map typeValue ts]
 indexValue :: IndexExpr -> Value
 indexValue (IndexInput i) = object ["input" .= i]
 indexValue (IndexCaptured i) = object ["capture" .= i]
+indexValue (IndexLocal i) = object ["familyInput" .= i]
 indexValue (IndexNatural n) = object ["natural" .= n]
 indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
 indexValue (IndexConstructor c args values) = object (["constructor" .= c,"arguments" .= map typeValue args]
@@ -555,6 +674,7 @@ typeKey (FamilyParameter i _ _) = "unresolved-family-" <> T.pack (show i)
 typeKey (OpenFamily i domains level) = "$native-type-family:" <> T.pack (show i) <> ":"
   <> digest (BL.toStrict (encode (map typeValue domains,level)))
 typeKey (FamilyApplication family _) = typeKey family
+typeKey family@FamilyExpression{} = "$native-family-expression:" <> digest (BL.toStrict (encode (typeValue family)))
 
 -- Parameters remain distinct even when two native classifiers have equal
 -- extents. These slots are local to a calculation/container, not global types.
@@ -587,6 +707,7 @@ typeTerm depth ty@(FamilyApplication _ args) = object ["tag" .= ("definition" ::
 typeTerm _ ty = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty,"eliminations" .= ([] :: [Value])]
 indexTerm :: Int -> IndexExpr -> Value
 indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
+indexTerm _ (IndexLocal _) = object ["tag" .= ("unbound-family-input" :: Text)]
 indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .= (depth-i-1),"eliminations" .= ([] :: [Value])]
 indexTerm _ (IndexNatural n) = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= n]]
 indexTerm depth (IndexSuccessor i) = object ["tag" .= ("native-index-successor" :: Text),"predecessor" .= indexTerm depth i]
@@ -740,6 +861,7 @@ showType _ (Level (LevelExpr n xs)) = if M.null xs then "level " <> T.pack (show
 showType inv (Runtime _ index) = showIndex index
   where
     showIndex (IndexCaptured i) = "captured index " <> T.pack (show i)
+    showIndex (IndexLocal i) = "family input " <> T.pack (show i)
     showIndex (IndexInput i) = "input" <> T.pack (show i)
     showIndex (IndexNatural n) = T.pack (show n)
     showIndex (IndexSuccessor i) = "suc(" <> showIndex i <> ")"
@@ -752,6 +874,7 @@ showType _ (Open i _) = "type parameter " <> T.pack (show i)
 showType _ (FamilyParameter i _ _) = "family parameter " <> T.pack (show i)
 showType _ (OpenFamily i _ _) = "type family " <> T.pack (show i)
 showType inv (FamilyApplication family args) = showType inv family <> suffix inv args
+showType inv (FamilyExpression domain _ body _) = "family (" <> showType inv domain <> " → " <> showType inv body <> ")"
 showType inv (Named s args) = display inv s <> suffix inv args
 display :: Inventory -> Text -> Text
 display inv s = maybe s (string . get "displayName") (M.lookup s (declarations inv))
@@ -793,6 +916,17 @@ ensureType inv stack (FamilyApplication family args) = do
   forM_ args $ \arg -> case arg of
     Runtime domain index -> ensureType inv stack domain >> ensureIndex inv index
     _ -> abort Representation "Type-family index is not a checked value"
+ensureType inv stack (FamilyExpression domain _ body _) = do
+  ensureType inv stack domain
+  ensureBindings body
+  where
+    ensureBindings t@Open{} = ensureType inv stack t
+    ensureBindings t@OpenFamily{} = ensureType inv stack t
+    ensureBindings (Named _ xs) = mapM_ ensureBindings xs
+    ensureBindings (FamilyApplication f xs) = mapM_ ensureBindings (f:xs)
+    ensureBindings (FamilyExpression d _ b _) = ensureBindings d >> ensureBindings b
+    ensureBindings (Runtime t _) = ensureBindings t
+    ensureBindings _ = pure ()
 ensureType inv stack family@(OpenFamily slot domains level) = do
   let key = typeKey family
   when (M.member key (declarations inv)) (abort Syntax "Native family identity collides with a source declaration")
@@ -851,8 +985,10 @@ ensureType inv stack ty@(Named s allArgs) = do
     original <- definition inv s
     unless (inductiveChecked inv original) (abort Semantics "Recursive carrier lacks safe inductive positivity evidence")
   unless exists $ do
-    when (any (\key -> key == s || (s <> "@") `T.isPrefixOf` key) stack) (abort Semantics ("Recursive carrier family: " <> s))
     d <- definition inv s
+    when (length stack >= 128) (abort Representation "Carrier specialization depth exhausted")
+    when (any (\key -> key == s || (s <> "@") `T.isPrefixOf` key) stack
+      && not (nonRecursiveTemplate inv s)) (abort Semantics ("Recursive carrier family: " <> s))
     unless (get "kind" d `elem` [String "record",String "datatype"]) (abort Representation "Type argument is not a checked algebraic carrier")
     sourceParameters <- liftEither (field inv "parameters" d >>= number)
     (kinds,indices,_) <- liftEither (familySignature inv d)
@@ -864,10 +1000,13 @@ ensureType inv stack ty@(Named s allArgs) = do
     cs <- if get "kind" d == String "record" then (:[]) . string <$> liftEither (field inv "constructor" d)
       else map string . array <$> liftEither (field inv "constructors" d)
     fields <- map string . array <$> liftEither (field inv "fields" d)
+    let captureFields = [typeKey ty <> ".capture" <> T.pack (show i) | i <- [0..prefix-1]]
+        nativeFields = captureFields ++ map (`instanceKey` args) fields
     -- A header permits only the same static instance to recur. Every payload
     -- is still checked before this provisional declaration becomes usable.
     let header = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
-          $ set "parameters" (Number 0) $ set "fields" (toJSON (map (`instanceKey` args) fields))
+          $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
+          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
           $ (case (get "kind" d,cs) of
               (String "record",[c]) -> set "constructor" (String (instanceKey c args))
               _ -> set "constructors" (toJSON (map (`instanceKey` args) cs))) $ clone inv s args d
@@ -886,31 +1025,65 @@ ensureType inv stack ty@(Named s allArgs) = do
         Named _ xs -> mapM_ (\x -> case x of Runtime _ i -> ensureIndex inv i; _ -> pure ()) xs
         _ -> pure ()
       let cd' = set "type" (arrow ins out) $ set "parameters" (Number 0)
-            $ set "runtimeParameters" (toJSON (prefix+sourceParameters-n))
+            $ set "runtimeParameters" (toJSON (sourceParameters-n + if get "kind" d == String "record" then 0 else prefix))
+            $ set "patternCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
             $ set "family" (String (typeKey ty)) $ clone inv c args cd
       save c args cd'
       pure (ins,cd')
     when (get "kind" d == String "record") $ case cdefs of
       [(ins,_)] -> do
-        unless (length fields == length ins) (abort Syntax "Record constructor/field arity mismatch")
+        unless (length nativeFields == length ins) (abort Syntax "Record constructor/field arity mismatch")
+        let receiver = Named (typeKey ty) []
+            rebaseIndex (IndexInput i) | i < prefix = IndexProject (captureFields !! i) [] (IndexInput 0)
+                                      | i == prefix = IndexInput 0
+            rebaseIndex (IndexProject f ts x) = IndexProject f (map (mapIndices rebaseIndex) ts) (rebaseIndex x)
+            rebaseIndex (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
+            rebaseIndex (IndexCall f ts xs) = IndexCall f (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
+            rebaseIndex (IndexSuccessor x) = IndexSuccessor (rebaseIndex x)
+            rebaseIndex x = x
+        forM_ (zip captureFields captureTypes) $ \(f,domain) ->
+          save f [] (object ["name" .= f,"displayName" .= f,"kind" .= ("function" :: Text)
+            ,"abstract" .= False,"parameters" .= (0 :: Int),"type" .= arrow [receiver] domain
+            ,"projection" .= object ["proper" .= typeKey ty,"index" .= (1 :: Int)]])
         forM_ fields $ \f -> do
           fd <- definition inv f
           sig <- liftEither (signature inv fd)
           p <- liftEither (field inv "projection" fd)
           actualIns <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
           actualOut <- liftEither (instantiate (output sig))
-          unless (parameters sig == n && actualIns == [Named s args]
+          unless (parameters sig == n && take prefix actualIns == captureTypes && length actualIns == prefix+1
+            && typeKey (last actualIns) == typeKey ty
             && get "proper" p == String s && get "index" p == toJSON (n+1)) (abort Syntax "Dependent or malformed proper record projection")
-          let fd' = set "type" (arrow [Named s args] actualOut) $ set "projection"
+          let nativeOut = if prefix == 0 then actualOut else mapIndices rebaseIndex actualOut
+              fd' = set "type" (arrow [if prefix == 0 then Named s args else receiver] nativeOut) $ set "projection"
                 (set "proper" (String (typeKey ty)) (set "index" (Number 1) p)) $ clone inv f args fd
           save f args fd'
       _ -> abort Representation "Record requires exactly one constructor"
     let d' = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
-          $ set "parameters" (Number 0) $ set "fields" (toJSON (map (`instanceKey` args) fields))
+          $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
+          $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then prefix else 0))
           $ (case (get "kind" d,cs) of
               (String "record",[c]) -> set "constructor" (String (instanceKey c args))
               _ -> set "constructors" (toJSON (map (`instanceKey` args) cs))) $ clone inv s args d
     save s args d'
+
+-- Finite nesting of a nonrecursive generic record is not polymorphic
+-- recursion. Follow original payload carrier references, never instance names.
+nonRecursiveTemplate :: Inventory -> Text -> Bool
+nonRecursiveTemplate inv root = inspect (S.singleton root) root
+  where
+    inspect seen symbol = case M.lookup symbol (declarations inv) of
+      Just d | get "kind" d `elem` [String "record",String "datatype"] ->
+        let cs = if get "kind" d == String "record" then either (const []) ((:[]) . string) (field inv "constructor" d)
+              else either (const []) (map string . array) (field inv "constructors" d)
+        in all (\c -> case M.lookup c (declarations inv) >>= either (const Nothing) Just . signature inv of
+          Just sig -> all (walk seen) (inputs sig)
+          Nothing -> False) cs
+      _ -> True
+    walk seen (Named s xs) = all (walk seen) xs && s /= root && (S.member s seen || inspect (S.insert s seen) s)
+    walk seen (FamilyApplication f xs) = all (walk seen) (f:xs)
+    walk seen (Runtime domain _) = walk seen domain
+    walk _ _ = True
 -- Signatures can be the only use of an index calculation. Clone its checked
 -- body as well, preserving the call dependency for the native admission pass.
 ensureIndex :: Inventory -> IndexExpr -> Build ()
@@ -1073,13 +1246,29 @@ unify known (Parameter i) actual = case M.lookup i known of
   _ -> refuse Semantics ("Inconsistent concrete type arguments: " <> T.pack (show (M.lookup i known,actual)))
 unify known (Open i l) (Open j m) | i == j && l == m = Right known
 unify known (FamilyParameter i _ _) actual@OpenFamily{} = unify known (Parameter i) actual
+unify known (FamilyParameter i _ _) actual@FamilyExpression{} = unify known (Parameter i) actual
+unify known a@(FamilyExpression domainA _ bodyA levelA) b@(FamilyExpression domainB _ bodyB levelB) = do
+  domains <- unify known domainA domainB
+  levels <- unify domains (Level levelA) (Level levelB)
+  inferred <- unify levels bodyA bodyB
+  let args = [M.findWithDefault (Parameter i) i inferred | i <- [0..maximum (0:M.keys inferred)]]
+  resolved <- substitute args a
+  unless (fst (captureArguments [resolved]) == fst (captureArguments [b]))
+    (refuse Semantics "Type-family lambda bodies have different bound indices or carriers")
+  pure inferred
 unify known a@OpenFamily{} b@OpenFamily{} | a == b = Right known
+unify known (FamilyApplication (FamilyParameter i _ _) indices) actual
+  | Just expression@FamilyExpression{} <- M.lookup i known = do
+      let args = [M.findWithDefault (Parameter slot) slot known | slot <- [0..maximum (i:M.keys known)]]
+      values <- traverse (substitute args) indices
+      applied <- applyTypeFamily expression values
+      unify known applied actual
 unify known (FamilyApplication f xs) (FamilyApplication g ys) | length xs == length ys = do
   first <- unify known f g
   foldM (\m (a,b) -> unify m a b) first (zip xs ys)
 unify known (Named s xs) (Named t ys) | s == t && length xs == length ys =
   foldM (\m (a,b) -> unify m a b) known (zip xs ys)
-unify _ _ _ = refuse Semantics "Concrete carrier mismatch"
+unify _ expected actual = refuse Semantics ("Concrete carrier mismatch: expected " <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
 
 expression :: Inventory -> [Text] -> [Binding] -> Maybe Type -> Value -> Build (Type,Value)
 expression inv stack env expected term = do
@@ -1089,7 +1278,7 @@ expression inv stack env expected term = do
       Just (reduced,premises) -> do
         (ty,value) <- expression inv stack env expected reduced
         pure (ty,set "reductionEvidence" (object ["before" .= term,"after" .= reduced,"declarations" .= premises]) value)
-  unless (maybe True (\ty -> either (const False) (const True) (unify M.empty ty (fst result))) expected) (abort Semantics "Specialized expression carrier mismatch")
+  forM_ expected $ \ty -> liftEither (either (Left . context "Specialized expression carrier mismatch: ") Right (unify M.empty ty (fst result)))
   pure result
   where
     es = array (get "eliminations" term)
@@ -1134,7 +1323,10 @@ expression inv stack env expected term = do
           Just actual | typeKey actual == typeKey schemaOut -> pure actual
           _ -> abort Representation "Value-parameter constructor needs its contextual family type"
         ensureType inv [] out
-        let resultTerm = set "symbol" (String (instanceKey s tyArgs)) $ set "eliminations" (toJSON (map application values)) term
+        let recordConstructor = maybe False ((== String "record") . get "kind")
+              (M.lookup (string (get "family" d)) (declarations inv))
+            captureValues = [indexTerm (length (filter isDynamic env)) ix | recordConstructor,(_,ix) <- snd (captureArguments tyArgs)]
+            resultTerm = set "symbol" (String (instanceKey s tyArgs)) $ set "eliminations" (toJSON (map application (captureValues ++ values))) term
         eliminate out resultTerm rest
       "definition" -> do
         let s = string (get "symbol" term)
@@ -1169,16 +1361,22 @@ expression inv stack env expected term = do
       where
         step (known,values,actuals) (patternType,e) = do
           value <- liftEither (app e)
-          let fill (Parameter i) = M.lookup i known
-              fill t@Open{} = Just t
-              fill (FamilyParameter i _ _) = M.lookup i known
-              fill t@OpenFamily{} = Just t
-              fill (FamilyApplication family indices) = FamilyApplication <$> fill family <*> traverse fill indices
-              fill (Named s ts) = Named s <$> traverse fill ts
-              fill (Runtime ty index) = (\t -> Runtime t index) <$> fill ty
-              fill (Level l) = case substituteLevel [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] l of
-                Right concrete | closed (Level concrete) -> Just (Level concrete)
+          let fill t = case substitute [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] t of
+                Right actual | resolved actual -> Just actual
                 _ -> Nothing
+              resolved Parameter{} = False
+              resolved FamilyParameter{} = False
+              resolved (Named _ ts) = all resolved ts
+              resolved (FamilyApplication f xs) = all resolved (f:xs)
+              resolved (FamilyExpression domain _ body level) = resolved domain && resolved body && closed (Level level)
+              resolved (OpenFamily _ xs _) = all resolved xs
+              resolved (Runtime domain index) = resolved domain && resolvedIndex index
+              resolved t = closed t
+              resolvedIndex (IndexConstructor _ ts xs) = all resolved ts && all resolvedIndex xs
+              resolvedIndex (IndexProject _ ts x) = all resolved ts && resolvedIndex x
+              resolvedIndex (IndexCall _ ts xs) = all resolved ts && all resolvedIndex xs
+              resolvedIndex (IndexSuccessor x) = resolvedIndex x
+              resolvedIndex _ = True
           (actual,v) <- expression inv stack env (fill patternType) value
           known' <- liftEither (unify known patternType actual)
           completed <- liftEither (completeKnown inv sig known')
@@ -1299,6 +1497,14 @@ higherOrder inv stack env term = do
       ,"slot" .= slot,"universe" .= level]]
     sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
       ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= level]]
+    sourceTypeAt depth (FamilyApplication family values) = let t = get "term" (sourceTypeAt depth family) in
+      object ["term" .= set "eliminations" (toJSON (array (get "eliminations" t)
+        ++ map (application . get "term" . sourceTypeAt depth) values)) t]
+    sourceTypeAt depth (FamilyExpression domain slot body _) = case applyTypeFamily
+        (FamilyExpression domain slot body (levelConstant 0)) [Runtime domain (IndexInput depth)] of
+      Right result -> object ["term" .= object ["tag" .= ("lambda" :: Text)
+        ,"abstraction" .= object ["binds" .= True,"body" .= get "term" (sourceTypeAt (depth+1) result)]]]
+      Left _ -> object ["term" .= Null]
     sourceTypeAt depth (Runtime _ index) = object ["term" .= sourceIndex depth index]
     sourceTypeAt _ (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
       ,"level" .= object ["constant" .= n,"maximum" .=
@@ -1320,19 +1526,24 @@ higherOrder inv stack env term = do
         go depth (t:ts) out = object ["term" .= object ["tag" .= ("pi" :: Text)
           ,"domain" .= object ["type" .= sourceTypeAt depth t,"info" .= info]
           ,"codomain" .= object ["binds" .= True,"body" .= go (depth+1) ts out]]]
-    independentAt bound (Named _ xs) = all (independentAt bound) xs
-    independentAt _ Open{} = True
-    independentAt _ family@OpenFamily{} = closed family
-    independentAt bound (Runtime domain index) = independentAt bound domain && supportedIndex bound index
-    independentAt _ levelType@Level{} = closed levelType
-    independentAt _ _ = False
-    supportedIndex bound (IndexInput i) = i >= 0 && i < bound
-    supportedIndex _ IndexCaptured{} = False
-    supportedIndex bound (IndexConstructor _ types values) = all (independentAt bound) types && all (supportedIndex bound) values
-    supportedIndex bound (IndexSuccessor value) = supportedIndex bound value
-    supportedIndex bound (IndexCall _ types values) = all (independentAt bound) types && all (supportedIndex bound) values
-    supportedIndex bound (IndexProject _ types receiver) = all (independentAt bound) types && supportedIndex bound receiver
-    supportedIndex _ IndexNatural{} = True
+    independentAt bound = go S.empty
+      where
+        go locals (Named _ xs) = all (go locals) xs
+        go _ Open{} = True
+        go _ family@OpenFamily{} = closed family
+        go locals (FamilyExpression domain slot body level) = go locals domain && go (S.insert slot locals) body && closed (Level level)
+        go locals (FamilyApplication f xs) = all (go locals) (f:xs)
+        go locals (Runtime domain index) = go locals domain && check locals index
+        go _ levelType@Level{} = closed levelType
+        go _ _ = False
+        check locals (IndexLocal slot) = S.member slot locals
+        check _ (IndexInput i) = i >= 0 && i < bound
+        check _ IndexCaptured{} = False
+        check locals (IndexConstructor _ types values) = all (go locals) types && all (check locals) values
+        check locals (IndexSuccessor value) = check locals value
+        check locals (IndexCall _ types values) = all (go locals) types && all (check locals) values
+        check locals (IndexProject _ types receiver) = all (go locals) types && check locals receiver
+        check _ IndexNatural{} = True
     telescopeSlots ty [] = do
       out <- liftEither (readType inv (runtimeBindings env) (get "term" ty))
       pure ([],out)

@@ -207,6 +207,34 @@ unsupported definitions in `AlgebraicValues` remain explicit refusals.
 
 ## First-order helper calls
 
+### Dependent pairs and projected record adapters
+
+Checked, transparent type aliases returning a universe may reduce at known
+arguments. One-domain first-order type-family lambdas retain their bound index
+separately from runtime telescope positions. Specialization applies those
+families to actual preceding fields, retains their complete members and checks
+their declared domains and universes. Lambda binder renaming does not change
+the native instance identity.
+
+Finite nesting of a nonrecursive generic record, including Agda's dependent
+pair type, is admitted independently of polymorphic recursion. A record whose
+type captures an earlier runtime index stores that capture explicitly. Its
+constructor, projections and validity constraints retain the relationship
+between the stored capture, dependent fields and family indices. Construction
+does not discard equality evidence.
+
+`DependentRecords.KnownProjection` binds the existing general record adapter
+to a checked prefix projection at universe level zero. Its `encode`, `decode`,
+`forgetInput` and `admitInput` operations translate to native calculations.
+The general round-trip and mismatch-refusal laws remain Agda proofs; parsed
+SysML checks compare complete prefixes, members and equality evidence and
+reject wrong indices, captures and admission proofs.
+
+Open universe levels, unknown runtime index functions and unsupported family
+lambda domains remain explicit refusal boundaries. Alias reduction uses the
+existing checked reduction budget; carrier specialization is bounded to 128
+active frames. No exhausted budget establishes semantic equivalence.
+
 `native.first-order-calls` admits functions over the existing Boolean,
 finite-enumeration, record, and payload carriers. Every input and result has a
 concrete admitted carrier. Relevant implicit arguments retain their checked

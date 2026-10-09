@@ -160,8 +160,12 @@ carrierIn inv finite helpers shapes env ty = do
   args <- traverse applicationValue (array (get "eliminations" t))
   case M.lookup s shapes of
     Just sh | not (null (indexTypes sh)) -> do
-      unless (length args == length (indexTypes sh)) (refuse Syntax "Family index arity mismatch")
-      Fibre s <$> zipWithM (indexExpression inv finite helpers shapes env) (indexTypes sh) args
+      if null args && isRecord sh && maybe False
+        (\d -> get "nativeRecordCaptures" d == toJSON (length (indexTypes sh))) (M.lookup s (declarations inv))
+        then Right (Named s)
+        else do
+          unless (length args == length (indexTypes sh)) (refuse Syntax "Family index arity mismatch")
+          Fibre s <$> zipWithM (indexExpression inv finite helpers shapes env) (indexTypes sh) args
     _ | not (null args) -> refuse Representation "Unadmitted indexed or parameterized carrier"
       | Just d <- M.lookup s (declarations inv),get "kind" d == String "native-type-parameter" ->
           TypeParameter <$> integer (get "nativeParameter" d)
@@ -246,12 +250,12 @@ indexExpression inv finite helpers shapes env expected t = do
       eliminate projected es
     project (actual,value) f = do
       (owner,typ) <- maybe (refuse Representation "Index function is not an admitted proper projection") Right (M.lookup f projections)
-      unless (actual == Named owner) (refuse Semantics "Index projection belongs to another record")
+      unless (recordOwner actual owner) (refuse Semantics "Index projection belongs to another record")
       d <- maybe (refuse Syntax "Missing index projection declaration") Right (M.lookup f (declarations inv))
       p <- field inv "projection" d
       unless (get "proper" p == String owner && get "index" p == Number 1)
         (refuse Syntax "Index expression uses invalid projection metadata")
-      pure (mapCarrier (instantiate [value]) typ,Project value f)
+      pure (projectedCarrier shapes actual value typ,Project value f)
 
 finiteIndex :: M.Map Text F.Domain -> Carrier -> Bool
 finiteIndex _ Boolean = True
@@ -443,7 +447,8 @@ shape inv finite helpers shapes d = do
   unless (pars == 0 && get "tag" (get "term" familyResult) == String "sort")
     (refuse Representation "Family requires admitted indices and no unresolved parameters")
   let s = string (get "name" d); record = get "kind" d == String "record"
-  unless (not record || null familyArgs) (refuse Representation "Indexed record parameters require specialization")
+  unless (not record || null familyArgs || get "nativeRecordCaptures" d == toJSON (length familyArgs))
+    (refuse Representation "Indexed record parameters require specialization")
   cs <- if record then do
     induction <- field inv "induction" d
     unless (induction `elem` [String "Nothing",String "Just Inductive"]) $
@@ -501,6 +506,21 @@ constructorTable shapes = M.fromList [(constructorSymbol c,(s,c)) | s <- M.elems
 projectionTable :: Shapes -> M.Map Text (Text,Carrier)
 projectionTable shapes = M.fromList [(f,(shapeSymbol s,recordFieldType s (Input 0) t))
   | s <- M.elems shapes,isRecord s,c <- variants s,(f,t) <- payload c]
+
+projectedCarrier :: Shapes -> Carrier -> Expression -> Carrier -> Carrier
+projectedCarrier shapes receiver value fieldType = refine (mapCarrier (instantiate [value]) fieldType)
+  where
+    refine = case receiver of
+      Fibre owner indices | Just sh <- M.lookup owner shapes,isRecord sh,[con] <- variants sh
+        ,resultIndices con == map Input [0..length indices-1] ->
+          let replacements = zip [Project value f | (f,_) <- take (length indices) (payload con)] indices
+          in mapCarrier (foldl (\replace (left,right) -> mapExpression (\e -> if e == left then Just right else Nothing) . replace) id replacements)
+      _ -> id
+
+recordOwner :: Carrier -> Text -> Bool
+recordOwner (Named actual) expected = actual == expected
+recordOwner (Fibre actual _) expected = actual == expected
+recordOwner _ _ = False
 
 function :: Inventory -> M.Map Text F.Domain -> Shapes -> Value -> Either Refusal Calculation
 function inv finite shapes = functionWith inv finite (indexHelpers inv finite shapes (finiteHelpers inv finite)) shapes M.empty
@@ -699,7 +719,10 @@ functionWith inv finite helpers shapes signatures d = do
             ordinary = array (get "constructors" tree)
             available = if eta == Null then ordinary else
               [object ["symbol" .= get "constructor" eta,"branch" .= get "branch" eta]]
-            recordShape = case typ of Named owner -> maybe False isRecord (M.lookup owner shapes); _ -> False
+            recordShape = case typ of
+              Named owner -> maybe False isRecord (M.lookup owner shapes)
+              Fibre owner _ -> maybe False isRecord (M.lookup owner shapes)
+              _ -> False
         unless (get "lazy" tree == Bool False || recordShape || length options <= 1)
           (refuse Semantics "Lazy matching requires a uniquely determined constructor")
         unless (eta == Null || (recordShape && null ordinary)) (refuse Semantics "Eta branch is not a unique record split")
@@ -714,7 +737,8 @@ functionWith inv finite helpers shapes signatures d = do
          [] | Just fallbackBody <- fallback -> (c,) <$> fallbackBody
          [branch] -> do
           parameterCount <- runtimeParameters c
-          let fields = drop parameterCount allFields
+          let captureCount = maybe 0 (\d -> case get "patternCaptures" d of Number n -> round n; _ -> 0) (M.lookup c (declarations inv))
+              fields = drop (parameterCount+captureCount) allFields
           let b = get "branch" branch
           arity <- integer (get "arity" b)
           unless (arity == length fields) (refuse Syntax "Case branch arity does not preserve every constructor payload")
@@ -922,8 +946,8 @@ functionWith inv finite helpers shapes signatures d = do
       unless (get "tag" e == String "project") (refuse Syntax "Unsupported value elimination")
       let f = string (get "symbol" e)
       (owner,ft) <- maybe (refuse Representation "Projection has no admitted record") Right (M.lookup f projections)
-      unless (typ == Named owner) (refuse Semantics "Projection is applied to the wrong record")
-      eliminate (mapCarrier (instantiate [expr]) ft,located "native.projection-elimination" e Null (Project expr f)) es
+      unless (recordOwner typ owner) (refuse Semantics "Projection is applied to the wrong record")
+      eliminate (projectedCarrier shapes typ expr ft,located "native.projection-elimination" e Null (Project expr f)) es
 
 construction :: Maybe Value -> Shape -> Constructor -> [Expression] -> [(Text,Expression)]
 construction _ sh _ values | Just _ <- sequenceElement sh = [(sequenceField,case values of
@@ -948,7 +972,7 @@ construction callSite sh con values =
       measure = [(countField (shapeSymbol sh),foldl (Numeric "+") (NumberLiteral 1)
         [Project value (countField owner) | ((_,typ),value) <- zip (payload con) values
         ,owner <- recursiveOwner sh typ]) | not (null (recursivePeers sh))]
-  in if isRecord sh then supplied else
+  in if isRecord sh then indices ++ supplied else
     (tagField,tag) : indices ++ measure ++ [(f,maybe (missing v i f) id (lookup f supplied))
       | v <- variants sh,(i,(f,_)) <- zip [0 :: Int ..] (payload v)]
 
