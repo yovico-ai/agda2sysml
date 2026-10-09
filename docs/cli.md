@@ -18,6 +18,10 @@ their actual checked references. Names do not decide whether a function is a
 proof: a signature ending in Agda's registered equality type can be retained
 as an equality contract; other functions keep computational requirements.
 Proof-source retention does not erase an additional computational use.
+Supported equality statements also receive native constraint definitions.
+`correspondence.json.nativeStatements` distinguishes translated statements from
+textual fallbacks and gives each fallback's reason. These counts are separate
+from native calculation coverage; proof bodies remain source contracts.
 Postulates retain their statement and assumption provenance, while still
 requiring structural evidence for a postulated type or behavioral evidence for
 a postulated operation. Assumption retention cannot claim executable support.

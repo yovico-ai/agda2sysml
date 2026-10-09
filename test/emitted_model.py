@@ -234,6 +234,7 @@ class Model:
         self.carriers = {}
         self.results = {}
         self.constraints = set()
+        self.field_modes = {}
         for kind, symbol, body in definition_blocks(text):
             if kind == 'enum':
                 self.carriers[symbol] = ('enum', [name(body[i+1]) for i in range(len(body)-1) if body[i] == 'enum'], [])
@@ -272,8 +273,13 @@ class Model:
                             value = parser.pop()
                             high = None if value == '*' else int(value)
                         parser.expect(']')
+                    qualifiers = set()
                     while not parser.take(';'):
-                        assert parser.pop() in ('ordered', 'nonunique'), 'unsupported multiplicity qualifier'
+                        qualifier = parser.pop()
+                        assert qualifier in ('ordered', 'nonunique'), 'unsupported multiplicity qualifier'
+                        qualifiers.add(qualifier)
+                    if kind == 'attribute':
+                        self.field_modes[symbol, field] = ('ordered' in qualifiers, 'nonunique' in qualifiers)
                     (fields if kind == 'attribute' else inputs).append((field, carrier, low, high))
                 elif parser.take('return'):
                     if parser.take('ref'):
@@ -302,6 +308,47 @@ class Model:
             else:
                 assert result is not None, ('missing native body', symbol)
                 self.calculations[symbol] = (inputs, result, assertions)
+
+    def equal(self, left, right):
+        """Data-value equality respects declared feature ordering (KerML 7.4.2).
+
+        In particular an unordered extent is not an ordered source list. Keep
+        all declared payload/evidence fields; do not erase metadata by name.
+        """
+        if type(left) is not type(right):
+            return False
+        if same(left, right):
+            return True
+        if isinstance(left, tuple):
+            return len(left) == len(right) and all(self.equal(x, y) for x, y in zip(left, right))
+        if not isinstance(left, Record) or left.type not in self.carriers:
+            return same(left, right)
+        if left.type != right.type:
+            return False
+        for field, _, _, _ in self.carriers[left.type][1]:
+            x, y = left.get(field), right.get(field)
+            if isinstance(x, Extent) or isinstance(y, Extent):
+                if not same(x, y): return False
+                continue
+            xs, ys = sequence(x), sequence(y)
+            ordered, nonunique = self.field_modes.get((left.type, field), (False, False))
+            if ordered:
+                if not self.equal(xs, ys): return False
+            elif nonunique:
+                remaining = list(ys)
+                for value in xs:
+                    match = next((i for i, other in enumerate(remaining) if self.equal(value, other)), None)
+                    if match is None: return False
+                    remaining.pop(match)
+                if remaining: return False
+            elif not (self.includes(xs, ys) and self.includes(ys, xs)):
+                return False
+        return True
+
+    def includes(self, extent, values):
+        if isinstance(extent, Extent):
+            return includes(extent, values)
+        return all(any(self.equal(value, member) for member in sequence(extent)) for value in sequence(values))
 
     def invoke(self, symbol, arguments, check=True, depth=0):
         assert depth < 500, 'native recursion did not terminate'
@@ -397,11 +444,13 @@ class Model:
                 return self.invoke_callback(env[symbol], values[0], check, depth + 1)
             if symbol.startswith('SequenceFunctions::'):
                 method = symbol.split('::')[-1]
-                if method == 'includes': return includes(*values)
-                if method == 'includesOnly': return same_extent(*values)
+                if method == 'includes': return self.includes(*values)
+                if method == 'includesOnly':
+                    if any(isinstance(value, Extent) for value in values): return same_extent(*values)
+                    return self.includes(*values) and self.includes(*reversed(values))
                 if method == 'equals':
                     left, right = map(sequence, values)
-                    return len(left) == len(right) and all(same(x, y) for x, y in zip(left, right))
+                    return len(left) == len(right) and all(self.equal(x, y) for x, y in zip(left, right))
                 seq = sequence(values[0])
                 if method == 'head': return seq[0] if seq else ()
                 if method == 'tail': return seq[1:]
@@ -420,8 +469,8 @@ class Model:
         if op == 'and': return bool(left and ev(args[1]))
         if op == 'or': return bool(left or ev(args[1]))
         right = ev(args[1])
-        if op == '==': return same(left, right)
-        if op == '!=': return not same(left, right)
+        if op == '==': return self.equal(left, right)
+        if op == '!=': return not self.equal(left, right)
         if op == '<': return left < right
         if op == '>': return left > right
         if op == '<=': return left <= right

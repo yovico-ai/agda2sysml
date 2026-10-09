@@ -149,7 +149,9 @@ data Signature = Signature { parameters :: Int, inputs :: [Type], output :: Type
   deriving (Eq,Show)
 data Instance = Instance { origin :: Text, arguments :: [Type], identity :: Text } deriving (Eq,Show)
 data Result = Result { inventory :: Inventory, instances :: [Instance], failures :: M.Map Text Refusal
-  , directRoots :: S.Set Text, runtimeClosure :: S.Set Text, openRoots :: M.Map Text Text }
+  , directRoots :: S.Set Text, runtimeClosure :: S.Set Text, openRoots :: M.Map Text Text
+  , statementRoots :: M.Map Text (Either Refusal Text)
+  , statementDependencies :: M.Map Text (S.Set (Text,Text)) }
 data Store = Store { ready :: M.Map Text Value, recorded :: M.Map Text Instance }
 type Build = ExceptT Refusal (State Store)
 
@@ -828,13 +830,20 @@ application :: Value -> Value
 application x = object ["tag" .= ("apply" :: Text),"argument" .= object ["info" .= info,"value" .= x]]
 
 prepare :: Inventory -> Result
-prepare source | not active = Result source [] M.empty roots S.empty M.empty
-            | otherwise = Result expanded entries errors roots runtime open
+prepare source | not active = Result source [] M.empty roots S.empty M.empty M.empty M.empty
+            | otherwise = Result expanded entries errors roots runtime open statements statementNeeds
   where
     inv = UnusedParameters.annotate source
     needs = required inv
-    active = any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
+    active = not (null statementSeeds) || any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
       || r == "behavior" && callbackSignature s) (S.toList needs)
+    statementSeeds = [s | (s,"statement") <- S.toAscList needs
+      ,Just d <- [M.lookup s (declarations inv)],get "kind" d == String "function"
+      ,Right ty <- [field inv "type" d],equalityResult ty]
+    equalityResult ty = let t = get "term" ty in
+      if get "tag" t == String "pi" then equalityResult (get "body" (get "codomain" t))
+      else not (T.null (builtin inv "equality")) && get "tag" t == String "definition"
+        && get "symbol" t == String (builtin inv "equality")
     callbackSignature s = case M.lookup s (declarations inv) >>= either (const Nothing) Just . field inv "type" of
       Just ty -> callableDomains S.empty ty
       Nothing -> False
@@ -900,7 +909,59 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty
         pure (instanceKey s args)
       case result of Left _ -> modify' (const before); Right _ -> pure ()
       pure (s,result)
-    (attempts,store) = runState action (Store M.empty M.empty)
+    -- Statement preparation checks the telescope and its index computations,
+    -- never the proof implementation. Failed attempts leave runtime preparation
+    -- intact. Target admission decides which optional statement dependencies
+    -- enter the emitted scope.
+    statementAction = forM statementSeeds $ \s -> do
+      before <- gets id
+      outcome <- runExceptT $ do
+        d <- definition inv s
+        sig <- liftEither (signature inv d)
+        args <- foldM (\prior (i,k) -> do
+          arg <- case k of
+            UnusedKind -> pure Unused
+            TypeKind level -> Open i <$> liftEither (substituteLevel prior level >>= levelNumber)
+            FamilyKind domains level -> OpenFamily i <$> liftEither (traverse (substitute prior) domains)
+              <*> liftEither (substituteLevel prior level >>= levelNumber)
+            LevelKind -> abort Representation "Open universe-level parameters require a separate representation rule"
+          pure (prior ++ [arg])) [] (zip [0..] (parameterKinds sig))
+        ins <- liftEither (traverse (substitute args) (inputs sig))
+        out <- liftEither (substitute args (output sig))
+        mapM_ (ensureType inv []) (out:ins)
+        let key = instanceKey (s <> ".statement") args
+            statement = set "name" (String key) $ set "kind" (String "native-equality-statement")
+              $ set "displayName" (String (display inv s <> ".law" <> if null args then "" else suffix inv args))
+              $ set "statementOrigin" (String s) $ set "specializationOrigin" (String s)
+              $ set "preparationOrigin" (String s) $ set "specializationArguments" (toJSON (map typeValue args))
+              $ set "type" (arrow ins out) $ set "compiled" Null d
+        when (M.member key (declarations inv)) (abort Syntax "Statement identity collides with checked source")
+        modify' $ \st -> st {ready = M.insert key statement (ready st)}
+        pure key
+      case outcome of Left _ -> modify' (const before); Right _ -> pure ()
+      pure (s,outcome)
+    ((attempts,statementAttempts),store) = runState ((,) <$> action <*> statementAction) (Store M.empty M.empty)
+    statements = M.fromList statementAttempts
+    statementNeeds = M.fromList [(s,statementClosure key) | (s,Right key) <- statementAttempts]
+      where
+        statementClosure key =
+          let names = reach S.empty [key]
+              invoked = S.unions [either (const S.empty) callsIn (field inv root d)
+                | name <- S.toList names,Just d <- [M.lookup name (ready store)]
+                ,root <- ["type","compiled","closureIndexEquations"]]
+          in S.fromList [(name,role invoked name d)
+            | name <- S.toList names,Just d <- [M.lookup name (ready store)]
+            ,get "kind" d `elem` map String ["function","primitive","record","datatype","constructor"]]
+        -- A field is structural evidence. Projection eliminations read that
+        -- field directly; only a definition application needs its calculation.
+        role invoked name d
+          | get "proper" (get "projection" d) /= Null, S.notMember name invoked = "structure"
+          | get "kind" d `elem` map String ["function","primitive"] = "behavior"
+          | otherwise = "structure"
+        callsIn value@(Object fields) = S.unions (map callsIn (KM.elems fields)) `S.union`
+          (if get "tag" value == String "definition" then S.singleton (string (get "symbol" value)) else S.empty)
+        callsIn (Array values) = S.unions (map callsIn (foldr (:) [] values))
+        callsIn _ = S.empty
     errors = M.fromList [(s,e) | (s,Left e) <- attempts]
     open = M.fromList [(s,key) | (s,Right key) <- attempts,generic s,openProfile,S.member s roots]
     entries = M.elems (recorded store)

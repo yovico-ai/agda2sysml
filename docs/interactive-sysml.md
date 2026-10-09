@@ -120,6 +120,27 @@ If a diagram reports a renderer exception, check that `dot` is installed and
 that the configured path points to its executable. If a reference is unresolved,
 check that the entire model cell ran successfully and use its exact target name.
 
+## Inspect theorem constraints
+
+In a newly generated self-model, find a translated row in
+`correspondence.json.nativeStatements` and use its exact `target` with `%show`.
+For example:
+
+```text
+%show AgdaModel::'Agda2SysML.NaturalValues.source-roundtrip.law'
+```
+
+Its `constraint def` exposes the theorem's input and its equality conclusion.
+Other laws also take explicit type/family bindings and premise witnesses. Supply
+all of those when evaluating a constraint; a proof-valued input must satisfy
+its complete carrier and index contracts. Read the original theorem and proof
+through the corresponding source links in the review page.
+
+A translated statement is usable as a model constraint, independently of
+whether Pilot can execute its particular expression dependencies. The pinned
+Pilot's execution limits below still apply. Validator acceptance and a few
+successful evaluations do not establish a universally quantified proof.
+
 ## Explore the mapped state-update model
 
 Generate the public register workflow using the command in the alpha guide.
@@ -176,6 +197,30 @@ record construction with invocation-dependent fields, every type-extent
 quantifier, or arbitrary-precision natural arithmetic. A result that remains
 an expression or feature reference is **unevaluated**, not a successful value.
 Evaluate small supported examples and inspect the returned result explicitly.
+
+Pilot 0.58.0 also returns `false` in the following comparisons of equivalent
+constructed attribute values. Both identical field order and reordered values
+of an unordered field reproduce the limitation:
+
+```sysml
+attribute def Unordered {
+  attribute values : ScalarValues::Boolean [0..*];
+}
+```
+
+```text
+%eval new Unordered(values=(true,false)) == new Unordered(values=(false,true))
+%eval new Unordered(values=(true,false)) == new Unordered(values=(true,false))
+```
+
+Consequently, an equality law involving constructed records may evaluate to
+`false` in Pilot even for equivalent values. These checks do not establish the
+underlying evaluator cause. The independent
+test interpreter follows the declared ordering and uniqueness of each field,
+including all payloads and evidence. This follows the data-value and feature
+semantics in [KerML 1.0, sections 7.4.2 and 8.4.3.4](https://www.omg.org/spec/KerML/1.0/PDF).
+Native constraint validation and independent behavior checks are reported
+separately from Pilot execution; the latter is not claimed for every law.
 
 Native unary callback inputs use `in calc` and invoke the bound calculation
 directly. Stored callable members use `ref calc` inside immutable attribute

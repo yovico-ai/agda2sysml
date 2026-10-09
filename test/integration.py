@@ -22,6 +22,7 @@ from tagged_sums import verify_tagged_sums
 from report_accounting import verify_report_accounting
 from native_callbacks import verify_native_callbacks
 from callable_fields import verify_callable_fields
+from equality_statements import verify_equality_statements
 
 
 def check(condition, message):
@@ -304,6 +305,13 @@ models:
     accounting_evidence = verify_report_accounting(self_output)
     native_callback_evidence = verify_native_callbacks(self_output)
     callable_field_evidence = verify_callable_fields(self_output)
+    statement_evidence = verify_equality_statements(self_output)
+    check(statement_evidence['authoredStatements'] == 28
+          and statement_evidence['executedStatements'] == 28
+          and statement_evidence['conclusionMutationDetected']
+          and statement_evidence['premiseMutationDetected']
+          and statement_evidence['proofSourcesRetained'],
+          'native theorem statements lack behavior, input evidence or provenance checks')
     check(callable_field_evidence['operations'] == 4
           and callable_field_evidence['comparisons'] >= 5000
           and callable_field_evidence['invalidCasesRejected'] >= 10,

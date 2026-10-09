@@ -273,6 +273,7 @@ main = do
   indexedLookupChecks inv
   unusedParameterChecks inv
   callbackModel <- callableFieldChecks inv
+  statementModel <- equalityStatementChecks inv
   moduleAliasChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
@@ -287,7 +288,7 @@ main = do
         first = cmd "first" p "true" "null"
         second = cmd "second" "null" "null" "'Tone'::'blue'"
         none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel)
+    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> statementModel)
     callProcess (root </> "bin/agda2sysml-validate") [file]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -309,8 +310,56 @@ main = do
       ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
       ,"'callZero'(true)","false"
       ,"'clashCaller'(true)","false"
-      ,"'clashCaller'(false)","true"]
+      ,"'clashCaller'(false)","true"
+      ,"'EqualityFixture'::'unrelatedIdentity.law'(true)","true"
+      ,"'EqualityFixture'::'unrelatedIdentity.law'(false)","true"
+      ,"'EqualityFixture'::'unrelatedSymmetry.law'(true, true, 'EqualityFixture'::'witness'(true))","true"
+      ,"'EqualityFixture'::'unrelatedComparison.law'(true, false)","false"]
   putStrLn "algebraic carrier, binding, rejection, and native evaluation checks passed"
+
+equalityStatementChecks :: Inventory -> IO Text
+equalityStatementChecks base = do
+  let equal a b = object ["term" .= call "Claim" [a,b] []]
+      family = set "constructors" (toJSON (["witness"] :: [Text])) $
+        declaration "Claim" "datatype" (signature [named "Bool",named "Bool"] (universeAt (level 0)))
+      witness = set "family" (String "Claim") $ declaration "witness" "constructor"
+        (signature [named "Bool"] (equal (variable 0 []) (variable 0 [])))
+      law s ty = set "compiled" Null $ declaration s "function" ty
+      reflexive = law "unrelatedIdentity" (signature [named "Bool"] (equal (variable 0 []) (variable 0 [])))
+      comparison = law "unrelatedComparison" (signature [named "Bool",named "Bool"] (equal (variable 1 []) (variable 0 [])))
+      helper = operation "retainedFunction" ["Bool"] "Bool" (done 1 (variable 0 []))
+      helperLaw = law "unrelatedCall" (signature [named "Bool"]
+        (equal (call "retainedFunction" [variable 0 []] []) (variable 0 [])))
+      projected = variable 0 ["flag"]
+      fieldLaw = law "unrelatedField" (signature [named "Pair"] (equal projected projected))
+      symmetry = law "unrelatedSymmetry" (signature [named "Bool",named "Bool",equal (variable 1 []) (variable 0 [])]
+        (equal (variable 1 []) (variable 2 [])))
+      badBinding = law "badBinding" (signature [named "Bool"] (equal (variable 5 []) (variable 0 [])))
+      broken = operation "unavailableOperation" ["Bool"] "Bool" Null
+      badDependency = law "badDependency" (signature [named "Bool"]
+        (equal (call "unavailableOperation" [variable 0 []] []) (variable 0 [])))
+      defs = [family,witness,reflexive,comparison,helper,helperLaw,fieldLaw,symmetry,badBinding,broken,badDependency]
+      laws = ["unrelatedIdentity","unrelatedComparison","unrelatedCall","unrelatedField","unrelatedSymmetry","badBinding","badDependency"]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- defs]) (declarations base)
+        ,document = set "builtins" (set "equality" (String "Claim") (get "builtins" (document base))) (document base)
+        ,modelRequirements = M.singleton "statements" (S.fromList [(s,r) | s <- laws,r <- ["statement","proof-source"]])}
+      generated = T.generate inv
+      rows = array (get "nativeStatements" (T.correspondence generated))
+      translated s = any (\r -> get "symbol" r == String s && get "status" r == String "translated") rows
+  check (T.complete generated) (show (T.diagnostics generated))
+  check (all translated ["unrelatedIdentity","unrelatedComparison","unrelatedCall","unrelatedField","unrelatedSymmetry"] && not (any translated ["badBinding","badDependency"]))
+    ("statement admission lost bindings or concealed a dependency: " ++ show rows)
+  let originalRows = array (get "obligations" (T.correspondence generated))
+  check (all (\s -> any (\r -> get "symbol" r == String s && get "sourceKind" r == String "proof-source"
+      && get "rule" r == String "source.proof" && get "target" r == Null) originalRows) laws)
+    "native statements replaced retained proof provenance"
+  check (not (any (\r -> get "symbol" r == String "unavailableOperation" && get "sourceKind" r == String "behavior") originalRows))
+    "failed optional statement expanded the required runtime scope"
+  check (not (any (\r -> get "symbol" r == String "flag" && get "sourceKind" r == String "behavior") originalRows))
+    "reading a structural field introduced a standalone calculation requirement"
+  check ("in 'input2'" `Text.isInfixOf` T.modelText generated) "equality premise witness was erased"
+  check ("constraint def 'unrelatedSymmetry.law'" `Text.isInfixOf` T.modelText generated) "statement not rendered as a native constraint"
+  pure (Text.replace "package 'AgdaModel' {" "package 'EqualityFixture' {" (T.modelText generated))
 
 parameterizedChecks :: Inventory -> IO ()
 parameterizedChecks base = do
@@ -1071,7 +1120,7 @@ callableFieldChecks base = do
       "malformed proper callable projection admitted"
   let generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
-  pure (Text.replace "package AgdaModel {" "package CallableFieldFixture {" (T.modelText generated))
+  pure (Text.replace "package 'AgdaModel' {" "package 'CallableFieldFixture' {" (T.modelText generated))
 
 -- Recursive lookups with indexed inputs reduce only under justified branch
 -- facts. Different caller expressions must meet at the same residual call.
