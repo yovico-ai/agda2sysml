@@ -136,6 +136,7 @@ main = do
   familyParameterChecks
   reductionChecks
   naturalChecks
+  constructorFibreChecks
   automaticSelectionChecks
   let universe = universeAt (level 0)
       tone = set "constructors" (toJSON (["red","blue"] :: [Text])) (declaration "Tone" "datatype" universe)
@@ -1338,6 +1339,39 @@ naturalChecks = do
       negative = operation "negative" [] "Nat" (done 0 (literal (-1)))
   forM_ [malformed,missing,negative] $ \d ->
     check (isLeft (A.function inv M.empty M.empty d)) "invalid numeric schema admitted"
+
+constructorFibreChecks :: IO ()
+constructorFibreChecks = do
+  let piType binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      proof value = object ["term" .= call "Proof" [value] []]
+      absurd n = object ["tag" .= ("absurd" :: Text),"binders" .= replicate n Null]
+      token c fields = A.Construct "Token" (("constructor",A.Enumeration "Token.constructor-tag" c):fields)
+      witness = A.Constructor "witness" [("witness.payload0",A.Boolean)]
+        [token "packed" [("packed.payload0",A.Input 0)]]
+      tokenShape = A.Shape "Token" False [A.Constructor "packed" [("packed.payload0",A.Boolean)] [],A.Constructor "empty" [] []] []
+      proofShape = A.Shape "Proof" False [witness] [A.Named "Token"]
+      shapes = M.fromList [("Token",tokenShape),("Proof",proofShape)]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+      decoder = set "type" (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool")))
+        $ operation "unpack" [] "Bool" (split 0
+          [("packed",1,done 2 (variable 1 [])),("empty",0,absurd 1)])
+  calc <- either (fail . show) pure (A.function inv M.empty shapes decoder)
+  forM_ [False,True] $ \b -> do
+    let value = R "Token" (M.fromList [("constructor",E "Token.constructor-tag" "packed"),("packed.payload0",B b)])
+    check (eval [value,N] (A.body calc) == B b) "constructor-index refinement changed a valid payload"
+  let inhabited = proofShape {A.variants = [witness,A.Constructor "emptyWitness" [] [token "empty" []]]}
+  check (isLeft (A.function inv M.empty (M.insert "Proof" inhabited shapes) decoder))
+    "absurd branch admitted despite an inhabitant at the selected constructor"
+  let missingPayload = set "compiled" (split 0 [("packed",1,absurd 2),("empty",0,absurd 1)]) decoder
+  check (isLeft (A.function inv M.empty shapes missingPayload))
+    "unknown payload was treated as evidence of an empty fibre"
+  let unrelated = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool"))))
+        $ set "compiled" (split 0 [("packed",1,done 3 (variable 2 [])),("empty",0,absurd 2)]) decoder
+  check (isLeft (A.function inv M.empty shapes unrelated))
+    "constructor choice for another input justified an absurd branch"
 
 familyParameterChecks :: IO ()
 familyParameterChecks = do
