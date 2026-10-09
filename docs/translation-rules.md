@@ -828,7 +828,7 @@ exhausting that bound refuses rather than assumes semantic preservation.
 
 ## Native unary callback inputs
 
-A checked input of type `A → B` is represented by a native `in calc` usage
+A checked input of type `A → B` or `(x : A) → B x` is represented by a native `in calc` usage
 with one typed argument and one typed result. Applications invoke that usage
 directly. Passing the input to another admitted operation preserves the same
 binding, including through recursive helpers. The compiler checks both domain
@@ -844,9 +844,18 @@ Agda value encoding, or target interpreter is emitted. See the native invocation
 mechanism in [KerML 1.0 §7.4.9.4](https://www.omg.org/spec/KerML/1.0/PDF) and
 calculations in [SysML 2.0 §7.19](https://www.omg.org/spec/SysML/2.0/Language/PDF).
 
-This rule covers unary callbacks with supported first-order domains and results.
-Dependent or multiargument callbacks and arbitrary function-valued results remain
-outside its boundary. Stored callbacks and their projections use the separate
+This rule covers unary callbacks with supported first-order domains and results,
+including indexed families. The callback argument has its own lexical scope;
+result indices are instantiated with the supplied argument at invocation.
+Signatures retain references to surrounding inputs and earlier record fields,
+including calls to supplied callbacks inside an index. Substitution resolves a
+callee's index telescope before inserting caller types, so indices inside those
+types cannot be captured accidentally.
+
+Multiargument callbacks and arbitrary function-valued results remain
+outside its boundary. Function-valued family indices are explicitly refused:
+family indices are data attributes, and function identity needs a separate
+representation and equality rule. Stored callbacks and their projections use the separate
 callable-member rule below. Existing static closure
 specialization continues to handle supported concrete callbacks separately.
 
@@ -867,8 +876,8 @@ bindings as warnings, so validator acceptance alone is not refusal evidence.
 
 ## Native callable members
 
-Records and constructor payloads may contain supported unary, nondependent
-callbacks. A member is emitted as `ref calc` with explicit argument/result types,
+Records and constructor payloads may contain supported unary callbacks,
+including indexed and dependent signatures. A member is emitted as `ref calc` with explicit argument/result types,
 multiplicity and extent/refinement constraints. The containing carrier remains an
 immutable `attribute def`. The member is referential and nonvariable; it does not
 give the container occurrence identity, ownership, or a lifecycle. This follows
@@ -897,10 +906,20 @@ reconstructs trees while preserving their guards and effects. Outcomes remain
 complete domain values. The parsed-model tests cover these behaviors, malformed
 members, and incompatible bindings.
 
+`FirstOrder.lookup`, `nativeLookup`, `evaluate`, `evaluateArgs`, `nativeEvaluate`,
+and `nativeEvaluateArgs` use indexed callback signatures. Tables retain supplied
+calculations; expression evaluation invokes table entries or the calculations in
+an `Operation` record. The record also retains its `operation-preserves` member:
+a dependent callback returning a complete equality-evidence value. Its endpoints
+contain calls to `sourceOperation` and `targetOperation`, with `encodeFields`
+connecting their input representations. This evidence is not replaced with a
+Boolean condition or removed from the record. Callback argument/result contracts
+retain the signature's input schema, output index, and evidence endpoints.
+
 The callback-input purity/totality obligation and Pilot execution limitation
 above also apply here. This rule does not construct new callbacks capturing
 runtime environments: `DecisionTree.normalize` and `restrict` remain unsupported.
-Dependent and multiargument callback fields, direct sequences of callables,
+Multiargument callback fields, direct sequences of callables,
 and recursive carrier cycles through a callable's domain/result remain outside
 the rule. No generic Agda evaluator or callback table is emitted.
 
@@ -915,7 +934,8 @@ the budget is never semantic evidence. `DefinitionalReduction` states the
 reduction, projection, closure, and record-field laws.
 
 For module-copy constructors, the inventory retains Agda's canonical constructor
-head. Reduction uses that checked identity and preserves the complete payload
+head. Specialization follows that checked identity before emitting a constructor,
+even when the alias's signature can already be read. Reduction preserves the complete payload
 spine. It does not guess omitted phantom module parameters from names or choose
 an arbitrary type to fill them. Missing identity metadata and abstract aliases
 remain refused.

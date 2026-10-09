@@ -230,6 +230,15 @@ members. Inspect the constructor helpers, selected payloads, member signatures,
 and recursive calculation bodies in the model. Reconstruction retains the
 supplied callable references and full result values.
 
+The generated `FirstOrder.lookup`, `nativeLookup`, `evaluate`, `evaluateArgs`,
+`nativeEvaluate`, and `nativeEvaluateArgs` also retain indexed callback signatures.
+Inspect the `Table`/`NativeTable` constructors and `Operation`'s three `ref calc`
+members. Their contracts connect argument schemas, result indices, and the
+complete equality evidence returned by `operation-preserves`. The `.invoke`
+helpers expose member calls as ordinary typed calculations. These signatures and
+contracts are available for interactive inspection; the Pilot execution
+limitation below applies to these callbacks too.
+
 Pilot 0.58.0 accepts these models but may leave callback invocations
 unevaluated, including forwarded bindings whose direct calculations evaluate
 successfully. Inspect their signatures, bodies and contracts interactively;

@@ -490,7 +490,8 @@ class Model:
         result = self.invoke_callback(binding.value, argument, check, depth)
         if check:
             self.boundary(signature.result, 1, 1, result, depth)
-            env = {**binding.environment, binding.scope + '::argument': argument,
+            env = {**binding.environment, 'argument': argument, 'result': result,
+                   binding.scope + '::argument': argument,
                    binding.scope + '::result': result}
             assert all(self.evaluate(c, env, True, depth) is True for c in signature.assertions), 'callback contract failed'
         return result
