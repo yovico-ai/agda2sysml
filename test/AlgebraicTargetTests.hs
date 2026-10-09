@@ -273,6 +273,7 @@ main = do
   indexedLookupChecks inv
   unusedParameterChecks inv
   callbackModel <- callableFieldChecks inv
+  dependentCallbackModel <- dependentCallableChecks inv
   statementModel <- equalityStatementChecks inv
   moduleAliasChecks inv
   let generated = T.generate callInventory
@@ -288,7 +289,7 @@ main = do
         first = cmd "first" p "true" "null"
         second = cmd "second" "null" "null" "'Tone'::'blue'"
         none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> statementModel)
+    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> statementModel)
     callProcess (root </> "bin/agda2sysml-validate") [file]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -1161,6 +1162,115 @@ callableFieldChecks base = do
   let generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
   pure (Text.replace "package 'AgdaModel' {" "package 'CallableFieldFixture' {" (T.modelText generated))
+
+-- Renamed compiler-shaped declarations: a stored callback and a dependent
+-- evidence callback whose result retains an application of the first field.
+-- No project-specific dispatch or source wrappers can satisfy this fixture.
+dependentCallableChecks :: Inventory -> IO Text
+dependentCallableChecks base = do
+  let indexed = declaration "IndexedValue" "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      eqType = set "parameters" (Number 1) $ declaration "ScopedEvidence" "datatype"
+        (signature [universeAt (level 0),object ["term" .= variable 0 []],object ["term" .= variable 1 []]] (universeAt (level 0)))
+      scoped = base {declarations = M.union (M.fromList [("IndexedValue",indexed),("ScopedEvidence",eqType)]) (declarations base)}
+      boolean = P.Named "Bool" []
+      fibre = P.Named "IndexedValue" [P.Runtime boolean (P.IndexInput 0)]
+      environment = [Just (P.Runtime fibre (P.IndexInput 1)),Just (P.Runtime boolean (P.IndexInput 0))]
+      evidenceType = call "ScopedEvidence" [call "IndexedValue" [variable 1 []] [],variable 0 [],variable 0 []] []
+  scopedType <- either (fail . show) pure (P.readType scoped environment evidenceType)
+  check (scopedType == P.Named "ScopedEvidence" [fibre,P.Runtime fibre (P.IndexInput 1),P.Runtime fibre (P.IndexInput 1)])
+    "index substitution captured an index inside the caller's static type argument"
+  dependent <- either (fail . show) pure (P.readType scoped []
+    (get "term" (signature [named "Bool"] (object ["term" .= call "IndexedValue" [variable 0 []] []]))))
+  check (dependent == P.Callable boolean (P.Named "IndexedValue" [P.Runtime boolean P.IndexArgument]))
+    "callback argument was confused with an enclosing runtime index"
+  let v i = variable i []
+      ty s xs = object ["term" .= call s xs []]
+      applied f x = set "eliminations" (toJSON (array (get "eliminations" f) ++ [application x])) f
+      callback = signature [named "Bool"] (named "Bool")
+      evidence fn = signature [named "Bool"] (ty "Receipt" [applied fn (v 0),v 0])
+      receipt = set "constructors" (toJSON (["receipt"] :: [Text])) $
+        declaration "Receipt" "datatype" (signature [named "Bool",named "Bool"] (universeAt (level 0)))
+      receiptCtor = set "family" (String "Receipt") $ declaration "receipt" "constructor"
+        (signature [named "Bool"] (ty "Receipt" [v 0,v 0]))
+      copiedReceipt = set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String "receipt")
+        $ set "name" (String "copiedReceipt") $ set "displayName" (String "copiedReceipt") receiptCtor
+      box = set "constructor" (String "bindContract") $ set "fields" (toJSON (["transform","witness"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "ContractBox" "record" (universeAt (level 0))
+      ctor = set "family" (String "ContractBox") $ declaration "bindContract" "constructor"
+        (signature [callback,evidence (v 1)] (named "ContractBox"))
+      projection s out = set "projection" (object ["proper" .= ("ContractBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration s "function" (signature [named "ContractBox"] out)
+      transform = projection "transform" callback
+      witness = projection "witness" (evidence (variable 1 ["transform"]))
+      invoke = set "type" (signature [named "ContractBox",named "Bool"]
+          (ty "Receipt" [applied (variable 1 ["transform"]) (v 0),v 0]))
+        $ operation "invokeWitness" [] "Bool" (done 2 (applied (variable 1 ["witness"]) (v 0)))
+      direct = set "type" (signature [signature [named "Bool"] (ty "Receipt" [v 0,v 0]),named "Bool"]
+          (ty "Receipt" [v 0,v 0]))
+        $ operation "invokeDependent" [] "Bool" (done 2 (applied (v 1) (v 0)))
+      rebuild = operation "rebindContract" ["ContractBox"] "ContractBox"
+        (done 1 (constructor "bindContract" [variable 0 ["transform"],variable 0 ["witness"]]))
+      make = set "type" (signature [named "Bool"] (ty "Receipt" [v 0,v 0]))
+        $ operation "makeCopiedReceipt" [] "Bool" (done 1 (constructor "copiedReceipt" [v 0]))
+      ds = [receipt,receiptCtor,copiedReceipt,box,ctor,transform,witness,invoke,direct,rebuild,make]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "dependent-callbacks" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure")
+          | d <- ds,get "name" d /= String "copiedReceipt"])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (M.member "ContractBox" shapes) (show errors)
+  table <- traverse (either (fail . show) pure) results
+  forM_ ["invokeWitness","invokeDependent","rebindContract"] $ \s ->
+    check (M.member s table) (show (s,results))
+  let identity = A.Calculation "receiptIdentity" [A.Boolean] A.Boolean (A.Input 0) []
+      certify = A.Calculation "certify" [A.Boolean] (A.Fibre "Receipt" [A.Input 0,A.Input 0])
+        (A.Construct "Receipt" [("constructor",A.Enumeration "Receipt.constructor-tag" "receipt")
+          ,("Receipt.index0",A.Input 0),("Receipt.index1",A.Input 0),("receipt.payload0",A.Input 0)]) []
+      runtime = M.union (M.fromList [("receiptIdentity",identity),("certify",certify)]) table
+      record = R "ContractBox" (M.fromList [("transform",Fn "receiptIdentity"),("witness",Fn "certify")])
+  forM_ [False,True] $ \b -> do
+    let expected = evalWith runtime [B b] (A.body certify)
+    check (evalWith runtime [record,B b] (A.body (table M.! "invokeWitness")) == expected)
+      "dependent callback discarded or changed its evidence value"
+    check (evalWith runtime [Fn "certify",B b] (A.body (table M.! "invokeDependent")) == expected)
+      "direct callback failed to instantiate its result indices"
+    check (evalWith runtime [B b] (A.body (table M.! "makeCopiedReceipt")) == expected)
+      "module-copy constructor retained an unadmitted alias head"
+  check (evalWith runtime [record] (A.body (table M.! "rebindContract")) == record)
+    "reconstruction changed evidence-producing callback bindings"
+  let wrong = inv {declarations = M.adjust (set "compiled" (done 2
+        (applied (variable 1 ["witness"]) (constructor "red" [])))) "invokeWitness" (declarations inv)}
+      wrongPrepared = P.prepare wrong
+      wrongInventory = P.inventory wrongPrepared
+  check (M.member "invokeWitness" (P.failures wrongPrepared)
+    || maybe True isLeft (M.lookup "invokeWitness" (A.functions wrongInventory M.empty (fst (A.discover wrongInventory M.empty)))))
+    "wrong callback argument admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("'Receipt.index0'" `Text.isInfixOf` T.modelText generated
+    && "ref calc 'witness'" `Text.isInfixOf` T.modelText generated)
+    "dependent evidence callback signature missing from emitted model"
+  let nativeCallback = object ["term" .= object ["tag" .= ("native-callable" :: Text)
+        ,"binds" .= True,"input" .= named "Bool","result" .= named "Bool"]]
+      functionIndexed = set "constructors" (toJSON (["functionIndex"] :: [Text]))
+        $ declaration "FunctionIndexed" "datatype" (signature [nativeCallback] (universeAt (level 0)))
+      functionIndex = set "family" (String "FunctionIndexed") $ declaration "functionIndex" "constructor"
+        (signature [nativeCallback] (ty "FunctionIndexed" [v 0]))
+      functionRelation = set "nativeFamily" (Number 0) $ set "familyDomains" (toJSON [nativeCallback])
+        $ declaration "FunctionRelation" "native-family-parameter" (universeAt (level 0))
+      unsupported = base {declarations = M.union (M.fromList
+        [(string (get "name" d),d) | d <- [functionIndexed,functionIndex,functionRelation]]) (declarations base)
+        ,modelRequirements = M.singleton "function-indices" (S.singleton ("FunctionIndexed","structure"))}
+      (unsupportedShapes,unsupportedErrors) = A.discover unsupported M.empty
+  forM_ ["FunctionIndexed","FunctionRelation"] $ \s -> do
+    check (M.notMember s unsupportedShapes) "function-valued family index emitted as a data attribute"
+    check (maybe False (Text.isInfixOf "Function-valued family indices" . Text.pack . show)
+      (M.lookup s unsupportedErrors)) "function-valued family index lacks an explicit refusal"
+  pure (Text.replace "package 'AgdaModel' {" "package 'DependentCallableFixture' {" (T.modelText generated))
 
 -- Recursive lookups with indexed inputs reduce only under justified branch
 -- facts. Different caller expressions must meet at the same residual call.

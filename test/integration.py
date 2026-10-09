@@ -24,6 +24,7 @@ from native_callbacks import verify_native_callbacks
 from callable_fields import verify_callable_fields
 from equality_statements import verify_equality_statements
 from symbolic_levels import verify_symbolic_levels
+from dependent_callbacks import verify_dependent_callbacks
 
 
 def check(condition, message):
@@ -308,6 +309,11 @@ models:
     callable_field_evidence = verify_callable_fields(self_output)
     statement_evidence = verify_equality_statements(self_output)
     level_evidence = verify_symbolic_levels(self_output)
+    dependent_callback_evidence = verify_dependent_callbacks(self_output)
+    check(dependent_callback_evidence == {'operations': 6, 'comparisons': 360,
+          'evidenceCallbacksExercised': 12, 'invalidBindingsRejected': 15,
+          'bodyMutationsDetected': 6},
+          'indexed callbacks lack complete evaluator, evidence, refusal or mutation checks')
     check(level_evidence['operations'] == 10 and level_evidence['comparisons'] >= 700
           and level_evidence['invalidCasesRejected'] >= 30
           and level_evidence['nativeStatementsExercised'] == 4 and level_evidence['bodyMutationDetected'],
