@@ -75,7 +75,7 @@ operation s ins out tree = set "compiled" tree $ set "sourceSyntax" (toJSON [obj
 
 -- An independent evaluator of the target expression algebra checks lowering
 -- over all fixture values, including constructions the Pilot cannot execute.
-data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | N deriving (Eq,Show)
+data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | Fn Text | N deriving (Eq,Show)
 eval :: [Val] -> A.Expression -> Val
 eval = evalWith M.empty
 
@@ -117,6 +117,9 @@ evalWith _ _ A.Absent = N
 evalWith table env (A.Call s args) = case M.lookup s table of
   Nothing -> error ("missing helper " ++ show s)
   Just calc -> evalWith table (map (evalWith table env) args) (A.body calc)
+evalWith table env (A.Apply callback argument) = case evalWith table env callback of
+  Fn symbol -> evalWith table env (A.Call symbol [argument])
+  _ -> error "native invocation needs a callable value"
 
 call :: Text -> [Value] -> [Text] -> Value
 call s args fields = object ["tag" .= ("definition" :: Text),"symbol" .= s
@@ -953,7 +956,39 @@ unusedParameterChecks base = do
     check (omitted inv s == toJSON ([0] :: [Int])) ("unused forwarding not established: " ++ show s)
   forM_ ["usedCallback","forwardUsed"] $ \s -> do
     check (omitted inv s == toJSON ([] :: [Int])) "live callback was classified unused"
-    check (M.member s (P.failures prepared)) "arbitrary runtime callback was admitted"
+    check (M.notMember s (P.failures prepared)) (show (P.failures prepared))
+    calc <- either (fail . show) pure (calculations M.! s)
+    check (A.inputs calc == [A.Callable A.Boolean A.Boolean,A.Boolean]) "callback signature lost its domain or result"
+    check ("in calc 'input0'" `Text.isInfixOf` Text.unlines (A.renderCalculation expanded shapes id calc))
+      "callback was not emitted as a native calculation input"
+  callbackCalc <- either (fail . show) pure (calculations M.! "usedCallback")
+  check (A.body callbackCalc == A.Apply (A.Input 0) (A.Input 1)) "callback application was not retained"
+  let identity = A.Calculation "identity" [A.Boolean] A.Boolean (A.Input 0) []
+      invert = A.Calculation "invert" [A.Boolean] A.Boolean
+        (A.Conditional (A.Input 0) (A.Literal False) (A.Literal True)) []
+      table = M.union (M.fromList [("identity",identity),("invert",invert)])
+        (M.mapMaybe (either (const Nothing) Just) calculations)
+  forM_ ["usedCallback","forwardUsed"] $ \symbol -> forM_ [False,True] $ \value ->
+    forM_ [("identity",value),("invert",not value)] $ \(fn,expected) ->
+      check (evalWith table [Fn fn,B value] (A.body (table M.! symbol)) == B expected)
+        "native callback invocation/forwarding changed the supplied function"
+  let preparedBody definition =
+        let input = inv {declarations = M.insert "usedCallback" definition (declarations inv)}
+            transformed = P.prepare input
+            target = P.inventory transformed
+        in (transformed,A.functions target M.empty (fst (A.discover target M.empty)))
+      wrongArgument = set "compiled" (done 2 (set "eliminations"
+        (toJSON [application (constructor "red" [])]) (v 1))) used
+      (_,wrongCalculations) = preparedBody wrongArgument
+  check (maybe True isLeft (M.lookup "usedCallback" wrongCalculations)) "ill-typed callback application admitted"
+  check (isLeft (P.readType inv [] (get "term" (signature [callback] (named "Bool")))))
+    "higher-order callback domain admitted by unary rule"
+  check (isLeft (P.readType inv [] (get "term" (signature [named "Bool",named "Bool"] (named "Bool")))))
+    "multiargument callback admitted by unary rule"
+  let dependent = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= named "Bool"]
+        ,"codomain" .= object ["binds" .= True,"body" .= object ["term" .= v 0]]]]
+  check (isLeft (P.readType inv [] (get "term" dependent))) "dependent callback result admitted"
   forM_ ["passUnused","forwardUnused"] $ \s -> do
     key <- maybe (fail (show (s,P.failures prepared))) pure (M.lookup s (P.openRoots prepared))
     calc <- either (fail . show) pure (calculations M.! key)
@@ -1712,6 +1747,15 @@ reductionChecks = do
   check (reduce (call "short" [local 0] []) == Just (local 0)) "eta-short checked wrapper did not reduce"
   check (reduce (call "make" [local 0] ["value"]) == Just (local 0)) "projection evaluated or retained an unused field"
   check (reduce (call "make" [local 0] ["evidence"]) /= Just (local 0)) "proof field was identified with the computational field"
+  let copied = set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String "box")
+        $ set "name" (String "copiedBox") ctor
+      aliases = inv {declarations = M.insert "copiedBox" copied (declarations inv)}
+      aliased = constructor "copiedBox" [local 0,bottom]
+  check ((fst <$> Reduction.reduceHead aliases aliased) == Just (constructor "box" [local 0,bottom]))
+    "canonical constructor identity did not preserve the exact payload spine"
+  forM_ [set "moduleInstanceCopy" (Bool False),set "abstract" (Bool True),set "canonicalConstructor" Null] $ \change ->
+    check (Reduction.reduceHead (aliases {declarations = M.adjust change "copiedBox" (declarations aliases)}) aliased == Nothing)
+      "constructor alias reduced without checked identity evidence"
   let untrusted = inv {document = Null}
   check (Reduction.reduceHead untrusted (call "wrap" [local 0] []) == Nothing) "unchecked termination flag justified unfolding"
   let opaque = inv {declarations = M.adjust (set "opaque" (Bool True)) "wrap" (declarations inv)}

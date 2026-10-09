@@ -5,7 +5,7 @@ synopsis: Generate traceable SysML from checked Agda specifications
 license: MIT
 license-file: LICENSE
 build-type: Simple
-extra-source-files: test/TargetEvaluation.java test/review.cjs test/emitted_model.py test/open_parameters.py test/dependent_evidence.py test/recursive_core.py test/structured_indices.py test/callbacks.py test/dependent_record_path.py test/natural_values.py test/tagged_sums.py test/report_accounting.py assets/review.html
+extra-source-files: test/TargetEvaluation.java test/review.cjs test/emitted_model.py test/open_parameters.py test/dependent_evidence.py test/recursive_core.py test/structured_indices.py test/callbacks.py test/dependent_record_path.py test/natural_values.py test/tagged_sums.py test/report_accounting.py test/native_callbacks.py assets/review.html
 
 common defaults
   default-language: GHC2021

@@ -195,7 +195,7 @@ completeSignatures nodes cache verifyEncoding registry modules = do
     dependencies d = do
       table <- liftIO (readIORef nodes)
       expanded <- traverse (either genericError pure . Sharing.expand table . (`get` d))
-        ["statementDependencies","bodyDependencies","constructors","fields","constructor"]
+        ["statementDependencies","bodyDependencies","constructors","fields","constructor","canonicalConstructor"]
       pure [textOf v | fieldValue <- expanded, v <- case fieldValue of String _ -> [fieldValue]; _ -> values fieldValue]
     close _ [] extras = pure extras
     close seen (d:rest) extras = do

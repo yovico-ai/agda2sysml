@@ -108,6 +108,18 @@ reduceHead inv original = do
             Just (value,steps) -> do
               (result,more) <- whnf (fuel-1) value
               pure (result,s:steps ++ more)
+    -- Module-copy constructor terms omit their module arguments. Agda's
+    -- canonical head identifies the original constructor with the same payload;
+    -- guessing the alias's phantom type parameters would be unsound.
+    whnf fuel term | get "tag" term == String "constructor"
+      ,Just d <- definition (string (get "symbol" term))
+      ,get "moduleInstanceCopy" d == Bool True, get "abstract" d == Bool False
+      ,Just (String canonical) <- fld "canonicalConstructor" d
+      ,canonical /= "",String canonical /= get "symbol" term = do
+        original <- definition canonical
+        guard (get "kind" original == String "constructor" && get "abstract" original == Bool False)
+        (result,steps) <- whnf (fuel-1) (set "symbol" (String canonical) term)
+        pure (result,string (get "symbol" term):canonical:steps)
     whnf fuel term | get "tag" term == String "constructor" = do
       let es = array (get "eliminations" term); (args,rest) = span ((== String "apply") . get "tag") es
       case rest of

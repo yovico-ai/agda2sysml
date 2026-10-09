@@ -256,7 +256,8 @@ definition d = object $ ["name" .= name (defName d), "displayName" .= prettyShow
         ,"moduleAlias" .= fmap clause recClause
         ,"constructor" .= name (conName recConHead), "fields" .= map (name . unDom) recFields
         ,"induction" .= show recInduction, "etaEquality" .= show recEtaEquality']
-      Constructor{..} -> ["kind" .= ("constructor" :: T.Text), "family" .= name conData, "parameters" .= conPars]
+      Constructor{..} -> ["kind" .= ("constructor" :: T.Text), "family" .= name conData, "parameters" .= conPars
+        ,"canonicalConstructor" .= name (conName conSrcCon)]
       Axiom{} -> ["kind" .= ("axiom" :: T.Text)]
       Primitive{..} -> ["kind" .= ("primitive" :: T.Text), "primitive" .= show primName]
       PrimitiveSort{} -> ["kind" .= ("primitiveSort" :: T.Text)]
