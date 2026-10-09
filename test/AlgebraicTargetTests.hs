@@ -1372,6 +1372,48 @@ familyParameterChecks = do
   let dependent = arrow True (named "Bool") (arrow False (variableType 0 []) universe)
       unsupported = set "type" (arrow True dependent (named "Bool")) declaration'
   check (isLeft (P.signature inv unsupported)) "dependent family argument domain silently flattened"
+  -- An index constructor omits its family argument. Recover that argument
+  -- while reading a symbolic signature, before open-root instantiation.
+  let wrapper familyArg = object ["term" .= call "FamilyWrapper" [get "term" familyArg] []]
+      wrapperType = set "parameters" (Number 1) $ declaration "FamilyWrapper" "datatype"
+        (arrow True familyDomain universe)
+      wrapperConstructor = set "family" (String "FamilyWrapper") $ declaration "familyWrap" "constructor"
+        (arrow True familyDomain (wrapper (variableType 0 [])))
+      indexedType = set "parameters" (Number 1) $ declaration "FamilyIndexed" "datatype"
+        (arrow True familyDomain (arrow False (wrapper (variableType 0 [])) universe))
+      symbolicInv = inv {declarations = M.fromList
+        [("FamilyWrapper",wrapperType),("familyWrap",wrapperConstructor),("FamilyIndexed",indexedType)]}
+      indexedTerm = call "FamilyIndexed" [get "term" (variableType 0 []),constructor "familyWrap" []] []
+      expectedIndex = P.Runtime (P.Named "FamilyWrapper" [schema]) (P.IndexConstructor "familyWrap" [schema] [])
+  check (P.readType symbolicInv [Just schema] indexedTerm == Right (P.Named "FamilyIndexed" [schema,expectedIndex]))
+    "symbolic family equality did not recover the omitted index-constructor argument"
+  forM_ [P.FamilyParameter 0 [P.Named "Other" []] (P.LevelExpr 0 M.empty),
+         P.FamilyParameter 0 [bool] (P.LevelExpr 1 M.empty)] $ \incompatible ->
+    check (isLeft (P.readType symbolicInv [Just incompatible] indexedTerm))
+      "symbolic family inference merged incompatible domains or universes"
+  let payload f w = object ["term" .= call "FamilyPayload" [get "term" f,get "term" w] []]
+      payloadType = set "parameters" (Number 1) $ declaration "FamilyPayload" "datatype"
+        (arrow True familyDomain (arrow False (wrapper (variableType 0 [])) universe))
+      payloadConstructor = set "family" (String "FamilyPayload") $ declaration "familyPayload" "constructor"
+        (arrow True familyDomain (arrow True (wrapper (variableType 0 []))
+          (payload (variableType 1 []) (variableType 0 []))))
+      dependentType = set "parameters" (Number 1) $ declaration "DependentIndices" "datatype"
+        (arrow True familyDomain (arrow True (wrapper (variableType 0 []))
+          (arrow False (payload (variableType 1 []) (variableType 0 [])) universe)))
+      otherConstructor = set "name" (String "otherWrap") wrapperConstructor
+      dependentInv = symbolicInv {declarations = M.union (declarations symbolicInv) (M.fromList
+        [("FamilyPayload",payloadType),("familyPayload",payloadConstructor),
+         ("DependentIndices",dependentType),("otherWrap",otherConstructor)])}
+      dependentTerm second = call "DependentIndices"
+        [get "term" (variableType 0 []),constructor "familyWrap" [],
+         constructor "familyPayload" [constructor second []]] []
+      member = P.Runtime (P.Named "FamilyPayload" [schema,expectedIndex])
+        (P.IndexConstructor "familyPayload" [schema] [P.IndexConstructor "familyWrap" [schema] []])
+  check (P.readType dependentInv [Just schema] (dependentTerm "familyWrap")
+      == Right (P.Named "DependentIndices" [schema,expectedIndex,member]))
+    "later index domain did not retain the preceding constructor value"
+  check (isLeft (P.readType dependentInv [Just schema] (dependentTerm "otherWrap")))
+    "dependent index admitted a member at a different preceding value"
   let pairType = set "parameters" (Number 2) $ declaration "DependentPair" "record"
         (arrow True universe (arrow True (arrow False (variableType 0 []) universe) universe))
       pairInv = inv {declarations = M.singleton "DependentPair" pairType}

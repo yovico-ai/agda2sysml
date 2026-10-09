@@ -518,6 +518,11 @@ it removes only static binders. Proper field ownership is checked again by the
 native record gate after specialized projection identities are substituted.
 
 Static inference matches carrier structure to recover type/universe arguments.
+Symbolic family arguments retain their lexical identity, index domains and
+universe when recovering omitted constructor arguments. Within an indexed
+family application, each index domain is instantiated with the preceding index
+values before checking its argument. A member at a different preceding value
+still fails that check.
 It does not discharge runtime index equalities: those survive in the specialized
 signature and must pass the native fibre checks. Projection-like functions may
 omit both static parameters and leading runtime indices. The remaining metadata

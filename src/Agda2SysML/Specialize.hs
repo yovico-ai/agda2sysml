@@ -267,7 +267,12 @@ readType inv env t = case string (get "tag" t) of
         unless (length es == count + length indices) (refuse Syntax "Family application arity mismatch")
         args <- readStaticArguments inv env kinds (take count es)
         domains <- traverse (substitute args) indices
-        values <- sequence [app e >>= readIndex inv env domain | (e,domain) <- zip (drop count es) domains]
+        -- Later index domains may depend on earlier index values. Their
+        -- telescope positions are not runtime inputs of the enclosing term.
+        values <- foldM (\prior (domain,e) -> do
+          let contextual = replaceInputs [ix | Runtime _ ix <- prior] domain
+          value <- app e >>= readIndex inv env contextual
+          pure (prior ++ [value])) [] (zip domains (drop count es))
         pure (Named name (args ++ values))
       _ -> Named name <$> traverse (app >=> readType inv env) es
   _ -> refuse Representation "Type expression is outside named first-order families"
@@ -1245,6 +1250,11 @@ unify known (Parameter i) actual = case M.lookup i known of
   Just t | t == actual -> Right known
   _ -> refuse Semantics ("Inconsistent concrete type arguments: " <> T.pack (show (M.lookup i known,actual)))
 unify known (Open i l) (Open j m) | i == j && l == m = Right known
+-- Signature inference may compare a family before its open binding is known.
+-- Recover the omitted argument even when it remains symbolic; equality
+-- preserves its lexical identity, domain and universe. This neither invents
+-- a concrete binding nor discharges a runtime index equality.
+unify known a@(FamilyParameter i _ _) b@FamilyParameter{} | a == b = unify known (Parameter i) b
 unify known (FamilyParameter i _ _) actual@OpenFamily{} = unify known (Parameter i) actual
 unify known (FamilyParameter i _ _) actual@FamilyExpression{} = unify known (Parameter i) actual
 unify known a@(FamilyExpression domainA _ bodyA levelA) b@(FamilyExpression domainB _ bodyB levelB) = do
