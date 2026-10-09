@@ -19,6 +19,9 @@ closed global name. Exactly one of `infer` and `type` is allowed.
 Module parameters and other context remain universally quantified inputs. The
 mapping cannot instantiate a parameter with an expression or supply a default
 state. The checked module telescope determines their order and types.
+Function-valued module parameters proven unused by the dependency analysis may
+be omitted from native calculation inputs; their source quantification remains
+in the checked inventory. See [translation rules](translation-rules.md#unused-higher-order-module-parameters).
 
 Function models may omit `commands` and `arguments.command` together. Such a
 model exposes its transition function as an operation; additional arguments

@@ -687,11 +687,13 @@ functionWith inv finite helpers shapes signatures d = do
       unless (ins == [Named owner] && out == typ) (refuse Syntax "Proper projection signature mismatch")
       pure (Project (Input 0) s)
     Nothing -> do
+      tree <- field inv "compiled" d
       unless (length (array (get "sourceSyntax" d)) == 1
         || (get "withParent" d /= Null && M.member (string (get "withParent" d)) (declarations inv))
-        || get "extendedLambda" d == Bool True)
+        || get "extendedLambda" d == Bool True
+        || (get "moduleInstanceCopy" d == Bool True && terminationChecked inv d
+          && get "tag" tree == String "done" && get "tag" (get "body" tree) == String "definition"))
         (refuse Syntax "No uniquely anchored source definition or checked generated helper")
-      tree <- field inv "compiled" d
       p <- field inv "projection" d
       dropped <- if p == Null then Right 0 else subtract 1 <$> integer (get "index" p)
       unless (dropped >= 0 && dropped <= length ins)

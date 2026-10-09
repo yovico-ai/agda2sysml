@@ -161,10 +161,17 @@ backend = Backend Backend'
         table <- liftIO (readIORef nodes)
         unless (Sharing.expand table packed == Right (Encoding.definitionValue name d)) $
           genericError "shared-encoding-mismatch"
-      pure packed
+      withModuleParameters d packed
   , scopeCheckingSuffices = False, mayEraseType = const (pure False)
   , backendInteractTop = Nothing, backendInteractHole = Nothing
   }
+
+withModuleParameters :: Definition -> Value -> TCM Value
+withModuleParameters d packed = do
+  count <- length . binders <$> lookupSection (qnameModule (defName d))
+  pure $ case packed of
+    Object fields -> Object (KM.insert "moduleParameters" (toJSON count) fields)
+    _ -> packed
 
 -- Imported signatures may contain generated helpers absent from the backend's
 -- per-module traversal. Retain every such helper referenced by inventoried terms.
@@ -218,7 +225,8 @@ completeSignatures nodes cache verifyEncoding registry modules = do
               KM.insert "sourceSyntax" (toJSON ([] :: [Value])) $
               KM.insert "origin" (object ["kind" .= ("checked-signature-support" :: T.Text), "module" .= moduleName]) fields
             _ -> packed
-      pure (moduleName,located)
+      annotated <- withModuleParameters def located
+      pure (moduleName,annotated)
 
 -- | Validation takes place in Agda's dependent context, using conversion, not
 -- pretty-printed types or arity. Fresh inference metavariables never escape.
