@@ -222,7 +222,7 @@ semantics in [KerML 1.0, sections 7.4.2 and 8.4.3.4](https://www.omg.org/spec/Ke
 Native constraint validation and independent behavior checks are reported
 separately from Pilot execution; the latter is not claimed for every law.
 
-Native unary callback inputs use `in calc` and invoke the bound calculation
+Native unary and multiargument callback inputs use `in calc` and invoke the bound calculation
 directly. Stored callable members use `ref calc` inside immutable attribute
 definitions. The generated `DecisionTree.evaluate`, `evaluatePartial`, `select`,
 and `withFallback` accept supplied trees and rule lists, including their callable
@@ -239,13 +239,19 @@ helpers expose member calls as ordinary typed calculations. These signatures and
 contracts are available for interactive inspection; the Pilot execution
 limitation below applies to these callbacks too.
 
+For multiargument callbacks, inspect the ordered `argument`, `argument1`, and
+subsequent inputs inside `in calc` or `ref calc`. `ComputedIndices.replace`
+shows a callback whose position argument and expression result share the first
+argument's type index. `Derivations.Trace.combine` and the sequence case operations
+show ordinary binary callbacks. Partial runtime application is explicitly refused.
+
 Pilot 0.58.0 accepts these models but may leave callback invocations
 unevaluated, including forwarded bindings whose direct calculations evaluate
 successfully. Inspect their signatures, bodies and contracts interactively;
 do not treat an unresolved `InvocationExpression` as the callback's result.
 The independent parsed-model tests cover these operations; they are not evidence
 that Pilot can execute the same bindings. See the
-[callback rule and limitations](translation-rules.md#native-unary-callback-inputs)
+[callback rule and limitations](translation-rules.md#native-unary-and-multiargument-callback-inputs)
 and [callable members](translation-rules.md#native-callable-members).
 
 The project's independent tests parse emitted SysML and compare complete results

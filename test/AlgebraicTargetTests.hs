@@ -118,7 +118,7 @@ evalWith table env (A.Call s args) = case M.lookup s table of
   Nothing -> error ("missing helper " ++ show s)
   Just calc -> evalWith table (map (evalWith table env) args) (A.body calc)
 evalWith table env (A.Apply callback argument) = case evalWith table env callback of
-  Fn symbol -> evalWith table env (A.Call symbol [argument])
+  Fn symbol -> evalWith table env (A.Call symbol argument)
   _ -> error "native invocation needs a callable value"
 
 call :: Text -> [Value] -> [Text] -> Value
@@ -1049,11 +1049,11 @@ unusedParameterChecks base = do
     check (omitted inv s == toJSON ([] :: [Int])) "live callback was classified unused"
     check (M.notMember s (P.failures prepared)) (show (P.failures prepared))
     calc <- either (fail . show) pure (calculations M.! s)
-    check (A.inputs calc == [A.Callable A.Boolean A.Boolean,A.Boolean]) "callback signature lost its domain or result"
+    check (A.inputs calc == [A.Callable [A.Boolean] A.Boolean,A.Boolean]) "callback signature lost its domain or result"
     check ("in calc 'input0'" `Text.isInfixOf` Text.unlines (A.renderCalculation expanded shapes id calc))
       "callback was not emitted as a native calculation input"
   callbackCalc <- either (fail . show) pure (calculations M.! "usedCallback")
-  check (A.body callbackCalc == A.Apply (A.Input 0) (A.Input 1)) "callback application was not retained"
+  check (A.body callbackCalc == A.Apply (A.Input 0) [A.Input 1]) "callback application was not retained"
   let identity = A.Calculation "identity" [A.Boolean] A.Boolean (A.Input 0) []
       invert = A.Calculation "invert" [A.Boolean] A.Boolean
         (A.Conditional (A.Input 0) (A.Literal False) (A.Literal True)) []
@@ -1074,8 +1074,8 @@ unusedParameterChecks base = do
   check (maybe True isLeft (M.lookup "usedCallback" wrongCalculations)) "ill-typed callback application admitted"
   check (isLeft (P.readType inv [] (get "term" (signature [callback] (named "Bool")))))
     "higher-order callback domain admitted by unary rule"
-  check (isLeft (P.readType inv [] (get "term" (signature [named "Bool",named "Bool"] (named "Bool")))))
-    "multiargument callback admitted by unary rule"
+  check (P.readType inv [] (get "term" (signature [named "Bool",named "Bool"] (named "Bool"))) == Right (P.Callable [P.Named "Bool" [],P.Named "Bool" []] (P.Named "Bool" [])))
+    "multiargument callback telescope was not retained"
   let dependent = object ["term" .= object ["tag" .= ("pi" :: Text)
         ,"domain" .= object ["info" .= info,"type" .= named "Bool"]
         ,"codomain" .= object ["binds" .= True,"body" .= object ["term" .= v 0]]]]
@@ -1105,7 +1105,7 @@ unusedParameterChecks base = do
       storedShapes = fst (A.discover storedInventory M.empty)
   storedKey <- maybe (fail (show (P.failures storedPrepared))) pure (M.lookup "PhantomCallback" (P.openRoots storedPrepared))
   storedShape <- maybe (fail "stored callback carrier missing") pure (M.lookup storedKey storedShapes)
-  check ([t | c <- A.variants storedShape,(_,t) <- A.payload c] == [A.Callable A.Boolean A.Boolean])
+  check ([t | c <- A.variants storedShape,(_,t) <- A.payload c] == [A.Callable [A.Boolean] A.Boolean])
     "stored function payload was erased or changed"
 
 callableFieldChecks :: Inventory -> IO Text
@@ -1132,10 +1132,10 @@ callableFieldChecks base = do
       results = A.functions expanded M.empty shapes
   check (M.null (P.failures prepared)) (show (P.failures prepared))
   shape <- maybe (fail "callable record not admitted") pure (M.lookup "CallbackBox" shapes)
-  check (A.isRecord shape && map snd (A.payload (head (A.variants shape))) == [A.Callable A.Boolean A.Boolean])
+  check (A.isRecord shape && map snd (A.payload (head (A.variants shape))) == [A.Callable [A.Boolean] A.Boolean])
     "callable member changed its containing value carrier"
   sig <- either (fail . show) pure (P.signature inv projection)
-  check (P.inputs sig == [P.Named "CallbackBox" []] && P.output sig == P.Callable (P.Named "Bool" []) (P.Named "Bool" []))
+  check (P.inputs sig == [P.Named "CallbackBox" []] && P.output sig == P.Callable [P.Named "Bool" []] (P.Named "Bool" []))
     "proper projection flattened its callable result into additional inputs"
   let identity = A.Calculation "fieldIdentity" [A.Boolean] A.Boolean (A.Input 0) []
       invert = A.Calculation "fieldInvert" [A.Boolean] A.Boolean
@@ -1181,7 +1181,7 @@ dependentCallableChecks base = do
     "index substitution captured an index inside the caller's static type argument"
   dependent <- either (fail . show) pure (P.readType scoped []
     (get "term" (signature [named "Bool"] (object ["term" .= call "IndexedValue" [variable 0 []] []]))))
-  check (dependent == P.Callable boolean (P.Named "IndexedValue" [P.Runtime boolean P.IndexArgument]))
+  check (dependent == P.Callable [boolean] (P.Named "IndexedValue" [P.Runtime boolean (P.IndexArgument 0)]))
     "callback argument was confused with an enclosing runtime index"
   let v i = variable i []
       ty s xs = object ["term" .= call s xs []]
@@ -1212,7 +1212,22 @@ dependentCallableChecks base = do
         (done 1 (constructor "bindContract" [variable 0 ["transform"],variable 0 ["witness"]]))
       make = set "type" (signature [named "Bool"] (ty "Receipt" [v 0,v 0]))
         $ operation "makeCopiedReceipt" [] "Bool" (done 1 (constructor "copiedReceipt" [v 0]))
-      ds = [receipt,receiptCtor,copiedReceipt,box,ctor,transform,witness,invoke,direct,rebuild,make]
+      many = signature [named "Bool",named "Bool",ty "Receipt" [v 1,v 0]] (ty "Receipt" [v 2,v 1])
+      invokeMany = set "type" (signature [many,named "Bool",named "Bool",ty "Receipt" [v 1,v 0]]
+          (ty "Receipt" [v 2,v 1])) $ operation "invokeMany" [] "Bool"
+          (done 4 (applied (applied (applied (v 3) (v 2)) (v 1)) (v 0)))
+      multiBox = set "constructor" (String "bindMany") $ set "fields" (toJSON (["manyMember"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "MultiBox" "record" (universeAt (level 0))
+      multiCtor = set "family" (String "MultiBox") $ declaration "bindMany" "constructor" (signature [many] (named "MultiBox"))
+      multiField = set "projection" (object ["proper" .= ("MultiBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration "manyMember" "function" (signature [named "MultiBox"] many)
+      invokeField = set "type" (signature [named "MultiBox",named "Bool",named "Bool",ty "Receipt" [v 1,v 0]]
+          (ty "Receipt" [v 2,v 1])) $ operation "invokeManyField" [] "Bool"
+          (done 4 (applied (applied (applied (variable 3 ["manyMember"]) (v 2)) (v 1)) (v 0)))
+      forwarded = set "name" (String "forwardMany") $ set "displayName" (String "forwardMany")
+        $ set "compiled" (done 4 (call "invokeMany" [v 3,v 2,v 1,v 0] [])) invokeMany
+      ds = [receipt,receiptCtor,copiedReceipt,box,ctor,transform,witness,invoke,direct,rebuild,make,
+            invokeMany,multiBox,multiCtor,multiField,invokeField,forwarded]
       inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
         ,modelRequirements = M.singleton "dependent-callbacks" (S.fromList [(string (get "name" d),
           if get "kind" d == String "function" then "behavior" else "structure")
@@ -1224,13 +1239,15 @@ dependentCallableChecks base = do
   check (M.null (P.failures prepared)) (show (P.failures prepared))
   check (M.member "ContractBox" shapes) (show errors)
   table <- traverse (either (fail . show) pure) results
-  forM_ ["invokeWitness","invokeDependent","rebindContract"] $ \s ->
+  forM_ ["invokeWitness","invokeDependent","rebindContract","invokeMany","invokeManyField","forwardMany"] $ \s ->
     check (M.member s table) (show (s,results))
   let identity = A.Calculation "receiptIdentity" [A.Boolean] A.Boolean (A.Input 0) []
       certify = A.Calculation "certify" [A.Boolean] (A.Fibre "Receipt" [A.Input 0,A.Input 0])
         (A.Construct "Receipt" [("constructor",A.Enumeration "Receipt.constructor-tag" "receipt")
           ,("Receipt.index0",A.Input 0),("Receipt.index1",A.Input 0),("receipt.payload0",A.Input 0)]) []
-      runtime = M.union (M.fromList [("receiptIdentity",identity),("certify",certify)]) table
+      identityMany = A.Calculation "identityMany" [A.Boolean,A.Boolean,A.Fibre "Receipt" [A.Input 0,A.Input 1]]
+        (A.Fibre "Receipt" [A.Input 0,A.Input 1]) (A.Input 2) []
+      runtime = M.union (M.fromList [("receiptIdentity",identity),("certify",certify),("identityMany",identityMany)]) table
       record = R "ContractBox" (M.fromList [("transform",Fn "receiptIdentity"),("witness",Fn "certify")])
   forM_ [False,True] $ \b -> do
     let expected = evalWith runtime [B b] (A.body certify)
@@ -1240,6 +1257,11 @@ dependentCallableChecks base = do
       "direct callback failed to instantiate its result indices"
     check (evalWith runtime [B b] (A.body (table M.! "makeCopiedReceipt")) == expected)
       "module-copy constructor retained an unadmitted alias head"
+    forM_ ["invokeMany","forwardMany"] $ \s ->
+      check (evalWith runtime [Fn "identityMany",B b,B b,expected] (A.body (table M.! s)) == expected)
+        "multiargument callback lost its complete dependent evidence result"
+    check (evalWith runtime [R "MultiBox" (M.singleton "manyMember" (Fn "identityMany")),B b,B b,expected]
+      (A.body (table M.! "invokeManyField")) == expected) "stored multiargument callback changed its result"
   check (evalWith runtime [record] (A.body (table M.! "rebindContract")) == record)
     "reconstruction changed evidence-producing callback bindings"
   let wrong = inv {declarations = M.adjust (set "compiled" (done 2
@@ -1249,6 +1271,13 @@ dependentCallableChecks base = do
   check (M.member "invokeWitness" (P.failures wrongPrepared)
     || maybe True isLeft (M.lookup "invokeWitness" (A.functions wrongInventory M.empty (fst (A.discover wrongInventory M.empty)))))
     "wrong callback argument admitted"
+  forM_ [applied (v 3) (v 2),applied (applied (applied (v 3) (v 1)) (v 2)) (v 0),
+         applied (applied (applied (applied (v 3) (v 2)) (v 1)) (v 0)) (v 0)] $ \term -> do
+    let bad = P.prepare (inv {declarations = M.adjust (set "compiled" (done 4 term)) "invokeMany" (declarations inv)})
+        checked = P.inventory bad
+    check (M.member "invokeMany" (P.failures bad) || maybe True isLeft
+      (M.lookup "invokeMany" (A.functions checked M.empty (fst (A.discover checked M.empty)))))
+      "partial, overapplied or wrongly indexed callback admitted"
   let generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
   check ("'Receipt.index0'" `Text.isInfixOf` T.modelText generated

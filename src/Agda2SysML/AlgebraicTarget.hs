@@ -23,7 +23,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 data Carrier = Boolean | Natural | AnyValue | TypeParameter Int | Named Text | Fibre Text [Expression]
-  | Callable Carrier Carrier deriving (Eq, Show)
+  | Callable [Carrier] Carrier deriving (Eq, Show)
 data Constructor = Constructor
   { constructorSymbol :: Text, payload :: [(Text,Carrier)], resultIndices :: [Expression] } deriving (Eq, Show)
 data Shape = ShapeData
@@ -34,7 +34,7 @@ pattern Shape :: Text -> Bool -> [Constructor] -> [Carrier] -> Shape
 pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing []
 data Expression = Annotated D.Origin Expression
   | NInput Int
-  | NArgument
+  | NArgument Int
   | NLiteral Bool
   | NNumberLiteral Integer
   | NNumeric Text Expression Expression
@@ -47,7 +47,7 @@ data Expression = Annotated D.Origin Expression
   | NEqual Expression Expression
   | NConditional Expression Expression Expression
   | NCall Text [Expression]
-  | NApply Expression Expression
+  | NApply Expression [Expression]
   | NBoundCall Text [Text] [Expression]
   | NAbsent
   deriving Show
@@ -57,7 +57,7 @@ unmark (Annotated _ x) = unmark x
 unmark x = x
 
 instance Eq Expression where
-  x == y | NArgument <- unmark x, NArgument <- unmark y = True
+  x == y | NArgument i <- unmark x, NArgument j <- unmark y = i == j
   x == y | NApply f a <- unmark x, NApply g b <- unmark y = f == g && a == b
   x == y | NInput a0 <- unmark x, NInput b0 <- unmark y = a0 == b0
   x == y | NLiteral a0 <- unmark x, NLiteral b0 <- unmark y = a0 == b0
@@ -76,8 +76,8 @@ instance Eq Expression where
   _ == _ = False
 pattern Input :: Int -> Expression
 pattern Input i <- (unmark -> NInput i) where Input i = NInput i
-pattern Argument :: Expression
-pattern Argument <- (unmark -> NArgument) where Argument = NArgument
+pattern Argument :: Int -> Expression
+pattern Argument i <- (unmark -> NArgument i) where Argument i = NArgument i
 pattern Literal :: Bool -> Expression
 pattern Literal b <- (unmark -> NLiteral b) where Literal b = NLiteral b
 pattern NumberLiteral :: Integer -> Expression
@@ -102,7 +102,7 @@ pattern Conditional :: Expression -> Expression -> Expression -> Expression
 pattern Conditional p x y <- (unmark -> NConditional p x y) where Conditional p x y = NConditional p x y
 pattern Call :: Text -> [Expression] -> Expression
 pattern Call s xs <- (callParts -> Just (s,xs)) where Call s xs = NCall s xs
-pattern Apply :: Expression -> Expression -> Expression
+pattern Apply :: Expression -> [Expression] -> Expression
 pattern Apply f x <- (unmark -> NApply f x) where Apply f x = NApply f x
 pattern BoundCall :: Text -> [Text] -> [Expression] -> Expression
 pattern BoundCall s bindings xs <- (unmark -> NBoundCall s bindings xs) where BoundCall s bindings xs = NBoundCall s bindings xs
@@ -144,7 +144,7 @@ retain rule before after = Annotated (D.derived rule [] Null (origins before ++ 
       SequenceHead _ xs -> origins xs
       Conditional p x y -> origins p ++ origins x ++ origins y
       Call _ xs -> concatMap origins xs
-      Apply f x -> origins f ++ origins x
+      Apply f x -> origins f ++ concatMap origins x
       _ -> []
 
 type Helpers = M.Map Text Calculation
@@ -166,9 +166,15 @@ at i xs = case drop i xs of
 -- Types retain runtime index expressions in the lexical input environment.
 carrierIn :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes -> [(Carrier,Expression)] -> Value -> Either Refusal Carrier
 carrierIn inv finite helpers shapes env ty | get "tag" (get "term" ty) == String "native-callable" = do
-  domain <- carrierIn inv finite helpers shapes env (get "input" (get "term" ty))
-  let context = if get "binds" (get "term" ty) == Bool True then (domain,Argument):env else env
-  Callable domain <$> carrierIn inv finite helpers shapes context (get "result" (get "term" ty))
+  let term = get "term" ty
+      legacy = get "inputs" term == Null
+      domains = if legacy then [get "input" term] else array (get "inputs" term)
+  unless (not (null domains)) (refuse Syntax "Callback requires a nonempty argument telescope")
+  (types,context) <- foldM (\(prior,context) domain -> do
+    typ <- carrierIn inv finite helpers shapes context domain
+    let context' = if legacy && get "binds" term /= Bool True then context else (typ,Argument (length prior)):context
+    pure (prior ++ [typ],context')) ([],env) domains
+  Callable types <$> carrierIn inv finite helpers shapes context (get "result" term)
 carrierIn inv finite helpers shapes env ty = do
   let t = get "term" ty; s = string (get "symbol" t)
   unless (get "tag" t == String "definition") (refuse Representation "Unsupported dependent carrier expression")
@@ -280,9 +286,12 @@ indexExpression inv finite helpers shapes env expected t = do
             _ -> refuse Representation "Computed index requires an admitted finite helper or proper record projection"
         _ -> refuse Syntax "Unsupported finite index expression"
     eliminate value [] = Right value
-    eliminate (Callable domain out,fn) (e:es) = do
-      value <- applicationValue e >>= indexExpression inv finite helpers shapes env domain
-      eliminate (applyCallback value out,Apply fn value) es
+    eliminate (Callable domains out,fn) es@(_:_) = do
+      unless (length es >= length domains) (refuse Representation "Partial callback application requires runtime closure construction")
+      values <- foldM (\prior (domain,e) -> do
+        value <- applicationValue e >>= indexExpression inv finite helpers shapes env (applyCallback prior domain)
+        pure (prior ++ [value])) [] (zip domains es)
+      eliminate (applyCallback values out,Apply fn values) (drop (length domains) es)
     eliminate value (e:es) = do
       unless (get "tag" e == String "project") (refuse Syntax "Computed index elimination")
       projected <- project value (string (get "symbol" e))
@@ -328,17 +337,19 @@ mapExpression replace e = retain "native.substitution" e $ case replace e of
     Conditional p x y -> Conditional (go p) (go x) (go y)
     BoundCall s bindings xs -> BoundCall s bindings (map go xs)
     Call s xs -> Call s (map go xs)
-    Apply f x -> Apply (go f) (go x)
+    Apply f x -> Apply (go f) (map go x)
     _ -> e
   where go = mapExpression replace
 
 mapCarrier :: (Expression -> Expression) -> Carrier -> Carrier
-mapCarrier f (Callable a b) = Callable (mapCarrier f a) (mapCarrier f b)
+mapCarrier f (Callable a b) = Callable (map (mapCarrier f) a) (mapCarrier f b)
 mapCarrier f (Fibre s xs) = Fibre s (map (normalize . f) xs)
 mapCarrier _ t = t
 
-applyCallback :: Expression -> Carrier -> Carrier
-applyCallback value = mapCarrier (mapExpression (\e -> case e of Argument -> Just value; _ -> Nothing))
+applyCallback :: [Expression] -> Carrier -> Carrier
+applyCallback values = mapCarrier (mapExpression (\e -> case e of
+  Argument i | i >= 0 && i < length values -> Just (values !! i)
+  _ -> Nothing))
 
 instantiate :: [Expression] -> Expression -> Expression
 instantiate args = mapExpression (\e -> case e of Input i | i >= 0 && i < length args -> Just (args !! i); _ -> Nothing)
@@ -354,7 +365,7 @@ normalizeStep (Project value f) = case normalize value of
 normalizeStep (Construct s fields) = Construct s [(f,normalize v) | (f,v) <- fields]
 normalizeStep (BoundCall s bindings args) = BoundCall s bindings (map normalize args)
 normalizeStep (Call s args) = Call s (map normalize args)
-normalizeStep (Apply f x) = Apply (normalize f) (normalize x)
+normalizeStep (Apply f x) = Apply (normalize f) (map normalize x)
 normalizeStep (Equal x y) = Equal (normalize x) (normalize y)
 normalizeStep (Numeric op x y) = case (op,normalize x,normalize y) of
   ("+",NumberLiteral a,NumberLiteral b) -> NumberLiteral (a+b)
@@ -405,7 +416,7 @@ expandWith rewrite helpers = go S.empty . rewrite
           _ -> unfolded
       _ -> Call s (map (go seen) args)
     step seen (Project x f) = normalize (Project (go seen x) f)
-    step seen (Apply f x) = Apply (go seen f) (go seen x)
+    step seen (Apply f x) = Apply (go seen f) (map (go seen) x)
     step seen (Construct s fs) = Construct s [(f,go seen x) | (f,x) <- fs]
     step seen (Sequence xs) = normalize (Sequence (map (go seen) xs))
     step seen (SequenceOp op xs) = normalize (SequenceOp op (go seen xs))
@@ -461,7 +472,7 @@ discover inv finite = go M.empty candidates
         Just element -> [element]
         Nothing -> [t | c <- variants sh,(_,t) <- payload c]
       ,s <- carrierDependencies t]
-    carrierDependencies (Callable a b) = carrierDependencies a ++ carrierDependencies b
+    carrierDependencies (Callable a b) = concatMap carrierDependencies (b:a)
     carrierDependencies (Named s) = [s]
     carrierDependencies (Fibre s _) = [s]
     carrierDependencies _ = []
@@ -480,7 +491,7 @@ discover inv finite = go M.empty candidates
           (refuse Semantics "Recursive carrier component lacks safe inductive positivity evidence")
         let peers = map shapeSymbol shapes'
         unless (null [s | sh <- shapes',c <- variants sh,(_,Callable a b) <- payload c
-          ,s <- carrierDependencies a ++ carrierDependencies b,s `elem` peers])
+          ,s <- concatMap carrierDependencies (b:a),s `elem` peers])
           (refuse Representation "Recursive carrier through a callable requires a separate well-foundedness rule")
         pure [sh {recursivePeers = peers} | sh <- shapes']
       groups = map checked components
@@ -747,11 +758,11 @@ dependencies calc = calls (body calc) `S.union` S.unions
   `S.union` S.unions [calls left `S.union` calls right | (_,left,right) <- staticIndexEquations calc]
   where
     carrierCalls (Fibre _ xs) = S.unions (map calls xs)
-    carrierCalls (Callable a b) = carrierCalls a `S.union` carrierCalls b
+    carrierCalls (Callable a b) = S.unions (map carrierCalls (b:a))
     carrierCalls _ = S.empty
 
 calls :: Expression -> S.Set Text
-calls (Apply f x) = calls f `S.union` calls x
+calls (Apply f x) = S.unions (map calls (f:x))
 calls (Call s args) = S.insert s (S.unions (map calls args))
 calls (Construct _ fields) = S.unions (map (calls . snd) fields)
 calls (Project x _) = calls x
@@ -1114,9 +1125,13 @@ functionWith inv finite helpers shapes signatures d = do
       unless (get "tag" a == String "apply") (refuse Syntax "Constructor argument is not an application")
       expressionExpected (Just typ) equationsInScope env (get "value" (get "argument" a)) >>= requireType equationsInScope typ
     eliminateIn _ _ value [] = Right value
-    eliminateIn equations env (Callable domain out,fn) (e:es) = do
-      value <- argument equations env domain e
-      eliminateIn equations env (applyCallback value out,located "native.callable-invocation" e Null (Apply fn value)) es
+    eliminateIn equations env (Callable domains out,fn) es@(_:_) = do
+      unless (length es >= length domains) (refuse Representation "Partial callback application requires runtime closure construction")
+      values <- foldM (\prior (domain,e) -> do
+        value <- argument equations env (applyCallback prior domain) e
+        pure (prior ++ [value])) [] (zip domains es)
+      eliminateIn equations env (applyCallback values out,
+        located "native.callable-invocation" (toJSON (take (length domains) es)) Null (Apply fn values)) (drop (length domains) es)
     eliminateIn equations env (typ,expr) (e:es) = do
       unless (get "tag" e == String "project") (refuse Syntax "Unsupported value elimination")
       let f = string (get "symbol" e)
@@ -1188,6 +1203,10 @@ renderWith label input = D.render . renderWithDoc label input ""
 renderWithDoc :: (Text -> Text) -> (Int -> Text) -> Text -> Expression -> D.Doc
 renderWithDoc label input owner = renderParameterizedDoc label input owner (const []) (const []) quote
 
+argumentName :: Int -> Text
+argumentName 0 = "argument"
+argumentName i = "argument" <> T.pack (show i)
+
 parameterName :: Int -> Text
 parameterName i = "typeArgument" <> T.pack (show i)
 
@@ -1210,7 +1229,7 @@ renderParameterizedDoc label input owner calcParameters shapeParameters paramete
   where
     go e = D.mark owner (role e) (evidence e) $ case e of
       Input i -> D.text (input i)
-      Argument -> "'argument'"
+      Argument i -> D.text (quote (argumentName i))
       Literal b -> if b then "true" else "false"
       NumberLiteral n -> D.text (naturalText n)
       Numeric "monus" x y -> "(if " <> go x <> " < " <> go y <> " ? 0 else " <> go x <> " - " <> go y <> ")"
@@ -1232,8 +1251,8 @@ renderParameterizedDoc label input owner calcParameters shapeParameters paramete
       Call sym args -> D.text (quote (label sym)) <> "(" <> D.joinDoc ", "
         (map (D.text . parameter) (calcParameters sym) ++ map go args) <> ")"
       Apply (Project receiver member) value -> D.text (quote (label (callableInvoker member)))
-        <> "(" <> go receiver <> ", " <> go value <> ")"
-      Apply fn value -> go fn <> "(" <> go value <> ")"
+        <> "(" <> D.joinDoc ", " (map go (receiver:value)) <> ")"
+      Apply fn values -> go fn <> "(" <> D.joinDoc ", " (map go values) <> ")"
       Absent -> "null"
     evidence e@(Call sym _) = D.derived "native.call-site" [] (object ["callee" .= sym]) [annotation e]
     evidence e@(Project _ fieldName) = D.derived "native.field-access" [] (object ["field" .= fieldName]) [annotation e]
@@ -1315,10 +1334,10 @@ renderOperationDoc statement inv shapes label c = D.mark owner (if isStatement t
       ++ callableBody (input i) domain out ++ ["    }"]
     renderInput i typ = [D.text ("    in " <> quote ("input" <> T.pack (show i)) <> " : " <> renderCarrier label typ <> " [1];")]
     callableBody scope domain out =
-      ["      in 'argument' : " <> renderCarrier label domain <> " [1];"
-      ,"      return 'result' : " <> renderCarrier label out <> " [1];"]
+      ["      in " <> quote (argumentName i) <> " : " <> renderCarrier label typ <> " [1];" | (i,typ) <- zip [0..] domain]
+      ++ ["      return 'result' : " <> renderCarrier label out <> " [1];"]
       ++ ["      assert constraint { " <> condition <> " }"
-         | (fieldName,typ) <- [("argument",domain),("result",out)]
+         | (fieldName,typ) <- [(argumentName i,typ) | (i,typ) <- zip [0..] domain] ++ [("result",out)]
          ,let value = scope <> "::" <> quote fieldName
          ,condition <- parameterRefinements shapes label binding value typ
            ++ refinementTextIn shapes label input binding value typ]
@@ -1586,11 +1605,11 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
         ,"  }"])
       ++ concat [renderInvoker sh f a b | c <- variants sh,(f,Callable a b) <- payload c]
     renderField sh f (Callable domain out) =
-      ["    ref calc " <> quote (label f) <> multiplicity sh <> " {"
-      ,"      in 'argument' : " <> renderCarrier label domain <> " [1];"
-      ,"      return 'result' : " <> renderCarrier label out <> " [1];"]
+      ["    ref calc " <> quote (label f) <> multiplicity sh <> " {"]
+      ++ ["      in " <> quote (argumentName i) <> " : " <> renderCarrier label typ <> " [1];" | (i,typ) <- zip [0..] domain]
+      ++ ["      return 'result' : " <> renderCarrier label out <> " [1];"]
       ++ ["      assert constraint { " <> condition <> " }"
-         | (member,typ) <- [("argument",domain),("result",out)]
+         | (member,typ) <- [(argumentName i,typ) | (i,typ) <- zip [0..] domain] ++ [("result",out)]
          ,let owner = quote (label (shapeSymbol sh))
               binding p = owner <> "::" <> quote p
               value = owner <> "::" <> quote (label f) <> "::" <> quote member
@@ -1604,17 +1623,17 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
     renderInvoker sh f domain out =
       let scope = quote (label (callableInvoker f))
           receiver = scope <> "::'receiver'"
-          argument = scope <> "::'argument'"
+          arguments = [scope <> "::" <> quote (argumentName i) | i <- [0..length domain-1]]
           returned = scope <> "::'result'"
           binding p = receiver <> "." <> quote p
       in ["  calc def " <> scope <> " {"
          ,"    in 'receiver' : " <> quote (label (shapeSymbol sh)) <> " [1];"
-         ,"    in 'argument' : " <> renderCarrier label domain <> " [1];"
-         ,"    return 'result' : " <> renderCarrier label out <> " [1] = "
-           <> receiver <> "." <> quote (label f) <> "(" <> argument <> ");"
+         ] ++ ["    in " <> quote (argumentName i) <> " : " <> renderCarrier label typ <> " [1];" | (i,typ) <- zip [0..] domain]
+         ++ ["    return 'result' : " <> renderCarrier label out <> " [1] = "
+           <> receiver <> "." <> quote (label f) <> "(" <> T.intercalate ", " arguments <> ");"
          ,"    assert constraint { SequenceFunctions::size(" <> receiver <> "." <> quote (label f) <> ") == 1 }"]
          ++ ["    assert constraint { " <> condition <> " }"
-            | (value,typ) <- [(argument,domain),(returned,out)]
+            | (value,typ) <- zip arguments domain ++ [(returned,out)]
             ,condition <- parameterRefinements shapes label binding value typ
               ++ refinementTextIn shapes label (\i -> receiver <> "." <> quote (label (fieldAt sh f i))) binding value typ]
          ++ ["  }"]

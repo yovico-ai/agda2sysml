@@ -28,21 +28,21 @@ import qualified Data.Text as T
 data LevelAtom = BoundLevel Int | RigidLevel Int deriving (Eq,Ord,Show)
 data LevelExpr = LevelExpr Integer (M.Map LevelAtom Integer) deriving (Eq,Ord,Show)
 data Type = Unused | Parameter Int | Open Int LevelExpr | Named Text [Type] | Level LevelExpr
-  | Callable Type Type
+  | Callable [Type] Type
   | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] LevelExpr | FamilyApplication Type [Type]
   | FamilyExpression Type Int Type LevelExpr
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
 -- Runtime positions are absolute within a value telescope. Static arguments
 -- on proper projections are retained until those declarations are cloned.
 data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexConstructor Text [Type] [IndexExpr]
-  | IndexNatural Integer | IndexSuccessor IndexExpr | IndexArgument | IndexApply IndexExpr IndexExpr
+  | IndexNatural Integer | IndexSuccessor IndexExpr | IndexArgument Int | IndexApply IndexExpr IndexExpr
   | IndexProject Text [Type] IndexExpr | IndexCall Text [Type] [IndexExpr] deriving (Eq,Ord,Show)
 
 -- A carrier/helper identity abstracts runtime values in its static arguments.
 -- The captured values become an explicit, ordered telescope prefix; repeated
 -- references share one slot. Closed fibres retain their concrete identity.
 mapIndices :: (IndexExpr -> IndexExpr) -> Type -> Type
-mapIndices f (Callable a b) = Callable (mapIndices f a) (mapIndices f b)
+mapIndices f (Callable a b) = Callable (map (mapIndices f) a) (mapIndices f b)
 mapIndices f (Named s xs) = Named s (map (mapIndices f) xs)
 mapIndices f (Runtime ty ix) = Runtime (mapIndices f ty) (f ix)
 mapIndices f (FamilyApplication ty xs) = FamilyApplication (mapIndices f ty) (map (mapIndices f) xs)
@@ -57,13 +57,13 @@ familyLocals = free S.empty
   where
     free bound (FamilyExpression domain slot body _) = free bound domain `S.union` free (S.insert slot bound) body
     free bound (Named _ xs) = S.unions (map (free bound) xs)
-    free bound (Callable a b) = free bound a `S.union` free bound b
+    free bound (Callable a b) = S.unions (map (free bound) (b:a))
     free bound (FamilyApplication f xs) = S.unions (map (free bound) (f:xs))
     free bound (OpenFamily _ xs _) = S.unions (map (free bound) xs)
     free bound (Runtime domain index) = free bound domain `S.union` indices bound index
     free _ _ = S.empty
     indices bound (IndexLocal i) = if S.member i bound then S.empty else S.singleton i
-    indices _ IndexArgument = S.singleton (-1)
+    indices _ IndexArgument{} = S.singleton (-1)
     indices bound (IndexApply f x) = indices bound f `S.union` indices bound x
     indices bound (IndexConstructor _ ts xs) = S.unions (map (free bound) ts ++ map (indices bound) xs)
     indices bound (IndexProject _ ts x) = S.unions (indices bound x:map (free bound) ts)
@@ -78,7 +78,7 @@ canonicalFamilies ty = go M.empty start ty
     go names next (FamilyExpression domain slot body level) = FamilyExpression (go names next domain) next
       (go (M.insert slot next names) (next+1) body) level
     go names next (Named s xs) = Named s (map (go names next) xs)
-    go names next (Callable a b) = Callable (go names next a) (go names next b)
+    go names next (Callable a b) = Callable (map (go names next) a) (go names next b)
     go names next (FamilyApplication f xs) = FamilyApplication (go names next f) (map (go names next) xs)
     go names next (OpenFamily i xs l) = OpenFamily i (map (go names next) xs) l
     go names next (Runtime domain index) = Runtime (go names next domain) (ix names next index)
@@ -109,7 +109,7 @@ captureArguments :: [Type] -> ([Type],[(Type,IndexExpr)])
 captureArguments args = let (result,slots) = runState (traverse (visit S.empty . canonicalFamilies) args) [] in (result,slots)
   where
     visit locals (Named symbol xs) = Named symbol <$> traverse (visit locals) xs
-    visit locals (Callable a b) = Callable <$> visit locals a <*> visit locals b
+    visit locals (Callable a b) = Callable <$> traverse (visit locals) a <*> visit locals b
     visit locals (FamilyApplication ty xs) = FamilyApplication <$> visit locals ty <*> traverse (visit locals) xs
     visit locals (FamilyExpression domain slot body level) = FamilyExpression <$> visit locals domain <*> pure slot
       <*> visit (S.insert slot locals) body <*> pure level
@@ -120,7 +120,7 @@ captureArguments args = let (result,slots) = runState (traverse (visit S.empty .
           erase (IndexSuccessor x) = IndexSuccessor (erase x)
           erase (IndexProject f ts x) = IndexProject f ts (erase x)
           erase (IndexCall f ts xs) = IndexCall f ts (map erase xs)
-          erase IndexArgument = IndexCaptured 0
+          erase IndexArgument{} = IndexCaptured 0
           erase (IndexApply f x) = IndexApply (erase f) (erase x)
           erase x = x
       if closed (Runtime domain (erase ix)) || not (S.null (familyLocals (Runtime domain ix)))
@@ -264,16 +264,7 @@ readLevelTerm inv env t = case string (get "tag" t) of
 -- NoAbs codomains retain the previous context; Abs codomains extend it.
 readType :: Inventory -> [Maybe Type] -> Value -> Either Refusal Type
 readType inv env t = case string (get "tag" t) of
-  "pi" -> do
-    let dom = get "domain" t; cod = get "codomain" t
-        modality = get "info" dom
-    unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
-      (refuse Semantics "Erased callback argument requires a separate representation rule")
-    a <- readType inv env (get "term" (get "type" dom))
-    b <- readType inv (if get "binds" cod == Bool False then env else Just (Runtime a IndexArgument):env)
-      (get "term" (get "body" cod))
-    unless (valueCarrier a && valueCarrier b) (refuse Representation "Callback requires unary first-order input and result")
-    pure (Callable a b)
+  "pi" -> callback env [] t
   "native-open-type" -> Open <$> number (get "slot" t) <*> readLevelValue (get "universe" t)
   "native-open-family" -> do
     domains <- traverse (readType inv env) (array (get "domains" t))
@@ -288,7 +279,7 @@ readType inv env t = case string (get "tag" t) of
       FamilyParameter _ domains _ -> applyFamily value domains es
       OpenFamily _ domains _ -> applyFamily value domains es
       FamilyExpression domain _ _ _ -> applyFamily value [domain] es
-      _ -> foldM (eliminateIndex inv env) value es
+      _ -> eliminateIndices inv env value es
   "constructor" -> do
     let c = string (get "symbol" t)
     if c `elem` [builtin inv "zero",builtin inv "suc"] && not (T.null c)
@@ -334,6 +325,20 @@ readType inv env t = case string (get "tag" t) of
       _ -> Named name <$> traverse (app >=> readType inv env) es
   _ -> refuse Representation "Type expression is outside named first-order families"
   where
+    callback context domains arrow | get "tag" arrow == String "pi" = do
+      let dom = get "domain" arrow; cod = get "codomain" arrow
+          modality = get "info" dom
+      unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
+        (refuse Semantics "Erased callback argument requires a separate representation rule")
+      domain <- readType inv context (get "term" (get "type" dom))
+      unless (valueCarrier domain) (refuse Representation "Callback requires first-order arguments and result")
+      let context' = if get "binds" cod == Bool False then context
+            else Just (Runtime domain (IndexArgument (length domains))):context
+      callback context' (domains ++ [domain]) (get "term" (get "body" cod))
+    callback context domains result = do
+      out <- readType inv context result
+      unless (valueCarrier out) (refuse Representation "Callback requires first-order arguments and result")
+      pure (Callable domains out)
     valueCarrier Runtime{} = False
     valueCarrier Level{} = False
     valueCarrier t = firstOrder t
@@ -363,7 +368,7 @@ readType inv env t = case string (get "tag" t) of
             let rest = drop (position+1) es
             receiver <- app e >>= readType inv env
             projected <- projectIndex inv receiver (object ["tag" .= ("project" :: Text),"symbol" .= name])
-            foldM (eliminateIndex inv env) projected rest
+            eliminateIndices inv env projected rest
         else do
           sig <- signature inv d
           let count = parameters sig
@@ -528,25 +533,29 @@ replaceKnownInputs values = mapIndices go
 
 -- Callback arguments occupy their own lexical scope, independent of the
 -- enclosing runtime telescope. Nested runtime function types remain refused.
-applyCallback :: IndexExpr -> Type -> Type
-applyCallback value = mapIndices go
+applyCallback :: [IndexExpr] -> Type -> Type
+applyCallback values = mapIndices go
   where
-    go IndexArgument = value
+    go (IndexArgument i) | i >= 0 && i < length values = values !! i
     go (IndexApply f x) = IndexApply (go f) (go x)
-    go (IndexConstructor c ts xs) = IndexConstructor c (map (applyCallback value) ts) (map go xs)
-    go (IndexProject f ts x) = IndexProject f (map (applyCallback value) ts) (go x)
-    go (IndexCall f ts xs) = IndexCall f (map (applyCallback value) ts) (map go xs)
+    go (IndexConstructor c ts xs) = IndexConstructor c (map (applyCallback values) ts) (map go xs)
+    go (IndexProject f ts x) = IndexProject f (map (applyCallback values) ts) (go x)
+    go (IndexCall f ts xs) = IndexCall f (map (applyCallback values) ts) (map go xs)
     go (IndexSuccessor x) = IndexSuccessor (go x)
     go x = x
 
-eliminateIndex :: Inventory -> [Maybe Type] -> Type -> Value -> Either Refusal Type
-eliminateIndex inv env (Runtime (Callable domain out) fn) e = do
-  term <- app e
-  value <- readIndex inv env domain term
-  case value of
-    Runtime _ ix -> pure (Runtime (applyCallback ix out) (IndexApply fn ix))
-    _ -> refuse Semantics "Callback index argument is not a value"
-eliminateIndex inv _ value e = projectIndex inv value e
+eliminateIndices :: Inventory -> [Maybe Type] -> Type -> [Value] -> Either Refusal Type
+eliminateIndices _ _ value [] = Right value
+eliminateIndices inv env (Runtime (Callable domains out) fn) es = do
+  unless (length es >= length domains) (refuse Representation "Partial callback application requires runtime closure construction")
+  values <- foldM (\prior (domain,e) -> do
+    term <- app e
+    value <- readIndex inv env (applyCallback prior domain) term
+    case value of
+      Runtime _ ix -> pure (prior ++ [ix])
+      _ -> refuse Semantics "Callback index argument is not a value") [] (zip domains es)
+  eliminateIndices inv env (Runtime (applyCallback values out) (foldl IndexApply fn values)) (drop (length domains) es)
+eliminateIndices inv env value (e:es) = projectIndex inv value e >>= \next -> eliminateIndices inv env next es
 
 projectIndex :: Inventory -> Type -> Value -> Either Refusal Type
 projectIndex inv (Runtime (Named owner args) receiver) elimination = do
@@ -635,7 +644,7 @@ substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscLis
         Level l -> Right (joinLevel total (shiftLevel offset l))
         _ -> refuse Semantics "Type argument used in a universe-level position"
 substitute :: [Type] -> Type -> Either Refusal Type
-substitute args (Callable a b) = Callable <$> substitute args a <*> substitute args b
+substitute args (Callable a b) = Callable <$> traverse (substitute args) a <*> substitute args b
 substitute _ Unused = Right Unused
 substitute args (Parameter i) = at i args
 substitute _ t@Open{} = Right t
@@ -658,7 +667,7 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
     go (IndexApply f x) = IndexApply <$> go f <*> go x
     go i = Right i
 closed :: Type -> Bool
-closed (Callable a b) = closed a && closed b
+closed (Callable a b) = all closed (b:a)
 closed Unused = True
 closed Parameter{} = False
 closed (Open _ level) = closed (Level level)
@@ -678,7 +687,7 @@ closed (FamilyExpression domain slot body level) = closed domain && closed (Leve
 closed (Runtime ty index) = closed ty && go index
   where
     go IndexCaptured{} = True
-    go IndexArgument = True
+    go IndexArgument{} = True
     go (IndexApply f x) = go f && go x
     go IndexLocal{} = False
     go IndexInput{} = False
@@ -814,7 +823,8 @@ completeKnown inv sig known = do
     step table _ = Right table
 
 typeValue :: Type -> Value
-typeValue (Callable a b) = object ["callableInput" .= typeValue a,"callableResult" .= typeValue b]
+typeValue (Callable [a] b) = object ["callableInput" .= typeValue a,"callableResult" .= typeValue b]
+typeValue (Callable as b) = object ["callableInputs" .= map typeValue as,"callableResult" .= typeValue b]
 typeValue Unused = object ["unusedModuleParameter" .= True]
 typeValue (Level l) = case levelNumber l of
   Right n -> object ["level" .= n]
@@ -834,7 +844,8 @@ indexValue :: IndexExpr -> Value
 indexValue (IndexInput i) = object ["input" .= i]
 indexValue (IndexCaptured i) = object ["capture" .= i]
 indexValue (IndexLocal i) = object ["familyInput" .= i]
-indexValue IndexArgument = object ["callbackArgument" .= True]
+indexValue (IndexArgument 0) = object ["callbackArgument" .= True]
+indexValue (IndexArgument i) = object ["callbackArgument" .= i]
 indexValue (IndexApply f x) = object ["callback" .= indexValue f,"argument" .= indexValue x]
 indexValue (IndexNatural n) = object ["natural" .= n]
 indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
@@ -888,8 +899,10 @@ nativeFamilies d = M.toAscList (families (get "specializationArguments" d)
     families _ = M.empty
 
 typeTerm :: Int -> Type -> Value
-typeTerm depth (Callable a b) = object ["tag" .= ("native-callable" :: Text)
-  ,"binds" .= True,"input" .= asType depth a,"result" .= asType (depth+1) (applyCallback (IndexInput depth) b)]
+typeTerm depth (Callable domains out) = object ["tag" .= ("native-callable" :: Text)
+  ,"inputs" .= [asType (depth+i) (applyCallback positions domain) | (i,domain) <- zip [0..] domains]
+  ,"result" .= asType (depth+length domains) (applyCallback positions out)]
+  where positions = map IndexInput [depth..depth+length domains-1]
 typeTerm depth ty@(Named _ args) = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
   ,"eliminations" .= [application (indexTerm depth i) | i <- map snd (snd (captureArguments (staticArguments args))) ++ [ix | Runtime _ ix <- args]]]
 typeTerm depth ty@(FamilyApplication _ args) = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
@@ -898,7 +911,7 @@ typeTerm _ ty = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty,"
 indexTerm :: Int -> IndexExpr -> Value
 indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
 indexTerm _ (IndexLocal _) = object ["tag" .= ("unbound-family-input" :: Text)]
-indexTerm _ IndexArgument = object ["tag" .= ("unbound-callback-input" :: Text)]
+indexTerm _ IndexArgument{} = object ["tag" .= ("unbound-callback-input" :: Text)]
 indexTerm depth (IndexApply f x) = let t = indexTerm depth f in
   set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (indexTerm depth x)])) t
 indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .= (depth-i-1),"eliminations" .= ([] :: [Value])]
@@ -1112,7 +1125,7 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
 definition :: Inventory -> Text -> Build Value
 definition inv s = maybe (abort Syntax ("Missing checked declaration: " <> s)) pure (M.lookup s (declarations inv))
 showType :: Inventory -> Type -> Text
-showType inv (Callable a b) = "(" <> showType inv a <> " → " <> showType inv b <> ")"
+showType inv (Callable a b) = "(" <> T.intercalate " → " (map (showType inv) (a ++ [b])) <> ")"
 showType _ Unused = "unused module parameter"
 showType _ (Level (LevelExpr n xs)) = "level " <> case terms of
     [term] -> term
@@ -1127,7 +1140,7 @@ showType inv (Runtime _ index) = showIndex index
     showIndex (IndexCaptured i) = "captured index " <> T.pack (show i)
     showIndex (IndexLocal i) = "family input " <> T.pack (show i)
     showIndex (IndexInput i) = "input" <> T.pack (show i)
-    showIndex IndexArgument = "argument"
+    showIndex (IndexArgument i) = "argument" <> if i == 0 then "" else T.pack (show i)
     showIndex (IndexApply f x) = showIndex f <> "(" <> showIndex x <> ")"
     showIndex (IndexNatural n) = T.pack (show n)
     showIndex (IndexSuccessor i) = "suc(" <> showIndex i <> ")"
@@ -1173,7 +1186,7 @@ cached inv s args = do
   pure exists
 
 ensureType :: Inventory -> [Text] -> Type -> Build ()
-ensureType inv stack (Callable a b) = ensureType inv stack a >> ensureType inv stack b
+ensureType inv stack (Callable a b) = mapM_ (ensureType inv stack) (b:a)
 ensureType _ _ Unused = abort Semantics "Unused module parameter used as a runtime carrier"
 ensureType _ _ Level{} = abort Semantics "Universe level cannot be a runtime carrier"
 ensureType _ _ Runtime{} = abort Semantics "Runtime index cannot be a static carrier"
@@ -1355,7 +1368,7 @@ nonRecursiveTemplate inv root = inspect (S.singleton root) root
       _ -> True
     walk seen (Named s xs) = all (walk seen) xs && s /= root && (S.member s seen || inspect (S.insert s seen) s)
     walk seen (FamilyApplication f xs) = all (walk seen) (f:xs)
-    walk seen (Callable a b) = walk seen a && walk seen b
+    walk seen (Callable a b) = all (walk seen) (b:a)
     walk seen (Runtime domain _) = walk seen domain
     walk _ _ = True
 -- Signatures can be the only use of an index calculation. Clone its checked
@@ -1531,7 +1544,9 @@ specializeTree inv stack env out tree = case string (get "tag" tree) of
   _ -> abort Syntax "Specialization requires a supported finite compiled body"
 
 unify :: M.Map Int Type -> Type -> Type -> Either Refusal (M.Map Int Type)
-unify known (Callable a b) (Callable c d) = unify known a c >>= \next -> unify next b d
+unify known (Callable as b) (Callable cs d) = do
+  unless (length as == length cs) (refuse Semantics "Callback arity mismatch")
+  foldM (\next (a,c) -> unify next a c) known (zip (as ++ [b]) (cs ++ [d]))
 unify known Unused Unused = Right known
 unify known (Level l) (Level actual) = constrainUniverse known l actual
 -- This pass infers only static substitutions. Runtime equalities are retained
@@ -1580,9 +1595,13 @@ unify _ expected actual = refuse Semantics ("Concrete carrier mismatch: expected
 sourceTypeTerm :: Inventory -> Int -> Type -> Value
 sourceTypeTerm inv = sourceTypeAt
   where
-    sourceTypeAt depth (Callable a b) = object ["term" .= object ["tag" .= ("pi" :: Text)
-      ,"domain" .= object ["info" .= info,"type" .= sourceTypeAt depth a]
-      ,"codomain" .= object ["binds" .= True,"body" .= sourceTypeAt (depth+1) (applyCallback (IndexInput depth) b)]]]
+    sourceTypeAt depth (Callable domains out) = arrows depth (map resolve domains) (resolve out)
+      where
+        resolve = applyCallback (map IndexInput [depth..depth+length domains-1])
+        arrows n [] result = sourceTypeAt n result
+        arrows n (domain:rest) result = object ["term" .= object ["tag" .= ("pi" :: Text)
+          ,"domain" .= object ["info" .= info,"type" .= sourceTypeAt n domain]
+          ,"codomain" .= object ["binds" .= True,"body" .= arrows (n+1) rest result]]]
     sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
       ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
     sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
@@ -1630,7 +1649,7 @@ unifyIn inv bindings known expected actual = case unify known expected actual of
     env = runtimeBindings (filter isDynamic bindings)
     depth = length (filter isDynamic bindings)
     normal (Named s xs) = Named s (map normal xs)
-    normal (Callable a b) = Callable (normal a) (normal b)
+    normal (Callable a b) = Callable (map normal a) (normal b)
     normal (FamilyApplication f xs) = FamilyApplication (normal f) (map normal xs)
     normal (OpenFamily i xs l) = OpenFamily i (map normal xs) l
     normal (Runtime domain ix) =
@@ -1741,7 +1760,7 @@ expression inv stack env expected term = do
               resolved Parameter{} = False
               resolved FamilyParameter{} = False
               resolved (Named _ ts) = all resolved ts
-              resolved (Callable a b) = resolved a && resolved b
+              resolved (Callable a b) = all resolved (b:a)
               resolved (FamilyApplication f xs) = all resolved (f:xs)
               resolved (FamilyExpression domain _ body level) = resolved domain && resolved body && closed (Level level)
               resolved (OpenFamily _ xs _) = all resolved xs
@@ -1771,15 +1790,21 @@ expression inv stack env expected term = do
           foldl (\known (a,b) -> recoverInputs known a b) table (zip xs ys)
         recoverInputs table _ _ = table
     eliminate ty value [] = pure (ty,value)
-    eliminate (Callable domain out) value (e:rest) = do
-      argument <- liftEither (app e)
-      (_,actual) <- expression inv stack env (Just domain) argument
-      result <- case readIndex inv (runtimeBindings env) domain argument of
-        Right (Runtime _ ix) -> pure (applyCallback ix out)
-        _ | S.member (-1) (familyLocals out) -> abort Representation "Dependent callback requires a representable argument index"
-          | otherwise -> pure out
-      let applied = set "eliminations" (toJSON (array (get "eliminations" value) ++ [application actual])) value
-      eliminate result applied rest
+    eliminate (Callable domains out) value es@(_:_) = do
+      unless (length es >= length domains) (abort Representation "Partial callback application requires runtime closure construction")
+      (indices,actuals) <- foldM (\(prior,values) (patternType,e) -> do
+        let domain = applyCallback prior patternType
+        when (S.member (-1) (familyLocals domain)) (abort Representation "Dependent callback requires a representable argument index")
+        argument <- liftEither (app e)
+        (_,actual) <- expression inv stack env (Just domain) argument
+        let index = case readIndex inv (runtimeBindings env) domain argument of
+              Right (Runtime _ ix) -> ix
+              _ -> IndexArgument (length prior)
+        pure (prior ++ [index],values ++ [application actual])) ([],[]) (zip domains es)
+      let result = applyCallback indices out
+      when (S.member (-1) (familyLocals result)) (abort Representation "Dependent callback requires a representable argument index")
+      let applied = set "eliminations" (toJSON (array (get "eliminations" value) ++ actuals)) value
+      eliminate result applied (drop (length domains) es)
     eliminate ty@(Named owner args) value (e:rest) = do
       unless (get "tag" e == String "project") (abort Representation "Extra value application is unsupported")
       let f = string (get "symbol" e)
@@ -1901,7 +1926,7 @@ higherOrder inv stack env term = do
     independentAt bound = go S.empty
       where
         go locals (Named _ xs) = all (go locals) xs
-        go locals (Callable a b) = go locals a && go locals b
+        go locals (Callable a b) = all (go locals) (b:a)
         go _ Open{} = True
         go _ family@OpenFamily{} = closed family
         go locals (FamilyExpression domain slot body level) = go locals domain && go (S.insert slot locals) body && closed (Level level)
@@ -1912,7 +1937,7 @@ higherOrder inv stack env term = do
         check locals (IndexLocal slot) = S.member slot locals
         check _ (IndexInput i) = i >= 0 && i < bound
         check _ IndexCaptured{} = False
-        check _ IndexArgument = True
+        check _ IndexArgument{} = True
         check locals (IndexApply f x) = check locals f && check locals x
         check locals (IndexConstructor _ types values) = all (go locals) types && all (check locals) values
         check locals (IndexSuccessor value) = check locals value
