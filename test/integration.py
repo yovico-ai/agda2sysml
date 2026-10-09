@@ -21,6 +21,7 @@ from natural_values import verify_natural_values
 from tagged_sums import verify_tagged_sums
 from report_accounting import verify_report_accounting
 from native_callbacks import verify_native_callbacks
+from callable_fields import verify_callable_fields
 
 
 def check(condition, message):
@@ -302,6 +303,11 @@ models:
     sum_evidence = verify_tagged_sums(self_output)
     accounting_evidence = verify_report_accounting(self_output)
     native_callback_evidence = verify_native_callbacks(self_output)
+    callable_field_evidence = verify_callable_fields(self_output)
+    check(callable_field_evidence['operations'] == 4
+          and callable_field_evidence['comparisons'] >= 5000
+          and callable_field_evidence['invalidCasesRejected'] >= 10,
+          'supplied decision-tree or rule-list behavior was not verified')
     check(native_callback_evidence['operations'] == 8 and native_callback_evidence['comparisons'] >= 400
           and native_callback_evidence['invalidCasesRejected'] >= 15,
           'native unary callbacks lack complete results and invalid-binding checks')

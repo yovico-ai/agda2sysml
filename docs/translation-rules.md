@@ -238,8 +238,8 @@ matches. Forwarding into another unused parameter is allowed only after the
 callee and its dependencies pass the same analysis. Carrier parameters also
 require every constructor to leave the parameter unused. Unknown or partial
 applications, missing metadata, opaque bodies and unsupported case trees prevent
-omission. Stored function payloads remain outside the native callback-input rule;
-live unary callbacks use the rule below rather than being omitted.
+omission. Stored function payloads use the callable-member rule below;
+live unary callbacks use the callback-input rule rather than being omitted.
 
 An admitted unused parameter occupies a static bookkeeping slot during
 specialization and contributes no runtime SysML input. The original quantified
@@ -752,7 +752,7 @@ instantiations and dependent closure signatures remain unsupported. The target
 contains no closure objects or Agda evaluator.
 
 Known constructor arguments may also be specialized when their record or
-datatype contains callbacks and therefore has no native first-order carrier.
+datatype contains callbacks that have no admitted native carrier.
 The checked case tree selects the known constructor, retaining runtime cases
 and specializing recursive calls at their remaining known containers. Every
 free runtime value inside the container becomes an explicit capture input;
@@ -771,9 +771,10 @@ The self specification exercises this through `DecisionTree.choose`,
 `DecisionTree.guardedValue`, and `AlgebraicValues.constantDispatch`. Their
 outcomes are arbitrary domain values. Guard failure preserves the absent
 result, and constructor dispatch preserves the selected complete outcome.
-This supports concrete uses of the original evaluators; it does not admit
-their generic runtime function containers. Unknown containers, dependent
-function-valued result families, opaque or unchecked helper computations remain refusal
+This specialization rule supports concrete uses of the original evaluators.
+The separate callable-member rule below admits supported supplied containers.
+Unsupported unknown containers, dependent function-valued result families,
+opaque or unchecked helper computations remain refusal
 boundaries. Static callback expansion is bounded to 128 active helper frames;
 exhausting that bound refuses rather than assumes semantic preservation.
 
@@ -796,8 +797,9 @@ mechanism in [KerML 1.0 §7.4.9.4](https://www.omg.org/spec/KerML/1.0/PDF) and
 calculations in [SysML 2.0 §7.19](https://www.omg.org/spec/SysML/2.0/Language/PDF).
 
 This rule covers unary callbacks with supported first-order domains and results.
-Dependent or multiargument callbacks, runtime function containers, and arbitrary
-function-valued results remain outside its boundary. Existing static closure
+Dependent or multiargument callbacks and arbitrary function-valued results remain
+outside its boundary. Stored callbacks and their projections use the separate
+callable-member rule below. Existing static closure
 specialization continues to handle supported concrete callbacks separately.
 
 The self specification exercises the rule through `BooleanLowering.map`,
@@ -814,6 +816,45 @@ toolchain. The independent test oracle parses the emitted SysML, invokes supplie
 native calculations, and checks complete results and contracts; this is distinct
 from official Pilot execution. Pilot can also report incompatible callback
 bindings as warnings, so validator acceptance alone is not refusal evidence.
+
+## Native callable members
+
+Records and constructor payloads may contain supported unary, nondependent
+callbacks. A member is emitted as `ref calc` with explicit argument/result types,
+multiplicity and extent/refinement constraints. The containing carrier remains an
+immutable `attribute def`. The member is referential and nonvariable; it does not
+give the container occurrence identity, ownership, or a lifecycle. This follows
+the referential-feature requirement in
+[SysML 2.0 §7.7](https://www.omg.org/spec/SysML/2.0/Language/PDF) and data-value,
+construction, and feature-chain invocation semantics in
+[KerML 1.0 §§7.4.2 and 7.4.9](https://www.omg.org/spec/KerML/1.0/PDF).
+
+Native constructor bindings retain callable references. Record projections and
+constructor splits recover them with their checked signature; applications use
+native member invocation. Each callable member has a typed `.invoke` calculation
+that binds the receiver before invoking its member. This supplies the feature
+chain required by SysML syntax even when the caller computes the receiver, and
+retains the selected-branch guard and singleton-member precondition. A proper
+Agda projection's telescope ends at its
+record receiver, so any subsequent function arrow describes the member value.
+Returning that member uses `return ref calc` with its signature and contracts.
+Reconstruction forwards the same reference, and recursive helpers retain its
+lexical type bindings. Sum validity still requires exactly one value in each
+selected payload slot and no values in inactive slots.
+
+The original `DecisionTree.evaluate`, `evaluatePartial`, `select`, and
+`withFallback` operations exercise this rule on supplied runtime values.
+`select` preserves first-match priority and absent results; `withFallback`
+reconstructs trees while preserving their guards and effects. Outcomes remain
+complete domain values. The parsed-model tests cover these behaviors, malformed
+members, and incompatible bindings.
+
+The callback-input purity/totality obligation and Pilot execution limitation
+above also apply here. This rule does not construct new callbacks capturing
+runtime environments: `DecisionTree.normalize` and `restrict` remain unsupported.
+Dependent and multiargument callback fields, direct sequences of callables,
+and recursive carrier cycles through a callable's domain/result remain outside
+the rule. No generic Agda evaluator or callback table is emitted.
 
 ## Checked reduction and retained source dependencies
 

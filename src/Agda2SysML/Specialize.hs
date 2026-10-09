@@ -526,25 +526,32 @@ parameterSlot i (FamilyKind domains level) = FamilyParameter i domains level
 signature :: Inventory -> Value -> Either Refusal Signature
 signature inv d = do
   ty <- field inv "type" d
-  (kinds,ins,out) <- go [] [] [] ty
   p <- field inv "projection" d
+  let projectionEnd = case get "proper" p of
+        String _ -> Just (get "index" p)
+        _ -> Nothing
+  (kinds,ins,out) <- go projectionEnd [] [] [] ty
   dropCount <- if p == Null then Right 0 else subtract 1 <$> number (get "index" p)
   unless (dropCount >= 0 && dropCount <= length kinds + length ins) (refuse Syntax "Projection-like function drops too many arguments")
   pure (Signature (length kinds) ins out dropCount kinds)
   where
-    go env kinds ins ty = let t = get "term" ty in if get "tag" t == String "pi" then do
+    -- A proper projection ends at its record receiver. Remaining Pi binders
+    -- belong to the field value, rather than additional projection inputs.
+    -- readType then checks the full callable domain, result and independence.
+    go projectionEnd env kinds ins ty = let t = get "term" ty in
+      if get "tag" t == String "pi" && projectionEnd /= Just (toJSON (length kinds + length ins)) then do
       let dom = get "domain" t; cod = get "codomain" t
           extend x = if get "binds" cod == Bool False then env else x:env
       kind <- if null ins && toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
         then pure (Just UnusedKind) else parameterKind inv env (get "type" dom)
       case kind of
-        Just k | null ins -> go (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
+        Just k | null ins -> go projectionEnd (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
         _ -> do
           let modality = get "info" dom
           unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
             (refuse Semantics "Erased or irrelevant value argument requires a separate representation rule")
           a <- readType inv env (get "term" (get "type" dom))
-          go (extend (Just (Runtime a (IndexInput (length ins))))) kinds (ins ++ [a]) (get "body" cod)
+          go projectionEnd (extend (Just (Runtime a (IndexInput (length ins))))) kinds (ins ++ [a]) (get "body" cod)
       else (kinds,ins,) <$> readType inv env t
 
 substituteLevel :: [Type] -> LevelExpr -> Either Refusal LevelExpr
@@ -1112,8 +1119,6 @@ ensureType inv stack ty@(Named s allArgs) = do
       sig <- liftEither (signature inv cd)
       unless (parameters sig == n) (abort Syntax "Constructor parameter telescope mismatch")
       ins <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
-      when (any (\t -> case t of Callable{} -> True; _ -> False) ins)
-        (abort Representation "Runtime callable fields require a separate representation rule")
       out <- liftEither (instantiate (output sig))
       unless (typeKey out == typeKey ty && case out of
         Named _ xs -> length xs == n + length indices; _ -> False)
@@ -1180,6 +1185,7 @@ nonRecursiveTemplate inv root = inspect (S.singleton root) root
       _ -> True
     walk seen (Named s xs) = all (walk seen) xs && s /= root && (S.member s seen || inspect (S.insert s seen) s)
     walk seen (FamilyApplication f xs) = all (walk seen) (f:xs)
+    walk seen (Callable a b) = walk seen a && walk seen b
     walk seen (Runtime domain _) = walk seen domain
     walk _ _ = True
 -- Signatures can be the only use of an index calculation. Clone its checked
@@ -1704,6 +1710,7 @@ higherOrder inv stack env term = do
     independentAt bound = go S.empty
       where
         go locals (Named _ xs) = all (go locals) xs
+        go locals (Callable a b) = go locals a && go locals b
         go _ Open{} = True
         go _ family@OpenFamily{} = closed family
         go locals (FamilyExpression domain slot body level) = go locals domain && go (S.insert slot locals) body && closed (Level level)

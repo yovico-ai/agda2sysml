@@ -178,13 +178,21 @@ an expression or feature reference is **unevaluated**, not a successful value.
 Evaluate small supported examples and inspect the returned result explicitly.
 
 Native unary callback inputs use `in calc` and invoke the bound calculation
-directly. Pilot 0.58.0 accepts these models but may leave callback invocations
+directly. Stored callable members use `ref calc` inside immutable attribute
+definitions. The generated `DecisionTree.evaluate`, `evaluatePartial`, `select`,
+and `withFallback` accept supplied trees and rule lists, including their callable
+members. Inspect the constructor helpers, selected payloads, member signatures,
+and recursive calculation bodies in the model. Reconstruction retains the
+supplied callable references and full result values.
+
+Pilot 0.58.0 accepts these models but may leave callback invocations
 unevaluated, including forwarded bindings whose direct calculations evaluate
 successfully. Inspect their signatures, bodies and contracts interactively;
 do not treat an unresolved `InvocationExpression` as the callback's result.
 The independent parsed-model tests cover these operations; they are not evidence
 that Pilot can execute the same bindings. See the
-[callback rule and limitations](translation-rules.md#native-unary-callback-inputs).
+[callback rule and limitations](translation-rules.md#native-unary-callback-inputs)
+and [callable members](translation-rules.md#native-callable-members).
 
 The project's independent tests parse emitted SysML and compare complete results
 for supported algorithms, including recursive and parameterized ones. That
