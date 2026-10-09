@@ -632,6 +632,32 @@ and universe meanings. Recursive calls reuse the same closure template; changing
 instantiations and dependent closure signatures remain unsupported. The target
 contains no closure objects or Agda evaluator.
 
+Known constructor arguments may also be specialized when their record or
+datatype contains callbacks and therefore has no native first-order carrier.
+The checked case tree selects the known constructor, retaining runtime cases
+and specializing recursive calls at their remaining known containers. Every
+free runtime value inside the container becomes an explicit capture input;
+capture values do not enter the specialization identity. Helpers retain the
+type bindings needed by their captures, ordinary inputs, and full results.
+First-order container indices may refer to earlier explicit inputs. Their
+positions are transported into the generated telescope. A known constructor
+can establish an index equality; that equality is retained as a native
+precondition as well as used for branch checking. Invalid bindings therefore
+remain rejected. Boolean/finite lowering and index-helper expansion cannot
+silently discard these additional preconditions.
+Nested constructor indices receive their declared type context, including
+empty schemas whose element types cannot be inferred from payloads.
+
+The self specification exercises this through `DecisionTree.choose`,
+`DecisionTree.guardedValue`, and `AlgebraicValues.constantDispatch`. Their
+outcomes are arbitrary domain values. Guard failure preserves the absent
+result, and constructor dispatch preserves the selected complete outcome.
+This supports concrete uses of the original evaluators; it does not admit
+their generic runtime function containers. Unknown containers, dependent
+function-valued result families, opaque or unchecked helper computations remain refusal
+boundaries. Static callback expansion is bounded to 128 active helper frames;
+exhausting that bound refuses rather than assumes semantic preservation.
+
 ## Checked reduction and retained source dependencies
 
 Demand-driven reduction follows transparent, terminating checked definitions,

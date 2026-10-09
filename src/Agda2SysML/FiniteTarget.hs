@@ -84,6 +84,8 @@ domain inv d = do
 
 function :: Inventory -> M.Map Text Domain -> Value -> Either Refusal (Domain,Int,Expression)
 function inv domains d = do
+  unless (null (array (get "closureIndexEquations" d)))
+    (refuse Representation "Static container index constraints require algebraic lowering")
   unless (length (array (get "sourceSyntax" d)) == 1) (refuse Syntax "No uniquely anchored source definition")
   ty <- field inv "type" d
   (inputs,result) <- telescope ty

@@ -309,6 +309,8 @@ builtin inv key = string (get key (get "builtins" (document inv)))
 
 booleanFunction :: Inventory -> Value -> Either Refusal (Int,Expr)
 booleanFunction inv def = do
+  unless (null (array (get "closureIndexEquations" def)))
+    (refuse Representation "Static container index constraints require algebraic lowering")
   ty <- field inv "type" def
   names <- telescope ty
   tree <- field inv "compiled" def

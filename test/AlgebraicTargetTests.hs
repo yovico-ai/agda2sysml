@@ -1429,7 +1429,36 @@ closureChecks base = do
             [variable 3 [],variable 2 [],variable 1 [],invoke (variable 2 []) [variable 0 []]] []))]
       iterated = safe $ operation "iterated" ["Bool","Nat","Bool"] "Bool" $ done 3
         (call "iterate" [get "term" (named "Bool"),call "xor" [variable 2 []] [],variable 1 [],variable 0 []] [])
-      additions = [applyOnce,xor,caller,lambdaCaller,nat,zeroDef,sucDef,iterateFn,iterated]
+      callbacks = set "induction" (String "Nothing") $ set "constructor" (String "callbacks")
+        $ set "fields" (toJSON (["callback"] :: [Text])) (declaration "Callbacks" "record" (universeAt (level 0)))
+      callbackCtor = set "family" (String "Callbacks") $ declaration "callbacks" "constructor"
+        (fn (fn (named "Bool") (named "Bool")) (named "Callbacks"))
+      runCallback = safe $ operation "runCallback" ["Callbacks","Bool"] "Bool"
+        (set "eta" (object ["constructor" .= ("callbacks" :: Text),"fields" .= (["callback"] :: [Text])
+          ,"branch" .= object ["arity" .= (1 :: Int),"tree" .= done 2 (invoke (variable 1 []) [variable 0 []])]]) (split 0 []))
+      recordCaller = safe $ operation "recordCaller" ["Bool","Bool"] "Bool" $ done 2
+        (call "runCallback" [constructor "callbacks" [call "xor" [variable 1 []] []],variable 0 []] [])
+      treeType = set "constructors" (toJSON (["leaf","branch"] :: [Text])) (declaration "CallbackTree" "datatype" (universeAt (level 0)))
+      leafCtor = set "family" (String "CallbackTree") $ declaration "leaf" "constructor"
+        (fn (fn (named "Bool") (named "Bool")) (named "CallbackTree"))
+      branchCtor = set "family" (String "CallbackTree") $ declaration "branch" "constructor"
+        (signature [fn (named "Bool") (named "Bool"),named "CallbackTree",named "CallbackTree"] (named "CallbackTree"))
+      -- The case tree retains a runtime predicate result, while callback
+      -- nodes are known. This cannot be solved by head reduction alone.
+      evaluateTree = safe $ operation "evaluateTree" ["CallbackTree","Bool"] "Bool" $ split 0
+        [("leaf",1,done 2 (invoke (variable 1 []) [variable 0 []]))
+        ,("branch",3,done 4 (call "selectTree" [invoke (variable 3 []) [variable 0 []]
+          ,variable 2 [],variable 1 [],variable 0 []] []))]
+      selectTree = safe $ operation "selectTree" ["Bool","CallbackTree","CallbackTree","Bool"] "Bool" $ split 0
+        [("true",0,done 3 (call "evaluateTree" [variable 2 [],variable 0 []] []))
+        ,("false",0,done 3 (call "evaluateTree" [variable 1 [],variable 0 []] []))]
+      treeCaller = safe $ operation "treeCaller" ["Bool","Bool","Bool"] "Bool" $ done 3
+        (call "evaluateTree" [constructor "branch" [call "xor" [variable 2 []] []
+          ,constructor "leaf" [call "xor" [variable 1 []] []]
+          ,constructor "leaf" [object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= variable 0 []]]]]
+          ,variable 0 []] [])
+      additions = [applyOnce,xor,caller,lambdaCaller,nat,zeroDef,sucDef,iterateFn,iterated
+        ,callbacks,callbackCtor,runCallback,recordCaller,treeType,leafCtor,branchCtor,evaluateTree,selectTree,treeCaller]
       added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
       registry = set "nat" (String "Nat") $ set "zero" (String "zero") $ set "suc" (String "suc") (get "builtins" (document base))
       inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
@@ -1441,12 +1470,66 @@ closureChecks base = do
       shapes = fst (A.discover expanded finite)
       calculations = A.functions expanded finite shapes
       table = M.mapMaybe (either (const Nothing) Just) calculations
-  check (M.null (P.failures prepared)) (show (P.failures prepared))
-  forM_ ["closureCaller","lambdaCaller"] $ \name -> do
+  check (all (`M.notMember` P.failures prepared) ["closureCaller","lambdaCaller","iterated","recordCaller","treeCaller"]) (show (P.failures prepared))
+  forM_ ["closureCaller","lambdaCaller","recordCaller"] $ \name -> do
     calculation <- either (fail . show) pure (calculations M.! name)
     forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument ->
       check (evalWith table [B captured,B argument] (A.body calculation) == B (captured /= argument)) "closure specialization lost a capture or argument"
   check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 2) "closure templates were merged or specialized by runtime value"
+  treeCalculation <- either (fail . show) pure (calculations M.! "treeCaller")
+  forM_ [False,True] $ \guardCapture -> forM_ [False,True] $ \effectCapture -> forM_ [False,True] $ \argument ->
+    check (evalWith table [B guardCapture,B effectCapture,B argument] (A.body treeCalculation)
+      == B (if guardCapture /= argument then effectCapture /= argument else argument))
+      "static tree specialization changed predicate/effect captures or branch choice"
+  check (M.member "runCallback" (P.failures prepared) && M.member "evaluateTree" (P.failures prepared))
+    "unknown runtime callbacks were admitted"
+  let monomorphicInventory = inv {modelRequirements = M.singleton "monomorphic"
+        (S.fromList [("recordCaller","behavior"),("runCallback","behavior"),("xor","behavior"),("Callbacks","structure"),("Bool","structure")])}
+      monomorphicPrepared = P.prepare monomorphicInventory
+      monomorphicExpanded = P.inventory monomorphicPrepared
+      monomorphicShapes = fst (A.discover monomorphicExpanded finite)
+      monomorphicCalculations = A.functions monomorphicExpanded finite monomorphicShapes
+  check (M.notMember "recordCaller" (P.failures monomorphicPrepared)
+    && either (const False) (const True) (monomorphicCalculations M.! "recordCaller"))
+    "a monomorphic callback record incorrectly depended on an unrelated generic template"
+  let malformed = inv {declarations = M.adjust (set "compiled" (done 2
+        (call "runCallback" [constructor "leaf" [lambda],variable 0 []] []))) "recordCaller" (declarations inv)}
+  check (M.member "recordCaller" (P.failures (P.prepare malformed))) "wrong-carrier static constructor was admitted"
+  let altered declarationName change = inv {declarations = M.adjust change declarationName (declarations inv)}
+      badArity = altered "recordCaller" (set "compiled" (done 2
+        (call "runCallback" [constructor "callbacks" [],variable 0 []] [])))
+  check (M.member "recordCaller" (P.failures (P.prepare badArity))) "static record payload arity was guessed"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null] $ \change ->
+    check (M.member "recordCaller" (P.failures (P.prepare (altered "runCallback" change))))
+      "opaque, unchecked or missing callback computation was admitted"
+  let bindingEvidence = set "closureSpecialization" (object ["types" .= map P.typeValue
+        [P.Open 2 0,P.OpenFamily 1 [P.Open 0 0] 0]]) (object [])
+  check (P.nativeParameters bindingEvidence == [0,2] && map fst (P.nativeFamilies bindingEvidence) == [1])
+    "generated callback signature lost open capture/result bindings"
+  let constrained = set "closureIndexEquations" (toJSON [object ["domain" .= named "Bool"
+        ,"left" .= variable 0 [],"right" .= constructor "true" []]])
+        (safe $ operation "constrained" ["Bool"] "Bool" (done 1 (variable 0 [])))
+      constrainedInv = inv {declarations = M.insert "constrained" constrained (declarations inv)
+        ,modelRequirements = M.singleton "constraint" (S.singleton ("constrained","behavior"))}
+      constrainedOutput = T.generate constrainedInv
+  check (isLeft (F.function constrainedInv finite constrained)) "finite lowering discarded a static container precondition"
+  check ("assert constraint" `Text.isInfixOf` T.modelText constrainedOutput
+    && " == true" `Text.isInfixOf` T.modelText constrainedOutput)
+    "Boolean lowering discarded a static container precondition"
+  let onlyInConstraint = set "closureIndexEquations" (toJSON [object ["domain" .= named "Bool"
+        ,"left" .= call "xor" [variable 1 [],variable 0 []] [],"right" .= constructor "true" []]])
+        (safe $ operation "constrained" ["Bool","Bool"] "Bool" (done 2 (variable 0 [])))
+      refs names = object ["symbols" .= (names :: [Text])]
+      selectedDocument = set "models" (object ["constraint" .= object ["state" .= refs ["Bool"]
+        ,"commands" .= refs ["Bool"],"transition" .= object ["entry" .= refs ["constrained"]]]]) (document inv)
+      selectedInventory = constrainedInv {document = selectedDocument
+        ,declarations = M.insert "constrained" onlyInConstraint (declarations inv)
+        ,modelRequirements = M.singleton "constraint" (S.fromList [("Bool","structure"),("constrained","behavior")
+          ,("xor","behavior"),("applyOnce","behavior")])}
+      selectedPrepared = P.prepare selectedInventory
+  check (S.member "xor" (P.runtimeClosure selectedPrepared))
+    ("a computation used only by a static container precondition disappeared from the runtime closure: "
+      ++ show (P.failures selectedPrepared,P.runtimeClosure selectedPrepared))
 
   iteration <- either (fail . show) pure (calculations M.! "iterated")
   forM_ [False,True] $ \captured -> forM_ [0..7] $ \n -> forM_ [False,True] $ \value ->

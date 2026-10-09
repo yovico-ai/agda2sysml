@@ -163,6 +163,9 @@ readLevelTerm inv env t = case string (get "tag" t) of
 -- NoAbs codomains retain the previous context; Abs codomains extend it.
 readType :: Inventory -> [Maybe Type] -> Value -> Either Refusal Type
 readType inv env t = case string (get "tag" t) of
+  "native-open-type" -> Open <$> number (get "slot" t) <*> natural (get "universe" t)
+  "native-open-family" -> OpenFamily <$> number (get "slot" t)
+    <*> traverse (readType inv env) (array (get "domains" t)) <*> natural (get "universe" t)
   "level" -> Level <$> readLevelTerm inv env t
   "variable" -> do
     i <- number (get "index" t)
@@ -290,7 +293,8 @@ readConstructorIndex inv env expected term = do
       completed <- complete sig known
       let args = [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
       concrete <- replaceInputs prior <$> substitute args domain
-      actual <- if hasParameter concrete then readType inv env value else readIndex inv env concrete value
+      let contextualConstructor = get "tag" value == String "constructor" && case concrete of Named{} -> True; _ -> False
+      actual <- if hasParameter concrete && not contextualConstructor then readType inv env value else readIndex inv env concrete value
       case actual of
         Runtime actualDomain ix -> do
           next <- unify completed domain actualDomain
@@ -555,7 +559,8 @@ typeKey (FamilyApplication family _) = typeKey family
 -- Parameters remain distinct even when two native classifiers have equal
 -- extents. These slots are local to a calculation/container, not global types.
 nativeParameters :: Value -> [Int]
-nativeParameters = S.toAscList . slots . get "specializationArguments"
+nativeParameters d = S.toAscList (slots (get "specializationArguments" d)
+  `S.union` slots (get "types" (get "closureSpecialization" d)))
   where
     slots (Object o) = case KM.lookup "openParameter" o of
       Just v -> either (const S.empty) S.singleton (number v)
@@ -564,7 +569,8 @@ nativeParameters = S.toAscList . slots . get "specializationArguments"
     slots _ = S.empty
 
 nativeFamilies :: Value -> [(Int,Text)]
-nativeFamilies = M.toAscList . families . get "specializationArguments"
+nativeFamilies d = M.toAscList (families (get "specializationArguments" d)
+  `M.union` families (get "types" (get "closureSpecialization" d)))
   where
     families (Object o) = let children = M.unions (map families (KM.elems o)) in
       case (KM.lookup "openFamily" o,KM.lookup "familySymbol" o) of
@@ -613,7 +619,28 @@ prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
             | otherwise = Result expanded entries errors roots runtime open
   where
     needs = required inv
-    active = any (\(s,r) -> r `elem` ["structure","behavior"] && generic s) (S.toList needs)
+    active = any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
+      || r == "behavior" && callbackSignature s) (S.toList needs)
+    callbackSignature s = case M.lookup s (declarations inv) >>= either (const Nothing) Just . field inv "type" of
+      Just ty -> callableDomains S.empty ty
+      Nothing -> False
+    callableDomains seen ty = let t = get "term" ty in
+      get "tag" t == String "pi" &&
+        (callableCarrier seen (get "term" (get "type" (get "domain" t)))
+          || callableDomains seen (get "body" (get "codomain" t)))
+    callableCarrier seen term
+      | get "tag" term == String "pi" = True
+      | get "tag" term == String "definition" =
+          let name = string (get "symbol" term) in not (S.member name seen) && case M.lookup name (declarations inv) of
+            Just d | get "kind" d `elem` [String "record",String "datatype"] ->
+              let sourceField k = either (const Null) id (field inv k d)
+                  constructors = if get "kind" d == String "record" then [string (sourceField "constructor")]
+                    else map string (array (sourceField "constructors"))
+              in any (\c -> case M.lookup c (declarations inv) >>= either (const Nothing) Just . field inv "type" of
+                Just ty -> callableDomains (S.insert name seen) ty
+                Nothing -> False) constructors
+            _ -> maybe False (callableCarrier (S.insert name seen) . fst) (Reduction.reduceHead inv term)
+      | otherwise = False
     generic s = case M.lookup s (declarations inv) of
       Nothing -> False
       Just d -> case field inv "type" d of
@@ -664,7 +691,7 @@ prepare inv | not active = Result inv [] M.empty roots S.empty M.empty
     -- Follow the specialized semantic graph separately for each model. Two
     -- models using one template at different types must not acquire each
     -- other's concrete obligations merely because the source symbol matches.
-    semanticFields = ["type","compiled","constructors","constructor","fields","projection"]
+    semanticFields = ["type","compiled","constructors","constructor","fields","projection","closureIndexEquations"]
     refs (String s) = S.singleton s
     refs (Object o) = S.unions (map refs (KM.elems o))
     refs (Array xs) = S.unions (map refs (foldr (:) [] xs))
@@ -1186,15 +1213,38 @@ higherOrder inv stack env term = do
   rawType <- liftEither (field inv "type" d)
   args <- liftEither (traverse app (array (get "eliminations" term)))
   (slots,out) <- telescopeSlots rawType args
-  let closures = [v | (ClosureSlot,v) <- slots]
-  unless (not (null closures)) (abort Representation "No concrete function argument")
+  let closures = [v | (slot,v) <- slots, case slot of ValueSlot{} -> False; StaticSlot -> False; _ -> True]
+  unless (not (null closures)) (abort Representation "No concrete function or aggregate argument")
   let free = S.toAscList (S.fromList (concatMap Reduction.freeVariables closures))
   captures <- fmap concat $ forM free $ \i -> do
     binding <- liftEither (at i env)
     pure $ case binding of Dynamic t -> [(i,t)]; Static _ -> []
   let captureTypes = map snd captures
       runtimeTypes = [t | (ValueSlot t,_) <- slots]
-      allTypes = captureTypes ++ runtimeTypes
+      equations = concat [eqs | (AggregateSlot eqs,_) <- slots]
+      refineIndex index = foldl (\current (_,left,right) -> if current == left then right else current) index equations
+      refine = mapIndices (refineIndex . descend)
+      descend (IndexConstructor c ts xs) = IndexConstructor c (map refine ts) (map (refineIndex . descend) xs)
+      descend (IndexSuccessor x) = IndexSuccessor (refineIndex (descend x))
+      descend (IndexCall f ts xs) = IndexCall f (map refine ts) (map (refineIndex . descend) xs)
+      descend (IndexProject f ts x) = IndexProject f (map refine ts) (refineIndex (descend x))
+      descend x = x
+      callerPosition i = length (filter isDynamic (drop (i+1) env))
+      capturePositions = M.fromList [(callerPosition i,j) | (j,(i,_)) <- zip [0..] captures]
+      valuePositions = M.fromListWith min [(callerPosition i,length captures+j)
+        | (j,(_,v)) <- zip [0..] [(t,v) | (ValueSlot t,v) <- slots]
+        ,get "tag" v == String "variable",null (array (get "eliminations" v))
+        ,Right i <- [number (get "index" v)]]
+      positions = M.union capturePositions valuePositions
+      rebase = mapIndices rename
+      rename (IndexInput i) = maybe (IndexCaptured (-1)) IndexInput (M.lookup i positions)
+      rename (IndexConstructor c ts xs) = IndexConstructor c (map rebase ts) (map rename xs)
+      rename (IndexSuccessor x) = IndexSuccessor (rename x)
+      rename (IndexCall f ts xs) = IndexCall f (map rebase ts) (map rename xs)
+      rename (IndexProject f ts x) = IndexProject f (map rebase ts) (rename x)
+      rename x = x
+      allTypes = map (rebase . refine) (captureTypes ++ runtimeTypes)
+      resultType = rebase (refine out)
       n = length allTypes
       replacements depth = [case b of
           Static t -> get "term" (sourceType t)
@@ -1203,22 +1253,38 @@ higherOrder inv stack env term = do
             Nothing -> Null
         | (i,b) <- zip [0..] env]
       move depth v = maybe (abort Syntax "Closure substitution failed") pure (Reduction.substituteTerms (replacements depth) v)
-  unless (all independent (out:allTypes)) (abort Representation "Dependent higher-order closure signature")
+  unless (and [independentAt i t | (i,t) <- zip [0..] allTypes] && independentAt n resultType)
+    (abort Representation "Callback signature index must refer to an earlier explicit input")
   canonical <- forM slots $ \(slot,v) -> case slot of
-    ValueSlot t -> pure (object ["input" .= typeValue t])
+    ValueSlot t -> pure (object ["input" .= typeValue (rebase (refine t))])
     _ -> Reduction.canonicalTerm <$> move (length captures) v
-  let key = source <> "@closure-" <> digest (BL.toStrict (encode (map typeValue captureTypes,canonical)))
+  let equationKey = [[typeValue (rebase (Runtime domain left)),typeValue (rebase (Runtime domain right))]
+        | (domain,left,right) <- equations]
+      key = source <> "@closure-" <> digest (BL.toStrict (encode (map typeValue (take (length captures) allTypes),canonical,equationKey)))
       shown = string (get "displayName" d) <> "<closure " <> T.takeEnd 12 key <> ">"
       variableAt i = Reduction.variable (n-1-i)
+  unless (length stack < 128) (abort Representation "Static callback specialization depth exhausted")
   sourceEnv <- snd <$> foldM (\(position,values) (slot,v) -> case slot of
     ValueSlot _ -> pure (position+1,values ++ [variableAt position])
     _ -> do value <- move n v; pure (position,values ++ [value])) (length captures,[]) slots
   tree <- liftEither (field inv "compiled" d)
-  body <- maybe (abort Representation "Cannot replay higher-order case bindings") pure (Reduction.rewriteTree n sourceEnv tree)
+  body <- maybe (abort Representation "Cannot replay higher-order case bindings") pure (Reduction.rewriteTree inv n sourceEnv tree)
+  nativeEquations <- forM equations $ \(domain,left,right) -> do
+    let ty = rebase domain
+        rebased index = case rebase (Runtime domain index) of Runtime _ result -> result; _ -> index
+        l = rebased left; r = rebased right
+    ensureType inv [] ty
+    ensureIndex inv l
+    ensureIndex inv r
+    unless (independentAt n (Runtime ty l) && independentAt n (Runtime ty r))
+      (abort Representation "Static container index equality has an unbound input")
+    pure (object ["domain" .= asType n ty,"left" .= indexTerm n l,"right" .= indexTerm n r])
   let generated = set "name" (String key) $ set "displayName" (String shown)
-        $ set "type" (sourceArrow allTypes out) $ set "compiled" body
+        $ set "type" (sourceArrow allTypes resultType) $ set "compiled" body
         $ set "higherOrderOrigin" (String source)
-        $ set "closureSpecialization" (object ["origin" .= source,"arguments" .= canonical,"captures" .= map typeValue captureTypes]) d
+        $ set "closureIndexEquations" (toJSON nativeEquations)
+        $ set "closureSpecialization" (object ["origin" .= source,"arguments" .= canonical
+            ,"captures" .= map typeValue (take (length captures) allTypes),"types" .= map typeValue (resultType:allTypes)]) d
       extended = inv {declarations = M.insert key generated (declarations inv)}
   ensureFunction extended stack key []
   modify' $ \st -> st {recorded = M.insert key (Instance source [] key) (recorded st)}
@@ -1226,19 +1292,47 @@ higherOrder inv stack env term = do
   values <- forM [(t,v) | (ValueSlot t,v) <- slots] $ \(t,v) -> snd <$> expression inv stack env (Just t) v
   pure (out,object ["tag" .= ("definition" :: Text),"symbol" .= key,"eliminations" .= map application (captureValues ++ values)])
   where
-    sourceType (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
-      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceType) args]]
-    sourceType (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
+    sourceType = sourceTypeAt 0
+    sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
+      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
+    sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
+      ,"slot" .= slot,"universe" .= level]]
+    sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
+      ,"slot" .= slot,"domains" .= map (get "term" . sourceTypeAt depth) domains,"universe" .= level]]
+    sourceTypeAt depth (Runtime _ index) = object ["term" .= sourceIndex depth index]
+    sourceTypeAt _ (Level (LevelExpr n terms)) = object ["term" .= object ["tag" .= ("level" :: Text)
       ,"level" .= object ["constant" .= n,"maximum" .=
         [object ["offset" .= offset,"term" .= Reduction.variable i] | (i,offset) <- M.toAscList terms]]]]
-    sourceType t = asType 0 t
-    sourceArrow [] out = sourceType out
-    sourceArrow (t:ts) out = object ["term" .= object ["tag" .= ("pi" :: Text)
-      ,"domain" .= object ["type" .= sourceType t,"info" .= info]
-      ,"codomain" .= object ["binds" .= False,"body" .= sourceArrow ts out]]]
-    independent (Named _ xs) = all independent xs
-    independent levelType@Level{} = closed levelType
-    independent _ = False
+    sourceTypeAt depth t = asType depth t
+    sourceIndex depth (IndexConstructor c _ values) = object ["tag" .= ("constructor" :: Text)
+      ,"symbol" .= c,"eliminations" .= map (application . sourceIndex depth) values]
+    sourceIndex depth (IndexNatural value) = indexTerm depth (IndexNatural value)
+    sourceIndex depth (IndexSuccessor value) = object ["tag" .= ("constructor" :: Text)
+      ,"symbol" .= builtin inv "suc","eliminations" .= [application (sourceIndex depth value)]]
+    sourceIndex depth (IndexCall f types values) = object ["tag" .= ("definition" :: Text),"symbol" .= f
+      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ map (sourceIndex depth) values)]
+    sourceIndex depth (IndexProject f types receiver) = object ["tag" .= ("definition" :: Text),"symbol" .= f
+      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ [sourceIndex depth receiver])]
+    sourceIndex depth index = indexTerm depth index
+    sourceArrow = go 0
+      where
+        go depth [] out = sourceTypeAt depth out
+        go depth (t:ts) out = object ["term" .= object ["tag" .= ("pi" :: Text)
+          ,"domain" .= object ["type" .= sourceTypeAt depth t,"info" .= info]
+          ,"codomain" .= object ["binds" .= True,"body" .= go (depth+1) ts out]]]
+    independentAt bound (Named _ xs) = all (independentAt bound) xs
+    independentAt _ Open{} = True
+    independentAt _ family@OpenFamily{} = closed family
+    independentAt bound (Runtime domain index) = independentAt bound domain && supportedIndex bound index
+    independentAt _ levelType@Level{} = closed levelType
+    independentAt _ _ = False
+    supportedIndex bound (IndexInput i) = i >= 0 && i < bound
+    supportedIndex _ IndexCaptured{} = False
+    supportedIndex bound (IndexConstructor _ types values) = all (independentAt bound) types && all (supportedIndex bound) values
+    supportedIndex bound (IndexSuccessor value) = supportedIndex bound value
+    supportedIndex bound (IndexCall _ types values) = all (independentAt bound) types && all (supportedIndex bound) values
+    supportedIndex bound (IndexProject _ types receiver) = all (independentAt bound) types && supportedIndex bound receiver
+    supportedIndex _ IndexNatural{} = True
     telescopeSlots ty [] = do
       out <- liftEither (readType inv (runtimeBindings env) (get "term" ty))
       pure ([],out)
@@ -1250,12 +1344,57 @@ higherOrder inv stack env term = do
             Nothing -> rawDomain
           cod = get "codomain" arrowTerm
       unless (get "tag" arrowTerm == String "pi") (abort Representation "Overapplied higher-order helper")
-      slot <- if isUniverse dom || isLevelType inv dom then pure StaticSlot
-        else if get "tag" (get "term" dom) == String "pi" then pure ClosureSlot
-        else ValueSlot <$> liftEither (readType inv (runtimeBindings env) (get "term" dom))
+      (slot,argument) <- if isUniverse dom || isLevelType inv dom then pure (StaticSlot,value)
+        else if get "tag" (get "term" dom) == String "pi" then pure (ClosureSlot,value)
+        else do
+          ty <- liftEither (readType inv (runtimeBindings env) (get "term" dom))
+          -- A checked aggregate that has no native first-order carrier may
+          -- still be a compile-time argument. Retain all of its free runtime
+          -- values as captures; never admit an unknown runtime aggregate.
+          before <- gets id
+          admitted <- (ensureType inv [] ty >> pure True) `catchError` \_ -> pure False
+          modify' (const before)
+          let concrete = maybe value fst (Reduction.reduceHead inv value)
+              knownConstructor = get "tag" concrete == String "constructor" && case ty of
+                Named owner _ -> maybe False ((== String owner) . get "family")
+                  (M.lookup (string (get "symbol" concrete)) (declarations inv))
+                _ -> False
+          if admitted && not knownConstructor then pure (ValueSlot ty,value) else do
+            unless (get "tag" concrete == String "constructor")
+              (abort Representation "Higher-order aggregate must have a statically known constructor")
+            cd <- definition inv (string (get "symbol" concrete))
+            unless (case ty of Named owner _ -> get "family" cd == String owner; _ -> False)
+              (abort Semantics "Static aggregate constructor has the wrong carrier")
+            actual <- constructorResult ty cd concrete
+            eqs <- case (ty,actual) of
+              (Named owner expectedArgs,Named actualOwner actualArgs) | owner == actualOwner && length expectedArgs == length actualArgs ->
+                fmap concat $ forM (zip expectedArgs actualArgs) $ \(expectedArg,actualArg) -> case (expectedArg,actualArg) of
+                  (Runtime domain left,Runtime actualDomain right) | domain == actualDomain ->
+                    pure [(domain,left,right) | left /= right]
+                  _ | expectedArg == actualArg -> pure []
+                  _ -> abort Semantics "Static aggregate parameters do not match its declared carrier"
+              _ -> abort Semantics "Static aggregate result does not match its declared carrier"
+            pure (AggregateSlot eqs,concrete)
       body <- if get "binds" cod == Bool False then pure (get "body" cod)
         else maybe (abort Syntax "Higher-order telescope substitution failed") pure (Reduction.substituteTerms [value] (get "body" cod))
       (slots,out) <- telescopeSlots body rest
-      pure ((slot,value):slots,out)
+      pure ((slot,argument):slots,out)
+    constructorResult (Named _ expectedArgs) cd concrete = do
+      count <- liftEither (field inv "parameters" cd >>= number)
+      ctorType <- liftEither (field inv "type" cd)
+      let supplied = take count expectedArgs
+      unless (length supplied == count) (abort Syntax "Static aggregate parameter arity mismatch")
+      payloads <- liftEither (traverse app (array (get "eliminations" concrete)))
+      result <- foldM consume ctorType (map (get "term" . sourceTypeAt (length (filter isDynamic env))) supplied ++ payloads)
+      unless (get "tag" (get "term" result) /= String "pi") (abort Syntax "Static aggregate payload arity mismatch")
+      liftEither (readType inv (runtimeBindings env) (get "term" result))
+      where
+        consume ty value = do
+          let t = get "term" ty; cod = get "codomain" t
+          unless (get "tag" t == String "pi") (abort Syntax "Overapplied static aggregate constructor")
+          if get "binds" cod == Bool False then pure (get "body" cod)
+          else maybe (abort Syntax "Static aggregate constructor substitution failed") pure
+            (Reduction.substituteTerms [value] (get "body" cod))
+    constructorResult _ _ _ = abort Representation "Static aggregate carrier must be named"
 
-data CallSlot = StaticSlot | ClosureSlot | ValueSlot Type
+data CallSlot = StaticSlot | ClosureSlot | AggregateSlot [(Type,IndexExpr,IndexExpr)] | ValueSlot Type

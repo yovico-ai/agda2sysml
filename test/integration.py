@@ -15,6 +15,7 @@ from open_parameters import verify_open_parameters
 from dependent_evidence import verify_dependent_evidence
 from recursive_core import verify_recursive_core
 from structured_indices import verify_structured_indices
+from callbacks import verify_callbacks
 
 
 def check(condition, message):
@@ -304,6 +305,9 @@ models:
           and structured_evidence["invalidSchemasRejected"] == 17
           and structured_evidence["repeatedPositions"] > 1000 and structured_evidence["reorderedBindings"] == 3,
           "structured indices lack ordered schemas, complete members, or invalid-index refusals")
+    callback_evidence = verify_callbacks(self_output)
+    check(callback_evidence == {'comparisons': 218, 'invalidCasesRejected': 5, 'operations': 3},
+          "callback consumers lack complete outcomes and binding/schema refusals")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
           and self_manifest["selectionProfile"] == "declarations", "default generation required a hidden mapping")
