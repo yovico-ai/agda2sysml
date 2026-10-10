@@ -286,6 +286,7 @@ main = do
   statementModel <- equalityStatementChecks inv
   contextualModel <- contextualMembershipChecks inv
   moduleAliasChecks inv
+  interleavedParameterChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
   options <- getArgs
@@ -2158,6 +2159,42 @@ constructorFibreChecks = do
           [A.Input 0,indexedToken "indexedEmpty" [("indexedEmpty.payload0",A.Input 0)]] ]}
   check (isLeft (A.function inv M.empty (M.insert "IndexedProof" indexedInhabited indexedShapes) indexedDecoder))
     "indexed constructor tag separation ignored an inhabitant of the empty branch"
+  -- Required record fields can establish emptiness without destructuring the
+  -- record first. Its contextual index must come from this exact receiver.
+  let box = (A.Shape "ProofBox" True [A.Constructor "box"
+        [("boxToken",A.Named "Token"),("boxProof",A.Fibre "Proof" [A.Input 0])] [A.Input 0]] [A.Named "Token"])
+        {A.contextIndices = [0]}
+      boxAt value = object ["term" .= call "ProofBox" [value] []]
+      boxed = set "type" (piType True (named "Token") (piType False (boxAt (variable 0 [])) (named "Bool"))) decoder
+      boxedShapes = M.insert "ProofBox" box shapes
+  _ <- either (fail . show) pure (A.function inv M.empty boxedShapes boxed)
+  _ <- either (fail . show) pure (A.function inv M.empty
+    (M.insert "ProofBox" (box {A.contextIndices = []}) shapes) boxed)
+  check (isLeft (A.function inv M.empty (M.insert "Proof" inhabited boxedShapes) boxed))
+    "inhabited required record field justified absurdity"
+  let unrelatedBox = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (boxAt (variable 0 [])) (named "Bool")))) unrelated
+  check (isLeft (A.function inv M.empty boxedShapes unrelatedBox))
+    "record emptiness used another input's index"
+  let schema = (A.Shape "Schema" False [] []) {A.schemaExtent = True,A.sequenceElement = Just A.AnyValue}
+      cycleShape = A.Shape "Cycle" True [A.Constructor "cycle" [("next",A.Named "Cycle")] []] []
+      ordinary = A.Shape "Ordinary" True [A.Constructor "ordinary" [("value",A.Boolean)] []] []
+      requiredSchema = A.Shape "SchemaBox" True [A.Constructor "schemaBox" [("binding",A.Named "Schema")] []] []
+      empty = A.Shape "Empty" False [] []
+      optional = A.Shape "Optional" False [A.Constructor "missing" [] [],A.Constructor "present" [("value",A.Named "Empty")] []] []
+      negatives = M.fromList [(A.shapeSymbol sh,sh) | sh <- [schema,cycleShape,ordinary,requiredSchema,empty,optional]]
+      noEvidence result = case result of
+        Left reason -> D.message reason == "Absurd branch has no established empty index fibre"
+        Right _ -> False
+  forM_ ["Schema","Cycle","Ordinary","SchemaBox","Optional"] $ \owner ->
+    check (noEvidence (A.function inv M.empty negatives (operation "falseAbsurd" [owner] "Bool" (absurd 1))))
+      ("unestablished empty carrier justified absurdity: " ++ Text.unpack owner)
+  let indexedSchema = schema {A.indexTypes = [A.Boolean]}
+      indexedBinding = object ["term" .= call "Schema" [variable 0 []] []]
+  check (noEvidence (A.function inv M.empty (M.singleton "Schema" indexedSchema)
+    (set "type" (signature [named "Bool",indexedBinding] (named "Bool"))
+      (operation "falseIndexedAbsurd" [] "Bool" (absurd 2)))))
+    "indexed schema binding with no constructor metadata counted as empty"
 
 constructorScopeChecks :: IO ()
 constructorScopeChecks = do
@@ -2208,6 +2245,58 @@ constructorScopeChecks = do
     "constructor substitution captured an index belonging to its caller's static argument"
   check (isLeft (P.readType inv [Just (P.Runtime (P.Named "Wrapped" [P.Runtime bool (P.IndexInput 1)]) (P.IndexInput 5)),Just contextual] holderTerm))
     "constructor substitution admitted a payload at a different caller index"
+
+interleavedParameterChecks :: Inventory -> IO ()
+interleavedParameterChecks base = do
+  let universe = universeAt (level 0)
+      var i = object ["term" .= variable i []]
+      safe = set "terminates" (Bool True) . set "sourceModule" (String "Checked")
+      -- flag, A, a, choose, B, left, right: the case-tree positions still
+      -- count the two static binders; generated value positions do not.
+      mixed = safe $ set "type" (signature [named "Bool",universe,var 0,named "Bool",universe,var 0,var 1] (var 2)) $
+        operation "mixedParameters" [] "Bool" (split 3
+          [("true",0,done 6 (variable 1 [])),("false",0,done 6 (variable 0 []))])
+      callArgs = [variable 4 [],get "term" (named "Bool"),variable 3 [],variable 2 [],get "term" (named "Bool"),variable 1 [],variable 0 []]
+      caller = safe $ operation "mixedCaller" (replicate 5 "Bool") "Bool" (done 5 (call "mixedParameters" callArgs []))
+      additions = [mixed,caller]
+      inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $
+          M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "mixed" (S.fromList [("mixedCaller","behavior"),("mixedParameters","behavior")])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      finite = M.fromList [(s,d) | (s,v) <- M.toList (declarations expanded),Right d <- [F.domain expanded v]]
+      shapes = fst (A.discover expanded finite)
+      calculations = A.functions expanded finite shapes
+      table = M.mapMaybe (either (const Nothing) Just) calculations
+  sig <- either (fail . show) pure (P.signature inv mixed)
+  check (P.argumentSlots sig == [P.ValuePosition 0,P.TypePosition 0,P.ValuePosition 1,P.ValuePosition 2,P.TypePosition 1,P.ValuePosition 3,P.ValuePosition 4]
+    && P.inputs sig == [P.Named "Bool" [],P.Parameter 0,P.Named "Bool" [],P.Parameter 1,P.Parameter 1]
+    && P.output sig == P.Parameter 1) "mixed telescope lost source positions or static identities"
+  check (M.notMember "mixedCaller" (P.failures prepared)) (show (P.failures prepared))
+  calculation <- either (fail . show) pure (calculations M.! "mixedCaller")
+  forM_ [False,True] $ \flag -> forM_ [False,True] $ \a -> forM_ [False,True] $ \choose ->
+    forM_ [False,True] $ \left -> forM_ [False,True] $ \right ->
+      check (evalWith table (map B [flag,a,choose,left,right]) (A.body calculation) == B (if choose then left else right))
+        "mixed argument application or case split changed the result"
+  let wrongArgs = [variable 4 [],get "term" (named "Tone"),variable 3 [],variable 2 [],get "term" (named "Bool"),variable 1 [],variable 0 []]
+      wrong = inv {declarations = M.adjust (set "compiled" (done 5 (call "mixedParameters" wrongArgs []))) "mixedCaller" (declarations inv)}
+  check (M.member "mixedCaller" (P.failures (P.prepare wrong))) "mixed static argument admitted a value of another type"
+  let identity = operation "indexRecord" ["Pair"] "Pair" (done 1 (variable 0 []))
+      indexInv = inv {declarations = M.insert "indexRecord" identity (declarations inv)}
+      receiver = P.Runtime (P.Named "Pair" []) (P.IndexInput 0)
+      readIndex term = P.readType indexInv [Just receiver] term
+  check (readIndex (call "indexRecord" [variable 0 []] ["flag"]) ==
+    Right (P.Runtime (P.Named "Bool" []) (P.IndexProject "flag" [] (P.IndexCall "indexRecord" [] [P.IndexInput 0]))))
+    "complete computed record index did not compose with its checked projection"
+  check (isLeft (readIndex (call "indexRecord" [] ["flag"])))
+    "partial computed record call accepted a projection as its missing input"
+  check (isLeft (readIndex (call "indexRecord" [variable 0 [],variable 0 []] [])))
+    "computed record index admitted extra value arguments"
+  let foreignOwner = indexInv {declarations = M.adjust
+        (set "projection" (object ["proper" .= ("OtherRecord" :: Text),"index" .= (1 :: Int)])) "flag" (declarations indexInv)}
+  check (isLeft (P.readType foreignOwner [Just receiver] (call "indexRecord" [variable 0 []] ["flag"])))
+    "computed record index admitted another record's projection"
 
 familyParameterChecks :: IO ()
 familyParameterChecks = do

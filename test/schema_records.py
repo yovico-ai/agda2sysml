@@ -14,7 +14,9 @@ def verify_schema_records(output):
     names = ('OpenParameters.Transport.encodeValue', 'OpenParameters.Transport.decodeValue',
              'OpenParameters.Transport.encodeList', 'OpenParameters.Transport.decodeList',
              'FamilyRelations.Transport.encodeAt', 'FamilyRelations.Transport.decodeAt',
-             'FamilyRelations.Transport.select', 'FamilyRelations.Transport.reindex')
+             'FamilyRelations.Transport.select', 'FamilyRelations.Transport.reindex',
+             'OpenParameters.Transport.pack', 'OpenParameters.Transport.Container.contents',
+             'OpenParameters.Transport.Container.typeArgument', 'OpenParameters.Transport.Container.sameParameter')
     roots = {}
     for source in names:
         rows = [o for o in report['obligations'] if o['symbol'].startswith('Agda2SysML.' + source + '#')
@@ -104,6 +106,8 @@ def verify_schema_records(output):
         return matches[0]
 
     encode, decode, encode_list, decode_list = [roots[source] for source in names[:4]]
+    pack, contents, classifier_of, evidence_of = [roots[source] for source in names[8:]]
+    container_type = model.results[pack]
     binding_type = runtime(encode)[0][1]
     value_type = model.results[encode]
     source_list, value_list = runtime(encode_list)[1][1], model.results[encode_list]
@@ -157,6 +161,43 @@ def verify_schema_records(output):
         refresh()
         binding = record(binding_type, {slots['_≈_'][0]: approximation, slots['classifier'][0]: classifier,
                                        **{slots[name][0]: value for name, value in callbacks.items()}})
+        # Payload is a type binder after the runtime binding. Exercise two
+        # unrelated structured extents, preserving the complete binding,
+        # classifier, equality witness, and payload through all projections.
+        for extent in (sources, natives):
+            bindings['typeArgument4'] = extent
+            containers = [record(container_type, {
+                field(container_type, '.index0'): binding,
+                field(container_type, '.parameter0'): binding,
+                field(container_type, '.typeArgument'): classifier,
+                field(container_type, '.sameParameter'): approximate(classifier),
+                field(container_type, '.contents'): payload}) for payload in extent]
+            for payload, expected in zip(extent, containers):
+                expect(call(pack, binding, payload), expected)
+                expect(call(contents, expected), payload)
+                expect(call(classifier_of, expected), classifier)
+                expect(call(evidence_of, expected), approximate(classifier))
+            refuse(lambda: call(pack, binding, natives[0] if extent is sources else sources[0]))
+            bad = Record(containers[0].type, tuple((f, approximate(1-classifier)
+                if f == field(container_type, '.sameParameter') else value) for f, value in containers[0].fields))
+            refuse(lambda: call(contents, bad))
+            for symbol, arguments, wrong, expected in [
+                    (pack, (binding, extent[0]), containers[1], containers[0]),
+                    (contents, (containers[0],), extent[1], extent[0]),
+                    (classifier_of, (containers[0],), 1-classifier, classifier),
+                    (evidence_of, (containers[0],), approximate(1-classifier), approximate(classifier))]:
+                inputs, body, assertions = model.calculations[symbol]
+                model.calculations[symbol] = inputs, ('literal', wrong), assertions
+                try:
+                    try:
+                        result = call(symbol, *arguments)
+                    except AssertionError:
+                        mutations += 1
+                    else:
+                        assert not same(result, expected), 'mixed-parameter body mutation escaped comparison'
+                        mutations += 1
+                finally:
+                    model.calculations[symbol] = inputs, body, assertions
         def invoke_field(name, arguments):
             bound = model.evaluate(('project', ('literal', binding), slots[name][0]), {})
             return model.invoke_callback_many(bound, arguments, True, 0)
@@ -226,7 +267,7 @@ def verify_schema_records(output):
     # An independently indexed source family and a stored membership family.
     # The same payloads are used at two indices; neither the index nor evidence
     # can be recovered by merely inspecting the payload.
-    encode_at, decode_at, select, reindex = [roots[source] for source in names[4:]]
+    encode_at, decode_at, select, reindex = [roots[source] for source in names[4:8]]
     binding_type, _, source_type = [t for _, t in runtime(encode_at)]
     at_type = model.results[encode_at]
     row_type = next(t for f, t, _, _ in model.carriers[at_type][1] if f == field(at_type, '.value'))

@@ -5,14 +5,15 @@ The target is parsed model.sysml, not the compiler's expression inventory.
 import itertools
 import json
 from pathlib import Path
-from emitted_model import Extent, Model, Record, same
+from emitted_model import CalculationValue, Extent, Model, Record, same
 from open_parameters import target_name
 
 
 def verify_callbacks(output):
     output = Path(output)
     report = json.loads((output / 'correspondence.json').read_text())
-    model = Model((output / 'model.sysml').read_text())
+    text = (output / 'model.sysml').read_text()
+    model = Model(text)
 
     def root(source):
         rows = [o for o in report['obligations'] if o['symbol'].startswith(source + '#')
@@ -94,31 +95,27 @@ def verify_callbacks(output):
     refuse(lambda: model.invoke(guarded, [(False,), True, True]))
     refuse(lambda: model.invoke(choose, [(False, True), 1, True, False]))
     refuse(lambda: model.invoke(dispatch, [atom_binding, (False, True), family_binding, True, False, singleton]))
-    # Recursive helpers retain the exact fibre required by their known handler.
-    # A valid two-branch value cannot enter a singleton-handler specialization.
-    guarded_helpers = 0
-    for symbol, (inputs, _, _) in model.calculations.items():
-        if 'AlgebraicValues.dispatch<closure ' not in symbol:
-            continue
-        sum_inputs = [i for i, (_, typ, _, _) in enumerate(inputs) if typ == input_type]
-        if len(sum_inputs) != 1:
-            continue
-        arguments = []
-        for field, typ, _, _ in inputs:
-            if field == 'typeArgument0': arguments.append(atom_binding)
-            elif field == 'typeArgument2': arguments.append((False, True))
-            elif field == 'familyArgument1': arguments.append(family_binding)
-            elif typ == schemas_type: arguments.append(schemas((empty,)))
-            elif typ == input_type: arguments.append(singleton)
-            else: arguments.append(False)
-        try:
-            model.invoke(symbol, arguments)
-        except AssertionError:
-            continue  # Empty or different fibres are not this singleton case.
-        invalid = list(arguments)
-        invalid[sum_inputs[0]] = alternatives[0]
-        refuse(lambda: model.invoke(symbol, invalid))
-        guarded_helpers += 1
-        break
-    assert guarded_helpers == 1, 'no executable singleton-handler schema precondition'
-    return {'comparisons': comparisons, 'invalidCasesRejected': rejected, 'operations': 3}
+    # A late Result type parameter now permits the original generic dispatch
+    # calculation. Its supplied handler and sum must have the same schema.
+    generic = root('Agda2SysML.AlgebraicValues.dispatch')
+    handler_type = model.calculations[generic][0][-2][1]
+    handler_report = next(c for c in report['algebraicCarriers'] if target_name(c['target']) == handler_type)
+    handlers = {c['symbol'].split('#')[0].rsplit('.', 1)[-1]: target_name(c['target'])
+                for c in handler_report['constructors']}
+    signature = model.calculations[handlers['branch']][0][-2][1]
+    quote = lambda value: "'" + value.replace('\\', '\\\\').replace("'", "\\'") + "'"
+    model = Model(text + '\ncalc def singletonHandler { in value : ' + quote(signature.arguments[0])
+                  + ' [1]; return result : ' + quote(signature.result) + ' [1] = true; }')
+    bindings = [atom_binding, (False, True), family_binding]
+    none = model.invoke(handlers['none'], bindings)
+    one = model.invoke(handlers['branch'], [*bindings, empty, schemas(()), CalculationValue('singletonHandler'), none])
+    assert model.invoke(generic, [*bindings, schemas((empty,)), one, singleton]) is True
+    comparisons += 1
+    refuse(lambda: model.invoke(generic, [*bindings, schemas((empty,)), one, alternatives[0]]))
+    native_dispatch = root('Agda2SysML.AlgebraicValues.nativeDispatch')
+    encoder = root('Agda2SysML.AlgebraicValues.encode')
+    encoded = model.invoke(encoder, [atom_binding, family_binding, schemas((empty,)), singleton])
+    assert model.invoke(native_dispatch, [*bindings, schemas((empty,)), one, encoded]) is True
+    comparisons += 1
+    refuse(lambda: model.invoke(native_dispatch, [*bindings, schemas((empty, empty)), one, encoded]))
+    return {'comparisons': comparisons, 'invalidCasesRejected': rejected, 'operations': 5}

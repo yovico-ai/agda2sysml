@@ -3,7 +3,7 @@
 -- inventory is retained; generated identities carry explicit origin/arguments.
 module Agda2SysML.Specialize
   ( Result(..), Instance(..), Type(..), prepare, typeKey, typeValue, signature
-  , Signature(..), IndexExpr(..), LevelAtom(..), LevelExpr(..), ParameterKind(..), substitute, readType, constrainLevel, levelSymbols, typeAlias, nativeParameters, nativeFamilies ) where
+  , Signature(..), ArgumentSlot(..), IndexExpr(..), LevelAtom(..), LevelExpr(..), ParameterKind(..), substitute, readType, constrainLevel, levelSymbols, typeAlias, nativeParameters, nativeFamilies ) where
 
 import Agda2SysML.Inventory hiding (prepare, field)
 import Agda2SysML.Diagnostic
@@ -275,9 +275,27 @@ materializeCaptures = mapIndices go
 staticArguments :: [Type] -> [Type]
 staticArguments = takeWhile (\x -> case x of Runtime{} -> False; _ -> True)
 data ParameterKind = UnusedKind | LevelKind | TypeKind LevelExpr | FamilyKind [Type] LevelExpr deriving (Eq,Show)
+data ArgumentSlot = TypePosition Int | ValuePosition Int deriving (Eq,Show)
 data Signature = Signature { parameters :: Int, inputs :: [Type], output :: Type, dropped :: Int
-  , parameterKinds :: [ParameterKind] }
+  , parameterKinds :: [ParameterKind], argumentSlots :: [ArgumentSlot] }
   deriving (Eq,Show)
+
+-- Stored family values already have a runtime schema representation. Preserve
+-- that choice after a value binder, while admitting later type/level binders.
+staticKind :: [Type] -> ParameterKind -> Bool
+staticKind ins FamilyKind{} = null ins
+staticKind _ _ = True
+
+runtimeDropped :: Signature -> Int
+runtimeDropped sig = length [() | ValuePosition{} <- take (dropped sig) (argumentSlots sig)]
+
+-- Internal types group static arguments before value indices. Checked source
+-- terms and compiled trees retain their original, potentially mixed order.
+sourceArguments :: [ArgumentSlot] -> [a] -> [a] -> Either Refusal [a]
+sourceArguments slots types values = traverse pick slots
+  where
+    pick (TypePosition i) = at i types
+    pick (ValuePosition i) = at i values
 data Instance = Instance { origin :: Text, arguments :: [Type], identity :: Text } deriving (Eq,Show)
 data Result = Result { inventory :: Inventory, instances :: [Instance], failures :: M.Map Text Refusal
   , directRoots :: S.Set Text, runtimeClosure :: S.Set Text, openRoots :: M.Map Text Text
@@ -438,10 +456,12 @@ readType inv env t = case string (get "tag" t) of
             Nothing -> refuse Representation "Type alias requires known checked arguments"
         else readFunctionType d name es
       Just d | get "kind" d `elem` [String "record",String "datatype"] -> do
-        (kinds,indices,_) <- familySignature inv d
+        (kinds,indices,_,slots) <- familyLayout inv d
         let count = length kinds
         unless (length es == count + length indices) (refuse Syntax "Family application arity mismatch")
-        args <- readStaticArguments inv env kinds (take count es)
+        let staticEs = [e | (TypePosition _,e) <- zip slots es]
+            valueEs = [e | (ValuePosition _,e) <- zip slots es]
+        args <- readStaticArguments inv env kinds staticEs
         -- Later index domains may depend on earlier index values. Their
         -- telescope positions are not runtime inputs of the enclosing term.
         -- Instantiate before inserting static arguments: those arguments can
@@ -449,7 +469,7 @@ readType inv env t = case string (get "tag" t) of
         values <- foldM (\prior (domain,e) -> do
           contextual <- substitute args (replaceInputs [ix | Runtime _ ix <- prior] domain)
           value <- app e >>= readIndex inv env contextual
-          pure (prior ++ [value])) [] (zip indices (drop count es))
+          pure (prior ++ [value])) [] (zip indices valueEs)
         pure (Named name (args ++ values))
       _ -> Named name <$> traverse (app >=> readType inv env) es
   _ -> refuse Representation "Type expression is outside named first-order families"
@@ -503,17 +523,20 @@ readType inv env t = case string (get "tag" t) of
         else do
           sig <- signature inv d
           let count = parameters sig
-          unless (dropped sig <= count && length es == count + length (inputs sig))
+          let arity = count + length (inputs sig)
+          unless (runtimeDropped sig == 0 && length es >= arity)
             (refuse Representation "Computed index helper must supply its complete runtime argument list")
-          args <- readStaticArguments inv env (parameterKinds sig) (take count es)
+          let staticEs = [e | (TypePosition _,e) <- zip (argumentSlots sig) es]
+              valueEs = [e | (ValuePosition _,e) <- zip (argumentSlots sig) es]
+          args <- readStaticArguments inv env (parameterKinds sig) staticEs
           values <- foldM (\prior (e,domain) -> do
             contextual <- substitute args (replaceInputs prior domain)
             value <- app e >>= readIndex inv env contextual
             case value of
               Runtime domain ix -> pure (prior ++ [case domain of Callable{} -> typedIndex domain ix; _ -> ix])
-              _ -> refuse Semantics "Computed index argument is not a value") [] (zip (drop count es) (inputs sig))
+              _ -> refuse Semantics "Computed index argument is not a value") [] (zip valueEs (inputs sig))
           out <- substitute args (replaceInputs values (output sig))
-          pure (Runtime out (IndexCall name args values))
+          eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop arity es)
 
 returnsUniverse :: Value -> Bool
 returnsUniverse ty | get "tag" (get "term" ty) == String "pi" = returnsUniverse (get "body" (get "codomain" (get "term" ty)))
@@ -783,19 +806,19 @@ signature inv d = do
   let projectionEnd = case get "proper" p of
         String _ -> Just (get "index" p)
         _ -> Nothing
-  (kinds,ins,out) <- go projectionEnd [] [] [] ty
+  (kinds,ins,slots,out) <- go projectionEnd [] [] [] [] ty
   dropCount <- if p == Null then Right 0 else subtract 1 <$> number (get "index" p)
   unless (dropCount >= 0 && dropCount <= length kinds + length ins) (refuse Syntax "Projection-like function drops too many arguments")
-  pure (Signature (length kinds) ins out dropCount kinds)
+  pure (Signature (length kinds) ins out dropCount kinds slots)
   where
     -- A proper projection ends at its record receiver. Remaining Pi binders
     -- belong to the field value, rather than additional projection inputs.
     -- readType then checks the full callable domain, result and independence.
-    go projectionEnd env kinds ins ty = let t = get "term" ty in
+    go projectionEnd env kinds ins slots ty = let t = get "term" ty in
       if get "tag" t == String "pi" && projectionEnd /= Just (toJSON (length kinds + length ins)) then do
       let dom = get "domain" t; cod = get "codomain" t
           extend x = if get "binds" cod == Bool False then env else x:env
-      kind <- if null ins && toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
+      kind <- if toJSON (length slots) `elem` array (get "unusedModuleParameters" d)
         then pure (Just UnusedKind) else parameterKind inv env (get "type" dom)
       -- The owning carrier declares the parameter boundary. A constructor's
       -- first payload can itself be a type/family; it must remain a field.
@@ -803,14 +826,16 @@ signature inv d = do
           inHeader = get "kind" d /= String "constructor"
             || length kinds + length ins < either (const 0) id (number (get "parameters" owner))
       case kind of
-        Just k | null ins && inHeader -> go projectionEnd (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
+        Just k | staticKind ins k && inHeader -> go projectionEnd (extend (Just (parameterSlot (length kinds) k)))
+          (kinds ++ [k]) ins (slots ++ [TypePosition (length kinds)]) (get "body" cod)
         _ -> do
           let modality = get "info" dom
           unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
             (refuse Semantics "Erased or irrelevant value argument requires a separate representation rule")
           a <- readType inv env (get "term" (get "type" dom))
-          go projectionEnd (extend (Just (Runtime a (IndexInput (length ins))))) kinds (ins ++ [a]) (get "body" cod)
-      else (kinds,ins,) <$> readType inv env t
+          go projectionEnd (extend (Just (Runtime a (IndexInput (length ins))))) kinds (ins ++ [a])
+            (slots ++ [ValuePosition (length ins)]) (get "body" cod)
+      else (kinds,ins,slots,) <$> readType inv env t
 
 substituteLevel :: [Type] -> LevelExpr -> Either Refusal LevelExpr
 substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscList xs)
@@ -890,34 +915,36 @@ closed (Level (LevelExpr _ xs)) = all rigid (M.keys xs)
 -- even when a parameter is phantom in all runtime fields.
 familySignature :: Inventory -> Value -> Either Refusal ([ParameterKind],[Type],LevelExpr)
 familySignature inv d = do
+  (kinds,ins,level,_) <- familyLayout inv d
+  pure (kinds,ins,level)
+
+familyLayout :: Inventory -> Value -> Either Refusal ([ParameterKind],[Type],LevelExpr,[ArgumentSlot])
+familyLayout inv d = do
   n <- field inv "parameters" d >>= number
   ty <- field inv "type" d
-  go [] [] n ty
+  go [] [] [] [] n ty
   where
-    go env kinds 0 ty = indices env kinds [] ty
-    go env kinds n ty = do
+    go env kinds ins slots 0 ty = indices env kinds ins slots ty
+    go env kinds ins slots n ty = do
       let t = get "term" ty; cod = get "codomain" t
       unless (get "tag" t == String "pi") (refuse Syntax "Missing carrier parameter telescope")
-      kind <- if toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
+      kind <- if toJSON (length slots) `elem` array (get "unusedModuleParameters" d)
         then pure (Just UnusedKind) else parameterKind inv env (get "type" (get "domain" t))
       case kind of
-        Just k -> do
+        Just k | staticKind ins k -> do
           let extended = if get "binds" cod == Bool False then env else Just (parameterSlot (length kinds) k):env
-          go extended (kinds ++ [k]) (n-1) (get "body" cod)
-        Nothing -> valueParameters env kinds [] n ty
-    valueParameters env kinds ins 0 ty = indices env kinds ins ty
-    valueParameters env kinds ins n ty = do
-      let t = get "term" ty; cod = get "codomain" t; dom = get "domain" t
-      unless (get "tag" t == String "pi") (refuse Syntax "Missing value parameter telescope")
-      k <- parameterKind inv env (get "type" dom)
-      unless (k == Nothing) (refuse Representation "Static parameter follows a runtime value parameter")
-      a <- readType inv env (get "term" (get "type" dom))
-      let extended = if get "binds" cod == Bool False then env else Just (Runtime a (IndexInput (length ins))):env
-      valueParameters extended kinds (ins ++ [a]) (n-1) (get "body" cod)
-    indices env kinds ins ty
+          go extended (kinds ++ [k]) ins (slots ++ [TypePosition (length kinds)]) (n-1) (get "body" cod)
+        _ -> do
+          let dom = get "domain" t
+          unless (get "relevance" (get "info" dom) == String "relevant"
+            && get "quantity" (get "info" dom) /= String "zero") (refuse Semantics "Erased family value parameter")
+          a <- readType inv env (get "term" (get "type" dom))
+          let extended = if get "binds" cod == Bool False then env else Just (Runtime a (IndexInput (length ins))):env
+          go extended kinds (ins ++ [a]) (slots ++ [ValuePosition (length ins)]) (n-1) (get "body" cod)
+    indices env kinds ins slots ty
       | isUniverse ty = do
           l <- readLevel inv env (get "level" (get "sort" (get "term" ty)))
-          pure (kinds,ins,l)
+          pure (kinds,ins,l,slots)
       | otherwise = do
           let t = get "term" ty; cod = get "codomain" t; dom = get "domain" t
           unless (get "tag" t == String "pi") (refuse Representation "Unsupported carrier universe")
@@ -925,7 +952,7 @@ familySignature inv d = do
             && get "quantity" (get "info" dom) /= String "zero") (refuse Semantics "Erased family index")
           a <- readType inv env (get "term" (get "type" dom))
           let extended = if get "binds" cod == Bool False then env else Just (Runtime a (IndexInput (length ins))):env
-          indices extended kinds (ins ++ [a]) (get "body" cod)
+          indices extended kinds (ins ++ [a]) (slots ++ [ValuePosition (length ins)]) (get "body" cod)
 
 universeOf :: Inventory -> Type -> Either Refusal LevelExpr
 universeOf _ (Open _ level) = Right level
@@ -1203,8 +1230,11 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
         Right ty -> get "tag" (get "term" ty) == String "pi" &&
           (Number 0 `elem` array (get "unusedModuleParameters" d) || case parameterKind inv [] (get "type" (get "domain" (get "term" ty))) of
             Right (Just _) -> True
-            _ -> False)
+            _ -> lateStatic ty)
         _ -> False
+    lateStatic ty = let t = get "term" ty in get "tag" t == String "pi" &&
+      (isUniverse (get "type" (get "domain" t)) || isLevelType inv (get "type" (get "domain" t))
+        || lateStatic (get "body" (get "codomain" t)))
     seeds = S.toAscList (S.map fst (S.filter (\(_,r) -> r `elem` ["structure","behavior"]) needs))
     openProfile = get "selectionProfile" (document inv) == String "declarations"
     action = forM seeds $ \s -> if generic s && not (openProfile && S.member s roots) then pure (s,Right s) else do
@@ -1670,12 +1700,13 @@ ensureFunction inv stack s actualArgs = do
         save s args header
         body <- (if get "kind" d == String "primitive" then pure Null else do
           tree <- liftEither (field inv "compiled" d)
-          let env = map Dynamic captureTypes ++ drop (dropped sig) (map Static schemaArgs ++ map Dynamic (drop prefix ins))
+          sourceEnv <- liftEither (sourceArguments (argumentSlots sig) (map Static schemaArgs) (map Dynamic (drop prefix ins)))
+          let env = map Dynamic captureTypes ++ drop (dropped sig) sourceEnv
           specializeTree inv (s:stack) env out (prefixTree prefix tree)) `catchError` \reason -> do
             modify' $ \st -> st {ready = M.delete (instanceKey s args) (ready st), recorded = M.delete (instanceKey s args) (recorded st)}
             throwError (context ("Specializing " <> s <> ": ") reason)
         let d' = set "type" (arrow ins out) $ set "compiled" body $ set "projection"
-              (if dropped sig > parameters sig then set "index" (toJSON (dropped sig - parameters sig + 1)) p else Null)
+              (if runtimeDropped sig > 0 then set "index" (toJSON (runtimeDropped sig + 1)) p else Null)
               $ clone inv s args d
         save s args d'
 
@@ -1888,7 +1919,12 @@ sourceTypeTerm inv = sourceTypeAt
       ["tag" .= ("native-schema-value" :: Text),"domains" .= map (get "term" . sourceTypeAt depth) ds,"universe" .= levelValue l]]
     sourceTypeAt depth (SelectedFamily (Runtime _ index)) = object ["term" .= sourceIndex depth index]
     sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
-      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
+      ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) ordered]]
+      where
+        ordered = either (const args) id $ do
+          d <- maybe (refuse Syntax "Missing source family") Right (M.lookup s (declarations inv))
+          (kinds,_,_,slots) <- familyLayout inv d
+          sourceArguments slots (take (length kinds) args) (drop (length kinds) args)
     sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
       ,"slot" .= slot,"universe" .= levelValue level]]
     sourceTypeAt depth (OpenFamily slot domains level) = object ["term" .= object ["tag" .= ("native-open-family" :: Text)
@@ -1914,7 +1950,14 @@ sourceTypeTerm inv = sourceTypeAt
     sourceIndex depth (IndexSuccessor value) = object ["tag" .= ("constructor" :: Text)
       ,"symbol" .= builtin inv "suc","eliminations" .= [application (sourceIndex depth value)]]
     sourceIndex depth (IndexCall f types values) = object ["tag" .= ("definition" :: Text),"symbol" .= f
-      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ map (sourceIndex depth) values)]
+      ,"eliminations" .= map application ordered]
+      where
+        ts = map (get "term" . sourceTypeAt depth) types
+        vs = map (sourceIndex depth) values
+        ordered = either (const (ts ++ vs)) id $ do
+          d <- maybe (refuse Syntax "Missing source calculation") Right (M.lookup f (declarations inv))
+          sig <- signature inv d
+          sourceArguments (drop (dropped sig) (argumentSlots sig)) ts vs
     sourceIndex depth (IndexProject f _ receiver) = let t = sourceIndex depth receiver in
       set "eliminations" (toJSON (array (get "eliminations" t)
         ++ [object ["tag" .= ("project" :: Text),"symbol" .= f]])) t
@@ -2103,17 +2146,18 @@ expression inv stack env expected term = do
         d <- definition inv s
         unless (get "kind" d `elem` [String "function",String "primitive"]) (abort Semantics "Runtime call is not a checked function")
         sig <- liftEither (either (Left . context ("Signature of " <> s <> ": ")) Right (signature inv d))
-        let supplied = max 0 (parameters sig - dropped sig)
-        unless (length es >= supplied) (abort Representation "Partially applied type parameters")
-        actualTypes <- liftEither (sequence [if kind == UnusedKind then app e >> pure Unused
+        let slots = drop (dropped sig) (argumentSlots sig)
+            staticEs = [(i,e) | (TypePosition i,e) <- zip slots es]
+            valueElims = [e | (ValuePosition _,e) <- zip slots es] ++ drop (length slots) es
+        unless (length staticEs == length [() | TypePosition{} <- slots]) (abort Representation "Partially applied type parameters")
+        actualTypes <- liftEither (sequence [if parameterKinds sig !! i == UnusedKind then app e >> pure Unused
           else app e >>= readType inv (runtimeBindings env)
-          | (kind,e) <- zip (drop (min (parameters sig) (dropped sig)) (parameterKinds sig)) (take supplied es)])
-        let explicit = M.fromList (zip [min (parameters sig) (dropped sig)..] actualTypes)
-            valueElims = drop supplied es
+          | (i,e) <- staticEs])
+        let explicit = M.fromList (zip (map fst staticEs) actualTypes)
         known <- if length valueElims == length (inputs sig) then
           maybe (pure explicit) (liftEither . unifyIn inv env explicit (output sig)) expected else pure explicit
-        let runtimeDropped = max 0 (dropped sig - parameters sig)
-        (types,values,indices,rest) <- argumentsFor (sig {inputs = drop runtimeDropped (inputs sig)}) runtimeDropped [] known valueElims
+        let omitted = runtimeDropped sig
+        (types,values,indices,rest) <- argumentsFor (sig {inputs = drop omitted (inputs sig)}) omitted [] known valueElims
         ensureFunction inv stack s types
         out <- liftEither (substitute types (replaceKnownInputs indices (output sig)))
         let resultTerm = set "symbol" (String (instanceKey s types)) $ set "eliminations" (toJSON (map application ([indexTerm (length (filter isDynamic env)) ix | (_,ix) <- snd (captureArguments types)] ++ values))) term
@@ -2215,14 +2259,17 @@ schemaConstruction inv stack env schema@(SchemaValue domains level) declaration 
       depth = length (filter isDynamic env)
       es = array (get "eliminations" source)
   unless (nonRecursiveTemplate inv symbol) (abort Representation "Computed schema requires a nonrecursive record family")
-  (kinds,indices,universe) <- liftEither (familySignature inv declaration)
+  (kinds,indices,universe,slots) <- liftEither (familyLayout inv declaration)
   unless (length es >= length kinds && length es <= length kinds + length indices)
     (abort Representation "Computed schema has an incomplete static or excess runtime telescope")
-  types <- liftEither (readStaticArguments inv (runtimeBindings env) kinds (take (length kinds) es))
+  let staticEs = [e | (TypePosition _,e) <- zip slots es]
+      valueEs = [e | (ValuePosition _,e) <- zip slots es]
+  unless (length staticEs == length kinds) (abort Representation "Computed schema has incomplete static arguments")
+  types <- liftEither (readStaticArguments inv (runtimeBindings env) kinds staticEs)
   values <- foldM (\prior (domain,e) -> do
     contextual <- liftEither (substitute types (replaceInputs [ix | Runtime _ ix <- prior] domain))
     value <- liftEither (app e >>= readIndex inv (runtimeBindings env) contextual)
-    pure (prior ++ [value])) [] (zip indices (drop (length kinds) es))
+    pure (prior ++ [value])) [] (zip indices valueEs)
   let remaining = drop (length values) indices
       variables = [Runtime domain (IndexInput (depth+i)) | (i,domain) <- zip [0..] domains]
       allValues = values ++ variables

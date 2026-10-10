@@ -46,6 +46,9 @@ browser review and the official SysML notebook tools.
   Supplied calculations can compute dependent record and constructor indices;
   input and result constraints check the selected membership while retaining
   complete payloads and equality evidence.
+  Supported signatures can interleave runtime inputs with type and universe
+  parameters, including a later callback result type. Dependent sum dispatch
+  passes the complete tag and payload to the supplied calculation.
   Callback behavior is independently tested; the pinned Pilot cannot execute
   the callback bindings reliably.
 - Retain supported type and indexed-family fields in records as runtime schema
@@ -114,12 +117,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 329 native calculation functions out of 722 (45.6%)
-and 151 native equality statements, including 41 compiler-generated helpers.
-Ten functions have both representations: 470/722 function declarations (65.1%)
+The default self model has 340 native calculation functions out of 722 (47.1%)
+and 169 native equality statements, including 46 compiler-generated helpers.
+Ten functions have both representations: 499/722 function declarations (69.1%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 421 unresolved requirements. Source-only proof retention is
+There are still 413 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

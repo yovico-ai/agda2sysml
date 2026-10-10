@@ -11,7 +11,7 @@ def verify_dependent_family_parameters(output):
     text = (output / 'model.sysml').read_text()
     model = Model(text)
     roots = {}
-    groups = {'DependentSums.Constructors': ('encode', 'decode', 'native'),
+    groups = {'DependentSums.Constructors': ('encode', 'decode', 'native', 'dispatch'),
               'SpecializedFamilies.Instantiation': ('encode', 'decode', 'specialize')}
     for module, operations in groups.items():
         for operation in operations:
@@ -95,7 +95,7 @@ def verify_dependent_family_parameters(output):
     # Cases below use actual emitted carrier and constructor signatures. Opaque
     # payloads include repeated data and a large natural to detect lossy copies.
     module = 'DependentSums.Constructors'
-    encode, decode, native = [roots[module, op] for op in groups[module]]
+    encode, decode, native, dispatch = [roots[module, op] for op in groups[module]]
     index_sig, schema_type, source_type = [t for _, t in runtime(encode)]
     native_type = model.results[encode]
     payload_type = field_type(source_type, '.snd')
@@ -115,6 +115,17 @@ def verify_dependent_family_parameters(output):
     index_fn = callback('dependentFamilyIndex', index_sig, get_prefix + '.chosen')
     wrong_index_fn = callback('dependentFamilyWrongIndex', index_sig, get_prefix + '.alternate')
     operation = callback('dependentFamilyIdentity', runtime(native)[-2][1], 'a0')
+    dispatch_sig = runtime(dispatch)[-2][1]
+    additions.append('attribute def DependentDispatchResult { attribute tag : '
+                     + quote(dispatch_sig.arguments[0]) + '; attribute payload : '
+                     + quote(dispatch_sig.arguments[1]) + '; }')
+    branch = callback('dependentFamilyBranch', dispatch_sig,
+                      'new DependentDispatchResult(tag = a0, payload = a1)')
+    encode_static = {f for f, _, _, _ in model.calculations[encode][0]
+                     if f.startswith(('typeArgument', 'familyArgument'))}
+    result_slots = [f for f, _, _, _ in model.calculations[dispatch][0]
+                    if f.startswith('typeArgument') and f not in encode_static]
+    assert len(result_slots) == 1, result_slots
     refresh()
     tags = (False, True)
     bindings['typeArgument4'] = tags
@@ -152,9 +163,20 @@ def verify_dependent_family_parameters(output):
         expect(call(decode, index_fn, schema, expected), source)
         expect(call(native, index_fn, schema, operation, expected), expected)
         sum_cases[tag, i, token] = source, expected, prefix, member, fibre, proof
+    results = {key: Record('DependentDispatchResult', (('tag', key[0]),
+                ('payload', case[0].get(field(source_type, '.snd')))))
+               for key, case in sum_cases.items()}
+    bindings[result_slots[0]] = tuple(results.values())
+    for key, case in sum_cases.items():
+        expect(call(dispatch, index_fn, schema, branch, case[1]), results[key])
     source, expected, prefix, member, fibre, proof = sum_cases[False, 0, 0]
     refuse(lambda: call(encode, wrong_index_fn, schema, source))
     refuse(lambda: call(decode, wrong_index_fn, schema, expected))
+    refuse(lambda: call(dispatch, wrong_index_fn, schema, branch, expected))
+    result_extent = bindings[result_slots[0]]
+    bindings[result_slots[0]] = result_extent[1:]
+    refuse(lambda: call(dispatch, index_fn, schema, branch, expected))
+    bindings[result_slots[0]] = result_extent
     refuse(lambda: construct(payload_type, False, schema, index_fn, prefix, sum_cases[True, 0, 0][3]))
     refuse(lambda: construct(payload_type, False, schema, index_fn, prefix, sum_cases[False, 7, 0][3]))
     refuse(lambda: construct(fibre_type, False, schema, indices[False, 0],

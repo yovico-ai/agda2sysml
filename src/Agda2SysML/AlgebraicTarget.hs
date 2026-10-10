@@ -1045,9 +1045,7 @@ functionWith inv finite helpers shapes signatures d = do
         ,"equations" .= [(renderWith id (T.pack . show) a,renderWith id (T.pack . show) b) | (a,b) <- equationsInScope]])) $ case string (get "tag" tree) of
       "absurd" -> do
         unless (length (array (get "binders" tree)) == length env) (refuse Syntax "Absurd leaf binder count mismatch")
-        let impossible = any (\(typ,value) -> case alternatives equationsInScope (mapCarrier (rewrite equationsInScope) typ) value of
-              Right [] -> True
-              _ -> False) env
+        let impossible = any (uncurry (emptyValue equationsInScope S.empty)) env
         unless impossible (refuse Semantics "Absurd branch has no established empty index fibre")
         pure Absent
       "done" -> do
@@ -1148,6 +1146,28 @@ functionWith inv finite helpers shapes signatures d = do
     runtimeParameters c = case M.lookup c (declarations inv) of
       Just def | get "runtimeParameters" def /= Null -> integer (get "runtimeParameters" def)
       _ -> Right 0
+    -- A record value requires every field. Descend only through checked records;
+    -- revisiting a carrier supplies no evidence that its recursive fields are empty.
+    emptyValue equations seen rawType value =
+      let typ = mapCarrier (reduce equations) rawType
+      in case alternatives equations typ value of
+        Right [] -> True
+        Right [(c,_)] | Just (owner,xs) <- emptyRecordOwner typ
+          , S.notMember owner seen, Just sh <- M.lookup owner shapes, isRecord sh
+          , [con] <- filter ((== c) . constructorSymbol) (variants sh)
+          , Right facts <- branchEquations equations typ value c ->
+            let fields = [(f,maybe (Project value f) id (lookup f (contextFields sh xs con)))
+                         | (f,_) <- payload con]
+                values = map snd fields
+                scope = [(rewrite facts left,rewrite facts right) | (left,right) <- equations] ++ facts
+            in any (\((_,fieldType),(_,fieldValue)) ->
+                 emptyValue scope (S.insert owner seen)
+                   (mapCarrier (instantiate values) fieldType) fieldValue)
+               (zip (payload con) fields)
+        _ -> False
+    emptyRecordOwner (Named owner) = Just (owner,[])
+    emptyRecordOwner (Fibre owner xs) = Just (owner,xs)
+    emptyRecordOwner _ = Nothing
     alternatives _ Callable{} _ = refuse Semantics "Cannot pattern match a callable input"
     alternatives _ Boolean _ = Right [(builtin inv "true",[]),(builtin inv "false",[])]
     alternatives _ Natural value = let
@@ -1161,8 +1181,10 @@ functionWith inv finite helpers shapes signatures d = do
     alternatives _ AnyValue _ = refuse Semantics "Cannot inspect a native relation payload"
     alternatives equations (Fibre s indices) selected = do
       sh <- maybe (refuse Representation "Missing indexed carrier") Right (M.lookup s shapes)
+      unless (not (schemaExtent sh)) (refuse Semantics "Cannot inspect constructors of a schema binding")
       pure [(constructorSymbol c,payload c) | c <- variants sh,compatible equations (indexTypes sh) indices (endpointsFor sh indices selected c)]
     alternatives equations (Named s) selected = case M.lookup s shapes of
+      Just sh | schemaExtent sh -> refuse Semantics "Cannot inspect constructors of a schema binding"
       Just sh | not (null (contextIndices sh)) -> refuse Representation "Contextual carrier lacks its membership context"
       Just sh -> let options = [(constructorSymbol c,payload c) | c <- variants sh]
         in Right $ case (sequenceElement sh,normalize (reduce equations (Project selected sequenceField))) of
