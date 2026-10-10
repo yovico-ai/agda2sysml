@@ -230,6 +230,16 @@ members. Inspect the constructor helpers, selected payloads, member signatures,
 and recursive calculation bodies in the model. Reconstruction retains the
 supplied callable references and full result values.
 
+`DecisionTree.restrict` and `normalize` also construct callbacks. Inspect the
+body expressions inside their returned rule records: each has typed lambda
+arguments and references to its enclosing calculation's captured values or
+guards. `normalize` emits positive rules before negative rules. The associated
+`restrict-true`, `restrict-false`, `normalization-preserves-evaluation`, and
+`normalization-sound` constraint definitions expose the preservation statements
+and their full premise evidence. These are available for interactive inspection;
+the Pilot callback-execution limitation below applies to constructed callbacks
+as well as supplied callbacks.
+
 The generated `FirstOrder.lookup`, `nativeLookup`, `evaluate`, `evaluateArgs`,
 `nativeEvaluate`, and `nativeEvaluateArgs` also retain indexed callback signatures.
 Inspect the `Table`/`NativeTable` constructors and `Operation`'s three `ref calc`

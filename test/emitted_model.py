@@ -50,6 +50,14 @@ class BoundCalculation:
     environment: dict
 
 
+@dataclass
+class BodyCalculation:
+    arguments: tuple
+    result: str
+    body: object
+    environment: dict
+
+
 def sequence(value):
     return value if isinstance(value, tuple) else (value,)
 
@@ -150,7 +158,19 @@ class Parser:
                   '<=': 4, '>=': 4, 'hastype': 4, 'istype': 4, 'as': 4, '+': 5, '-': 5, '*': 6}
 
     def expression(self, minimum=0):
-        if self.take('if'):
+        if self.take('{'):
+            arguments = []
+            while self.take('in'):
+                binder = self.qualified(); self.expect(':'); carrier = self.qualified()
+                assert self.multiplicity() == (1, 1); self.expect(';')
+                arguments.append((binder, carrier))
+            assert arguments, 'empty body-expression telescope'
+            self.expect('return'); assert self.qualified() == 'result'; self.expect(':')
+            result = self.qualified()
+            assert self.multiplicity() == (1, 1); self.expect(';')
+            body = self.expression(); self.expect('}')
+            left = ('body', tuple(arguments), result, body)
+        elif self.take('if'):
             condition = self.expression()
             self.expect('?')
             yes = self.expression()
@@ -382,7 +402,7 @@ class Model:
         env.update({symbol + '::' + field: value for field, value in list(env.items())})
         for (field, carrier, _, _), value in zip(inputs, arguments):
             if isinstance(carrier, CallableSignature):
-                assert isinstance(value, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
+                assert isinstance(value, (CalculationValue, BoundCalculation, BodyCalculation)), 'callable binding is not a calculation'
                 binding = BoundCalculation(value, carrier, symbol + '::' + field, dict(env))
                 env[field] = env[symbol + '::' + field] = binding
         if check and symbol not in self.constraints:
@@ -402,13 +422,14 @@ class Model:
             values = sequence(value)
             assert len(values) >= low and (high is None or len(values) <= high), 'callback cardinality mismatch'
             for callback in values:
-                assert isinstance(callback, (CalculationValue, BoundCalculation)), 'callable binding is not a calculation'
+                assert isinstance(callback, (CalculationValue, BoundCalculation, BodyCalculation)), 'callable binding is not a calculation'
                 while isinstance(callback, BoundCalculation):
                     callback = callback.value
-                inputs = self.calculations[callback.symbol][0]
+                inputs = callback.arguments if isinstance(callback, BodyCalculation) else self.calculations[callback.symbol][0]
+                result = callback.result if isinstance(callback, BodyCalculation) else self.results[callback.symbol]
                 assert len(inputs) == len(carrier.arguments), 'callback arity mismatch'
                 for expected, actual in [*zip(carrier.arguments, (i[1] for i in inputs)),
-                                         (carrier.result, self.results[callback.symbol])]:
+                                         (carrier.result, result)]:
                     assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
             return
         if carrier in ('Boolean', 'Natural'):
@@ -435,6 +456,7 @@ class Model:
     def evaluate(self, ast, env, check=True, depth=0):
         op, *args = ast
         ev = lambda node: self.evaluate(node, env, check, depth)
+        if op == 'body': return BodyCalculation(args[0], args[1], args[2], dict(env))
         if op == 'literal': return args[0]
         if op == 'reference': return env.get(args[0], args[0])
         if op == 'project':
@@ -490,7 +512,9 @@ class Model:
             return self.invoke_callback_many(ev(args[0]), [ev(x) for x in args[1]], check, depth + 1)
         if op in ('as', 'hastype', 'istype'):
             value, typ = ev(args[0]), args[1][1]
-            matches = typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)
+            matches = (typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)
+                       or (typ == 'ScalarValues::Boolean' and type(value) is bool)
+                       or (typ == 'ScalarValues::Natural' and type(value) is int and value >= 0))
             return value if matches and op == 'as' else (() if op == 'as' else matches)
         left = ev(args[0])
         if op == 'and': return bool(left and ev(args[1]))
@@ -511,6 +535,15 @@ class Model:
         return self.invoke_callback_many(binding, [argument], check, depth)
 
     def invoke_callback_many(self, binding, arguments, check=True, depth=0):
+        if isinstance(binding, BodyCalculation):
+            assert len(arguments) == len(binding.arguments), 'body-expression arity mismatch'
+            local = dict(binding.environment)
+            for (binder, carrier), argument in zip(binding.arguments, arguments):
+                if check: self.boundary(carrier, 1, 1, argument, depth)
+                local[binder] = argument
+            result = self.evaluate(binding.body, local, check, depth + 1)
+            if check: self.boundary(binding.result, 1, 1, result, depth)
+            return result
         if isinstance(binding, CalculationValue):
             return self.invoke(binding.symbol, arguments, check, depth)
         assert isinstance(binding, BoundCalculation), 'invocation target is not callable'

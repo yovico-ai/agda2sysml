@@ -360,17 +360,21 @@ models:
           and statement_evidence['premiseMutationDetected']
           and statement_evidence['proofSourcesRetained'],
           'native theorem statements lack behavior, input evidence or provenance checks')
-    check(callable_field_evidence['operations'] == 4
+    check(callable_field_evidence['operations'] == 6
           and callable_field_evidence['comparisons'] >= 5000
-          and callable_field_evidence['invalidCasesRejected'] >= 10,
-          'supplied decision-tree or rule-list behavior was not verified')
+          and callable_field_evidence['invalidCasesRejected'] >= 15
+          and callable_field_evidence['capturedLambdaComparisons'] >= 1656
+          and callable_field_evidence['nativeStatements'] == 4
+          and callable_field_evidence['lambdaMutationsDetected'] == 2,
+          'decision-tree normalization, captured guards, or rule-list behavior was not verified')
     check(native_callback_evidence['operations'] == 8 and native_callback_evidence['comparisons'] >= 400
           and native_callback_evidence['invalidCasesRejected'] >= 15,
           'native unary callbacks lack complete results and invalid-binding checks')
     check(accounting_evidence['operations'] == 4 and accounting_evidence['comparisons'] >= 200
           and accounting_evidence['invalidCasesRejected'] == 28 and accounting_evidence['unusedRuntimeInputs'] == 0,
           'existing report accounting lacks complete counts, identity preservation or invalid-input refusals')
-    check(sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 36
+    check(sum_evidence['operations'] == 7 and sum_evidence['tabulationComparisons'] == 30
+          and sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 36
           and sum_evidence['constructionComparisons'] >= 100 and sum_evidence['lookupComparisons'] >= 100
           and sum_evidence['computedSchemaRefusals'] == 18
           and sum_evidence['repeatedConstructorSchemas'] > 0 and sum_evidence['completePayloadsAndEvidencePreserved'],

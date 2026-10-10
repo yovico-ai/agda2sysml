@@ -13,7 +13,7 @@ def verify_tagged_sums(output):
     model = Model((output / 'model.sysml').read_text())
     prefix = 'Agda2SysML.AlgebraicValues.'
     roots = {}
-    for operation in ('encode', 'decode', 'schemaAt', 'slotAt', 'sourceConstructor', 'nativeConstructor'):
+    for operation in ('encode', 'decode', 'schemaAt', 'slotAt', 'sourceConstructor', 'nativeConstructor', 'tabulate'):
         rows = [o for o in report['obligations'] if o['symbol'].startswith(prefix + operation + '#')
                 and '@' not in o['symbol'] and o['sourceKind'] == 'behavior']
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], ('sum operation missing', operation)
@@ -74,6 +74,27 @@ def verify_tagged_sums(output):
     row_value, _ = field(row_type, '.value')
     member_index, _ = field(member_type, '.index0')
     member_value, _ = field(member_type, '.value')
+    project = next(target_name(o['target']) for o in report['obligations']
+                   if o['symbol'].startswith(prefix + 'nativeProject#') and '@' not in o['symbol']
+                   and o['sourceKind'] == 'behavior' and o['status'] == 'discharged')
+    position_type = model.calculations[project][0][-2][1]
+    quote = lambda text: "'" + text.replace('\\', '\\\\').replace("'", "\\'") + "'"
+    # A supplied native callback captures complete fields and reads them by
+    # position. Tabulation must preserve repeated types and distinct values.
+    tabulation_model = Model((output / 'model.sysml').read_text() + f'''
+calc def tabulationRoundtrip {{
+  in typeArgument0 : Base::Anything [0..*];
+  in familyArgument1 : {quote(row_type)} [0..*];
+  in schema : {quote(atom_schema_type)} [1];
+  in fields : {quote(native_fields_type)} [1];
+  return result : {quote(native_fields_type)} [1] = {quote(roots['tabulate'])}(
+    typeArgument0, familyArgument1, schema,
+    {{ in element : Base::Anything [1]; in position : {quote(position_type)} [1];
+       return result : {quote(member_type)} [1];
+       {quote(project)}(typeArgument0, familyArgument1, element, schema, position, fields) }});
+}}
+''')
+    tabulation_comparisons = 0
     comparisons = rejected = repeated_schemas = 0
     construction_comparisons = lookup_comparisons = schema_refusals = 0
 
@@ -118,6 +139,14 @@ def verify_tagged_sums(output):
                 return call(empty if native else nil, [])
             return call(entry if native else cons, [layout[0], atom_schema(layout[1:]), member(layout[0], choices[0]),
                         fields(layout[1:], choices[1:], native)])
+
+        for layout in ((), (atoms[0],), (atoms[0], atoms[0]), (atoms[0], atoms[-1], atoms[0])):
+            for choices in itertools.product(range(2), repeat=len(layout)):
+                supplied = fields(layout, choices, True)
+                actual = tabulation_model.invoke('tabulationRoundtrip',
+                    [extent, relation, atom_schema(layout), supplied])
+                assert same(actual, supplied), 'tabulation lost a position, value, schema, or evidence field'
+                tabulation_comparisons += 1
 
         @lru_cache(maxsize=None)
         def absent(layouts):
@@ -208,6 +237,7 @@ def verify_tagged_sums(output):
     return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'constructionComparisons': construction_comparisons, 'lookupComparisons': lookup_comparisons,
             'computedSchemaRefusals': schema_refusals,
+            'tabulationComparisons': tabulation_comparisons,
             'repeatedConstructorSchemas': repeated_schemas, 'completePayloadsAndEvidencePreserved': True}
 
 

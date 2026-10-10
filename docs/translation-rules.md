@@ -929,11 +929,46 @@ Boolean condition or removed from the record. Callback argument/result contracts
 retain the signature's input schema, output index, and evidence endpoints.
 
 The callback-input purity/totality obligation and Pilot execution limitation
-above also apply here. This rule does not construct new callbacks capturing
-runtime environments: `DecisionTree.normalize` and `restrict` remain unsupported.
+above also apply here. Supported lambdas can construct new callbacks through
+the native body-expression rule below.
 Direct sequences of callables
 and recursive carrier cycles through a callable's domain/result remain outside
 the rule. No generic Agda evaluator or callback table is emitted.
+
+## Captured lambdas
+
+A checked lambda with a supported, complete callable telescope becomes a
+native SysML body expression: `{ in argument : Domain [1]; return result :
+Result [1]; expression }`. The expression retains references to the enclosing
+calculation's values, supplied callbacks, and type/family bindings. Its local
+parameters have distinct lexical names; nested lambdas and unused Agda
+`NoAbs` binders retain the correct enclosing environment. Calls within the body
+remain ordinary native calculation dependencies.
+
+This uses [KerML 1.0 §8.4.4.9.3](https://www.omg.org/spec/KerML/1.0/PDF): a body expression denotes its evaluation rather
+than immediately returning the body's result. Record fields remain referential
+`ref calc` members. No domain-specific closure datatype or Agda evaluator is
+introduced. The containing callable signatures retain their argument, result,
+and extent contracts.
+
+The unchanged `DecisionTree.restrict` constructs guards that combine a captured
+predicate with each existing guard. `normalize` builds ordered rules from a
+tree, including the complementary guards for negative branches. Their
+`restrict-true`, `restrict-false`, `normalization-preserves-evaluation`, and
+`normalization-sound` statements become native constraints; this does not
+translate their proof implementations. Independent emitted-model checks retain
+callbacks from distinct invocations, compose restrictions, compare complete
+outcomes, and reject inconsistent premise evidence.
+
+The same rule admits `AlgebraicValues.tabulate`: a callback supplies each field
+by its typed position, and a captured callback transports the remaining
+positions through recursive calls. Repeated field types retain distinct values;
+the supplied family bindings and complete membership evidence remain present.
+
+Partial applications requiring eta expansion, runtime-polymorphic lambdas,
+function-valued indices, and extensional equality of newly constructed
+callbacks remain unsupported. The pinned Pilot validates body expressions and
+their use in records; its existing callback-execution limitation still applies.
 
 ## Stored type and type-family fields
 
@@ -983,8 +1018,8 @@ correspondence.
 The self specification exercises this with `OpenParameters.Transport` value and
 list conversion and `FamilyRelations.Transport` indexed conversion, selection,
 and reindexing. Complete membership and equality evidence remains part of the
-model. Runtime-polymorphic callbacks, function-valued indices, and constructing
-runtime closures remain outside this rule. Supplied callable references are
+model. Runtime-polymorphic callbacks and function-valued indices remain outside
+this rule. Supplied callable references are
 retained; the rule does not establish extensional equality between different
 callbacks. The existing Pilot callback execution
 and unordered data-value equality limitations still apply; independent behavior
