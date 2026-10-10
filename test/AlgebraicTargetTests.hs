@@ -284,6 +284,7 @@ main = do
   dependentCallbackModel <- dependentCallableChecks inv
   schemaRecordModel <- schemaRecordChecks inv
   statementModel <- equalityStatementChecks inv
+  contextualModel <- contextualMembershipChecks inv
   moduleAliasChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
@@ -298,7 +299,7 @@ main = do
         first = cmd "first" p "true" "null"
         second = cmd "second" "null" "null" "'Tone'::'blue'"
         none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel)
+    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel)
     callProcess (root </> "bin/agda2sysml-validate") [file]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -371,6 +372,57 @@ equalityStatementChecks base = do
   check ("in 'input2'" `Text.isInfixOf` T.modelText generated) "equality premise witness was erased"
   check ("constraint def 'unrelatedSymmetry.law'" `Text.isInfixOf` T.modelText generated) "statement not rendered as a native constraint"
   pure (Text.replace "package 'AgdaModel' {" "package 'EqualityFixture' {" (T.modelText generated))
+
+-- A callback supplies membership context, never stored function identity.
+contextualMembershipChecks :: Inventory -> IO Text
+contextualMembershipChecks base = do
+  let fn = A.Callable [A.Boolean] A.Boolean
+      ticket = A.Shape "ContextTicket" True
+        [A.Constructor "contextTicket" [("ticketIndex",A.Boolean),("ticketValue",A.Boolean)] [A.Input 0]] [A.Boolean]
+      envelope = (A.Shape "ContextEnvelope" True
+        [A.Constructor "contextEnvelope" [("virtualContext",fn),("prefix",A.Boolean)
+          ,("member",A.Fibre "ContextTicket" [A.Apply (A.Input 0) [A.Input 1]])] [A.Input 0]] [fn])
+        {A.contextIndices = [0]}
+      shapes = M.fromList [(A.shapeSymbol sh,sh) | sh <- [ticket,envelope]]
+      term x = object ["term" .= x]
+      v i = variable i []
+      apply f x = set "eliminations" (toJSON [application x]) f
+      callable = term (object ["tag" .= ("native-callable" :: Text),"input" .= named "Bool"
+        ,"result" .= named "Bool","binds" .= True])
+      family name xs = term (call name xs [])
+      envelopeAt i = family "ContextEnvelope" [v i]
+      construct = set "type" (signature [callable,named "Bool",family "ContextTicket" [apply (v 1) (v 0)]] (envelopeAt 2))
+        $ operation "buildContextEnvelope" [] "Bool" (done 3 (constructor "contextEnvelope" [v 2,v 1,v 0]))
+      reconstruct = set "type" (signature [callable,envelopeAt 0] (envelopeAt 1))
+        $ operation "rebuildContextEnvelope" [] "Bool" (split 1
+          [("contextEnvelope",2,done 3 (constructor "contextEnvelope" [v 2,v 1,v 0]))])
+      observe = set "type" (signature [callable,envelopeAt 0] (named "Bool"))
+        $ operation "readContextEnvelope" [] "Bool" (done 2 (variable 0 ["member","ticketValue"]))
+      ctor = set "patternCaptures" (Number 1) $ declaration "contextEnvelope" "constructor" (named "Bool")
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- [construct,reconstruct,observe,ctor]]) (declarations base)}
+  cs <- traverse (either (fail . show) pure . A.function inv M.empty shapes) [construct,reconstruct,observe]
+  let [build,rebuild,readValue] = cs
+  forM_ [False,True] $ \prefix -> forM_ [False,True] $ \payload -> do
+    let member = R "ContextTicket" (M.fromList [("ContextTicket.index0",B (not prefix)),("ticketIndex",B (not prefix)),("ticketValue",B payload)])
+        value = R "ContextEnvelope" (M.fromList [("prefix",B prefix),("member",member)])
+    check (eval [Fn "suppliedIndex",B prefix,member] (A.body build) == value)
+      "context construction stored a callback or changed the domain payload"
+    check (eval [Fn "suppliedIndex",value] (A.body rebuild) == value)
+      "context reconstruction read a fictional callback field"
+    check (eval [Fn "suppliedIndex",value] (A.body readValue) == B payload)
+      "context projection lost the nested payload"
+  let wrong = set "compiled" (done 3 (constructor "contextEnvelope" [v 2,constructor "false" [],v 0])) construct
+  check (isLeft (A.function inv M.empty shapes wrong))
+    "a constructor accepted a member indexed by a different preceding value"
+  let rendered = Text.unlines (["package 'ContextualFixture' {"] ++ A.renderShapes id shapes
+        ++ concatMap (A.renderCalculation inv shapes id) cs ++ ["}"])
+  check (not ("virtualContext" `Text.isInfixOf` rendered)
+    && not ("ContextEnvelope.index0" `Text.isInfixOf` rendered))
+    "contextual membership emitted stored function identity"
+  check ("'buildContextEnvelope'::'input0'(" `Text.isInfixOf` rendered
+    && "'rebuildContextEnvelope'::'result'.'member'.'ContextTicket.index0'" `Text.isInfixOf` rendered)
+    "contextual membership constraints were omitted at construction or return"
+  pure rendered
 
 parameterizedChecks :: Inventory -> IO ()
 parameterizedChecks base = do
@@ -2251,6 +2303,15 @@ familyParameterChecks = do
   check (P.typeKey (closure 0) /= P.typeKey (P.FamilyExpression bool 0
     (P.FamilyApplication (P.OpenFamily 1 [bool] (P.LevelExpr 0 M.empty)) [P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)))
     "distinct family bindings were merged"
+  let callback = P.Callable [bool] bool
+      contextualFamily input slot = P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool (P.IndexApply (P.IndexTyped callback input) (P.IndexLocal slot))])
+        (P.LevelExpr 0 M.empty)
+      carrier input slot = P.Named "DependentPair" [bool,contextualFamily input slot]
+  check (P.typeKey (carrier (P.IndexInput 0) 0) == P.typeKey (carrier (P.IndexInput 7) 3))
+    "a free callback under a family binder leaked its caller position into the carrier identity"
+  check (P.typeKey (carrier (P.IndexInput 0) 0) /= P.typeKey (P.Named "DependentPair" [bool,closure 0]))
+    "a computed family refinement was merged with a direct family selection"
 
 reductionChecks :: IO ()
 reductionChecks = do

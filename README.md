@@ -43,8 +43,11 @@ browser review and the official SysML notebook tools.
   callback, preserving distinct positions even when field types repeat.
   The self specification's first-order evaluator also translates table lookup,
   expression evaluation, argument lists, and evidence-producing operation members.
-  Callback behavior is independently tested; the pinned Pilot validates these
-  models but cannot execute the callback bindings reliably.
+  Supplied calculations can compute dependent record and constructor indices;
+  input and result constraints check the selected membership while retaining
+  complete payloads and equality evidence.
+  Callback behavior is independently tested; the pinned Pilot cannot execute
+  the callback bindings reliably.
 - Retain supported type and indexed-family fields in records as runtime schema
   bindings. Conversion, selection, and reindexing preserve complete domain
   values and membership evidence, with constraints linking them to their binding.
@@ -111,12 +114,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 294 native calculation functions out of 722 (40.7%)
-and 138 native equality statements, including 41 compiler-generated helpers.
-Ten functions have both representations: 422/722 function declarations (58.4%)
+The default self model has 317 native calculation functions out of 722 (43.9%)
+and 145 native equality statements, including 41 compiler-generated helpers.
+Ten functions have both representations: 452/722 function declarations (62.6%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 435 unresolved requirements. Source-only proof retention is
+There are still 425 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

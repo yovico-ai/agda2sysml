@@ -30,6 +30,7 @@ from schema_records import verify_schema_records
 from dependent_schemas import verify_dependent_schemas
 from arithmetic_indices import verify_arithmetic_indices
 from dependent_patterns import verify_dependent_patterns
+from contextual_indices import verify_contextual_indices
 
 
 def check(condition, message):
@@ -320,6 +321,12 @@ models:
     dependent_schema_evidence = verify_dependent_schemas(self_output)
     arithmetic_index_evidence = verify_arithmetic_indices(self_output)
     pattern_evidence = verify_dependent_patterns(self_output)
+    contextual_evidence = verify_contextual_indices(self_output)
+    check(contextual_evidence['operations'] == 8
+          and contextual_evidence['comparisons'] >= 50
+          and contextual_evidence['invalidCasesRejected'] >= 12
+          and contextual_evidence['mutationsDetected'] == 9,
+          'computed dependent membership lacks complete operations or mismatch checks')
     check(pattern_evidence['operations'] == 8
           and pattern_evidence['statements'] == 6
           and pattern_evidence['comparisons'] >= 1000

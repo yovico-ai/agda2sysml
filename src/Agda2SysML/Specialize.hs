@@ -37,7 +37,14 @@ data Type = Unused | Parameter Int | Open Int LevelExpr | Named Text [Type] | Le
 -- on proper projections are retained until those declarations are cloned.
 data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexConstructor Text [Type] [IndexExpr]
   | IndexNatural Integer | IndexSuccessor IndexExpr | IndexArgument Int | IndexApply IndexExpr IndexExpr
+  | IndexTyped Type IndexExpr
   | IndexProject Text [Type] IndexExpr | IndexCall Text [Type] [IndexExpr] deriving (Eq,Ord,Show)
+
+-- Type evidence for a callable reference is retained while abstracting free
+-- context under a family binder. Re-reading a checked type is idempotent.
+typedIndex :: Type -> IndexExpr -> IndexExpr
+typedIndex ty (IndexTyped _ x) = typedIndex ty x
+typedIndex ty x = IndexTyped ty x
 
 -- A carrier/helper identity abstracts runtime values in its static arguments.
 -- The captured values become an explicit, ordered telescope prefix; repeated
@@ -69,6 +76,7 @@ familyLocals = free S.empty
     free _ _ = S.empty
     indices bound (IndexLocal i) = if S.member i bound then S.empty else S.singleton i
     indices _ IndexArgument{} = S.singleton (-1)
+    indices bound (IndexTyped ty x) = free bound ty `S.union` indices bound x
     indices bound (IndexApply f x) = indices bound f `S.union` indices bound x
     indices bound (IndexConstructor _ ts xs) = S.unions (map (free bound) ts ++ map (indices bound) xs)
     indices bound (IndexProject _ ts x) = S.unions (indices bound x:map (free bound) ts)
@@ -95,6 +103,7 @@ canonicalFamilies ty = go M.empty start ty
     ix names next (IndexProject f ts x) = IndexProject f (map (go names next) ts) (ix names next x)
     ix names next (IndexCall f ts xs) = IndexCall f (map (go names next) ts) (map (ix names next) xs)
     ix names next (IndexSuccessor x) = IndexSuccessor (ix names next x)
+    ix names next (IndexTyped ty x) = typedIndex (go names next ty) (ix names next x)
     ix names next (IndexApply f x) = IndexApply (ix names next f) (ix names next x)
     ix _ _ x = x
 
@@ -107,6 +116,7 @@ applyTypeFamily (FamilyExpression domain slot body _) [Runtime actual value] | d
     replace (IndexProject f ts x) = IndexProject f (map (mapIndices replace) ts) (replace x)
     replace (IndexCall f ts xs) = IndexCall f (map (mapIndices replace) ts) (map replace xs)
     replace (IndexSuccessor x) = IndexSuccessor (replace x)
+    replace (IndexTyped ty x) = typedIndex (mapIndices replace ty) (replace x)
     replace (IndexApply f x) = IndexApply (replace f) (replace x)
     replace x = x
 applyTypeFamily FamilyExpression{} _ = refuse Semantics "Type-family lambda has incompatible index arguments"
@@ -133,18 +143,30 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
           -- specializing a carrier used by that telescope, it is instead a
           -- free value and must become an explicit captured index.
           erase IndexArgument{} = if bound then IndexCaptured 0 else IndexInput 0
+          erase (IndexTyped ty x) = typedIndex (mapIndices erase ty) (erase x)
           erase (IndexApply f x) = IndexApply (erase f) (erase x)
           erase x = x
           localsInIndex = familyLocals (Runtime domain ix)
           remainingLocals = if bound then localsInIndex else S.delete (-1) localsInIndex
       if closed (Runtime domain (erase ix)) || not (S.null remainingLocals)
-        then pure (Runtime domain ix) else do
+        then Runtime domain <$> nested bound locals ix else do
         slots <- gets id
-        let value = (domain,ix)
+        let value = (domain,case ix of IndexTyped _ x -> x; _ -> ix)
             slot = length (takeWhile (/= value) slots)
         when (slot == length slots) (modify' (++ [value]))
         pure (Runtime domain (IndexCaptured slot))
     visit _ _ ty = pure ty
+    nested bound locals (IndexTyped ty ix) = do
+      captured <- visit bound locals (Runtime ty ix)
+      case captured of
+        Runtime _ value -> pure (typedIndex ty value)
+        _ -> pure (typedIndex ty ix)
+    nested bound locals (IndexApply f x) = IndexApply <$> nested bound locals f <*> nested bound locals x
+    nested bound locals (IndexCall f ts xs) = IndexCall f <$> traverse (visit bound locals) ts <*> traverse (nested bound locals) xs
+    nested bound locals (IndexConstructor f ts xs) = IndexConstructor f <$> traverse (visit bound locals) ts <*> traverse (nested bound locals) xs
+    nested bound locals (IndexProject f ts x) = IndexProject f <$> traverse (visit bound locals) ts <*> nested bound locals x
+    nested bound locals (IndexSuccessor x) = IndexSuccessor <$> nested bound locals x
+    nested _ _ ix = pure ix
 
 shiftIndices :: Int -> Type -> Type
 shiftIndices offset = mapIndices go
@@ -154,6 +176,7 @@ shiftIndices offset = mapIndices go
     go (IndexConstructor c ts xs) = IndexConstructor c (map (shiftIndices offset) ts) (map go xs)
     go (IndexProject f ts i) = IndexProject f (map (shiftIndices offset) ts) (go i)
     go (IndexCall f ts xs) = IndexCall f (map (shiftIndices offset) ts) (map go xs)
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go ix = ix
 
@@ -163,6 +186,9 @@ materializeCaptures = mapIndices go
     go (IndexCaptured slot) = IndexInput slot
     go (IndexSuccessor i) = IndexSuccessor (go i)
     go (IndexConstructor c ts xs) = IndexConstructor c (map materializeCaptures ts) (map go xs)
+    go (IndexProject f ts x) = IndexProject f (map materializeCaptures ts) (go x)
+    go (IndexCall f ts xs) = IndexCall f (map materializeCaptures ts) (map go xs)
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go ix = ix
 
@@ -405,7 +431,7 @@ readType inv env t = case string (get "tag" t) of
             contextual <- substitute args (replaceInputs prior domain)
             value <- app e >>= readIndex inv env contextual
             case value of
-              Runtime _ ix -> pure (prior ++ [ix])
+              Runtime domain ix -> pure (prior ++ [case domain of Callable{} -> typedIndex domain ix; _ -> ix])
               _ -> refuse Semantics "Computed index argument is not a value") [] (zip (drop count es) (inputs sig))
           out <- substitute args (replaceInputs values (output sig))
           pure (Runtime out (IndexCall name args values))
@@ -549,6 +575,7 @@ replaceInputs values = mapIndices go
     go (IndexSuccessor x) = IndexSuccessor (go x)
     go (IndexProject f ts x) = IndexProject f (map (replaceInputs values) ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map (replaceInputs values) ts) (map go xs)
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go x = x
 
@@ -560,6 +587,7 @@ replaceKnownInputs values = mapIndices go
     go (IndexSuccessor x) = IndexSuccessor (go x)
     go (IndexProject f ts x) = IndexProject f (map (replaceKnownInputs values) ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map (replaceKnownInputs values) ts) (map go xs)
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go x = x
 
@@ -569,6 +597,7 @@ applyCallback :: [IndexExpr] -> Type -> Type
 applyCallback values = mapIndices go
   where
     go (IndexArgument i) | i >= 0 && i < length values = values !! i
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go (IndexConstructor c ts xs) = IndexConstructor c (map (applyCallback values) ts) (map go xs)
     go (IndexProject f ts x) = IndexProject f (map (applyCallback values) ts) (go x)
@@ -584,7 +613,7 @@ eliminateIndices inv env bound@(Runtime (SchemaValue domains _) _) es
       values <- sequence [app e >>= readIndex inv env domain | (domain,e) <- zip domains es]
       pure (FamilyApplication (SelectedFamily bound) values)
 eliminateIndices _ _ value [] = Right value
-eliminateIndices inv env (Runtime (Callable domains out) fn) es = do
+eliminateIndices inv env (Runtime fnType@(Callable domains out) fn) es = do
   unless (length es >= length domains) (refuse Representation "Partial callback application requires runtime closure construction")
   values <- foldM (\prior (domain,e) -> do
     term <- app e
@@ -592,7 +621,7 @@ eliminateIndices inv env (Runtime (Callable domains out) fn) es = do
     case value of
       Runtime _ ix -> pure (prior ++ [ix])
       _ -> refuse Semantics "Callback index argument is not a value") [] (zip domains es)
-  eliminateIndices inv env (Runtime (applyCallback values out) (foldl IndexApply fn values)) (drop (length domains) es)
+  eliminateIndices inv env (Runtime (applyCallback values out) (foldl IndexApply (typedIndex fnType fn) values)) (drop (length domains) es)
 eliminateIndices inv env value (e:es) = projectIndex inv value e >>= \next -> eliminateIndices inv env next es
 
 projectIndex :: Inventory -> Type -> Value -> Either Refusal Type
@@ -709,6 +738,7 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
     go (IndexCall f ts values) = IndexCall f <$> traverse (substitute args) ts <*> traverse go values
     go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (substitute args) ts <*> traverse go xs
     go (IndexSuccessor i) = IndexSuccessor <$> go i
+    go (IndexTyped ty x) = typedIndex <$> substitute args ty <*> go x
     go (IndexApply f x) = IndexApply <$> go f <*> go x
     go i = Right i
 closed :: Type -> Bool
@@ -729,12 +759,14 @@ closed (FamilyExpression domain slot body level) = closed domain && closed (Leve
     erase (IndexProject f ts x) = IndexProject f (map (mapIndices erase) ts) (erase x)
     erase (IndexCall f ts xs) = IndexCall f (map (mapIndices erase) ts) (map erase xs)
     erase (IndexSuccessor x) = IndexSuccessor (erase x)
+    erase (IndexTyped ty x) = typedIndex (mapIndices erase ty) (erase x)
     erase (IndexApply f x) = IndexApply (erase f) (erase x)
     erase x = x
 closed (Runtime ty index) = closed ty && go index
   where
     go IndexCaptured{} = True
     go IndexArgument{} = True
+    go (IndexTyped ty x) = closed ty && go x
     go (IndexApply f x) = go f && go x
     go IndexLocal{} = False
     go IndexInput{} = False
@@ -904,6 +936,7 @@ indexValue (IndexCaptured i) = object ["capture" .= i]
 indexValue (IndexLocal i) = object ["familyInput" .= i]
 indexValue (IndexArgument 0) = object ["callbackArgument" .= True]
 indexValue (IndexArgument i) = object ["callbackArgument" .= i]
+indexValue (IndexTyped _ x) = indexValue x
 indexValue (IndexApply f x) = object ["callback" .= indexValue f,"argument" .= indexValue x]
 indexValue (IndexNatural n) = object ["natural" .= n]
 indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
@@ -981,6 +1014,7 @@ indexTerm :: Int -> IndexExpr -> Value
 indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
 indexTerm _ (IndexLocal _) = object ["tag" .= ("unbound-family-input" :: Text)]
 indexTerm _ IndexArgument{} = object ["tag" .= ("unbound-callback-input" :: Text)]
+indexTerm depth (IndexTyped _ x) = indexTerm depth x
 indexTerm depth (IndexApply f x) = let t = indexTerm depth f in
   set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (indexTerm depth x)])) t
 indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .= (depth-i-1),"eliminations" .= ([] :: [Value])]
@@ -1212,6 +1246,7 @@ showType inv (Runtime _ index) = showIndex index
     showIndex (IndexLocal i) = "family input " <> T.pack (show i)
     showIndex (IndexInput i) = "input" <> T.pack (show i)
     showIndex (IndexArgument i) = "argument" <> if i == 0 then "" else T.pack (show i)
+    showIndex (IndexTyped _ x) = showIndex x
     showIndex (IndexApply f x) = showIndex f <> "(" <> showIndex x <> ")"
     showIndex (IndexNatural n) = T.pack (show n)
     showIndex (IndexSuccessor i) = "suc(" <> showIndex i <> ")"
@@ -1350,7 +1385,7 @@ ensureType inv stack ty@(Named s allArgs) = do
       prefix = length captures
       instantiate sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
   unless (all closed args) (abort Representation "Carrier specialization requires concrete static arguments")
-  forM_ args $ \arg -> case arg of Level{} -> pure (); Unused -> pure (); _ -> ensureType inv stack arg
+  forM_ (staticArguments allArgs) $ \arg -> case arg of Level{} -> pure (); Unused -> pure (); _ -> ensureType inv stack arg
   forM_ (drop (length args) allArgs) $ \arg -> case arg of
     Runtime domain index -> ensureType inv stack domain >> ensureIndex inv index
     _ -> abort Representation "Static argument follows a runtime family index"
@@ -1369,6 +1404,7 @@ ensureType inv stack ty@(Named s allArgs) = do
     let n = length kinds
     unless (n == length args) (abort Syntax "Carrier parameter arity mismatch")
     indexTypes <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate indices)
+    let contexts = [i | (i,Callable{}) <- zip [0 :: Int ..] (take (prefix+sourceParameters-n) indexTypes)]
     mapM_ (ensureType inv (instanceKey s args:stack)) indexTypes
     liftEither (validateArguments inv kinds args)
     cs <- if get "kind" d == String "record" then (:[]) . string <$> liftEither (field inv "constructor" d)
@@ -1382,7 +1418,7 @@ ensureType inv stack ty@(Named s allArgs) = do
         nativeFields = prefixFields ++ map (`instanceKey` args) fields
     -- A header permits only the same static instance to recur. Every payload
     -- is still checked before this provisional declaration becomes usable.
-    let header = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
+    let header = set "nativeContextIndices" (toJSON contexts) $ set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
           $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
           $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then recordPrefix else 0))
           $ (case (get "kind" d,cs) of
@@ -1397,7 +1433,7 @@ ensureType inv stack ty@(Named s allArgs) = do
       out <- liftEither (instantiate (output sig))
       unless (typeKey out == typeKey ty && case out of
         Named _ xs -> length xs == n + length indices; _ -> False)
-        (abort Semantics "Constructor result has wrong family or index arity")
+        (abort Semantics ("Constructor result has wrong family or index arity: " <> typeKey out <> " /= " <> typeKey ty))
       mapM_ (ensureType inv (instanceKey s args:stack)) ins
       case out of
         Named _ xs -> mapM_ (\x -> case x of Runtime _ i -> ensureIndex inv i; _ -> pure ()) xs
@@ -1418,6 +1454,7 @@ ensureType inv stack ty@(Named s allArgs) = do
             rebaseIndex (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexCall f ts xs) = IndexCall f (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexSuccessor x) = IndexSuccessor (rebaseIndex x)
+            rebaseIndex (IndexTyped ty x) = typedIndex (mapIndices rebaseIndex ty) (rebaseIndex x)
             rebaseIndex (IndexApply f x) = IndexApply (rebaseIndex f) (rebaseIndex x)
             rebaseIndex x = x
         forM_ (zip prefixFields (take recordPrefix ins)) $ \(f,domain) ->
@@ -1438,7 +1475,7 @@ ensureType inv stack ty@(Named s allArgs) = do
                 (set "proper" (String (typeKey ty)) (set "index" (Number 1) p)) $ clone inv f args fd
           save f args fd'
       _ -> abort Representation "Record requires exactly one constructor"
-    let d' = set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
+    let d' = set "nativeContextIndices" (toJSON contexts) $ set "type" (telescope indexTypes (object ["term" .= object ["tag" .= ("sort" :: Text)]]))
           $ set "parameters" (Number 0) $ set "fields" (toJSON nativeFields)
           $ set "nativeRecordCaptures" (toJSON (if get "kind" d == String "record" then recordPrefix else 0))
           $ (case (get "kind" d,cs) of
@@ -1474,6 +1511,7 @@ ensureIndex inv (IndexCall f args values) = do
   ensureFunction inv [] f args
 ensureIndex inv (IndexProject _ _ receiver) = ensureIndex inv receiver
 ensureIndex inv (IndexSuccessor i) = ensureIndex inv i
+ensureIndex inv (IndexTyped _ x) = ensureIndex inv x
 ensureIndex inv (IndexApply f x) = ensureIndex inv f >> ensureIndex inv x
 ensureIndex inv (IndexConstructor _ _ xs) = mapM_ (ensureIndex inv) xs
 ensureIndex _ _ = pure ()
@@ -1622,6 +1660,7 @@ specializeTree inv stack env out tree
               rewrite (IndexProject name ts x) = IndexProject name (map reindex ts) (rewrite x)
               rewrite (IndexCall name ts xs) = IndexCall name (map reindex ts) (map rewrite xs)
               rewrite (IndexSuccessor x) = IndexSuccessor (rewrite x)
+              rewrite (IndexTyped ty x) = typedIndex (reindex ty) (rewrite x)
               rewrite (IndexApply f x) = IndexApply (rewrite f) (rewrite x)
               rewrite x = x
               bindings = map rewrite contextual ++ payloadIndices
@@ -1758,6 +1797,7 @@ sourceTypeTerm inv = sourceTypeAt
     sourceIndex depth (IndexProject f _ receiver) = let t = sourceIndex depth receiver in
       set "eliminations" (toJSON (array (get "eliminations" t)
         ++ [object ["tag" .= ("project" :: Text),"symbol" .= f]])) t
+    sourceIndex depth (IndexTyped _ x) = sourceIndex depth x
     sourceIndex depth (IndexApply f x) = let t = sourceIndex depth f in
       set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (sourceIndex depth x)])) t
     sourceIndex depth index = indexTerm depth index
@@ -1992,6 +2032,7 @@ expression inv stack env expected term = do
               resolvedIndex (IndexProject _ ts x) = all resolved ts && resolvedIndex x
               resolvedIndex (IndexCall _ ts xs) = all resolved ts && all resolvedIndex xs
               resolvedIndex (IndexSuccessor x) = resolvedIndex x
+              resolvedIndex (IndexTyped ty x) = resolved ty && resolvedIndex x
               resolvedIndex (IndexApply f x) = resolvedIndex f && resolvedIndex x
               resolvedIndex _ = True
           (actual,v) <- expression inv stack env (fill patternType) value
@@ -2112,6 +2153,7 @@ higherOrder inv stack env term = do
       descend (IndexSuccessor x) = IndexSuccessor (refineIndex (descend x))
       descend (IndexCall f ts xs) = IndexCall f (map refine ts) (map (refineIndex . descend) xs)
       descend (IndexProject f ts x) = IndexProject f (map refine ts) (refineIndex (descend x))
+      descend (IndexTyped ty x) = typedIndex (refine ty) (refineIndex (descend x))
       descend (IndexApply f x) = IndexApply (refineIndex (descend f)) (refineIndex (descend x))
       descend x = x
       callerPosition i = length (filter isDynamic (drop (i+1) env))
@@ -2127,6 +2169,7 @@ higherOrder inv stack env term = do
       rename (IndexSuccessor x) = IndexSuccessor (rename x)
       rename (IndexCall f ts xs) = IndexCall f (map rebase ts) (map rename xs)
       rename (IndexProject f ts x) = IndexProject f (map rebase ts) (rename x)
+      rename (IndexTyped ty x) = typedIndex (rebase ty) (rename x)
       rename (IndexApply f x) = IndexApply (rename f) (rename x)
       rename x = x
       allTypes = map (rebase . refine) (captureTypes ++ runtimeTypes)
@@ -2206,6 +2249,7 @@ higherOrder inv stack env term = do
         check _ (IndexInput i) = i >= 0 && i < bound
         check _ IndexCaptured{} = False
         check _ IndexArgument{} = True
+        check locals (IndexTyped ty x) = go locals ty && check locals x
         check locals (IndexApply f x) = check locals f && check locals x
         check locals (IndexConstructor _ types values) = all (go locals) types && all (check locals) values
         check locals (IndexSuccessor value) = check locals value
