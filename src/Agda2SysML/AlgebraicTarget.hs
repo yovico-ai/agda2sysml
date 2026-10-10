@@ -30,9 +30,10 @@ data Shape = ShapeData
   { shapeSymbol :: Text, isRecord :: Bool, variants :: [Constructor], indexTypes :: [Carrier]
   , sequenceElement :: Maybe Carrier, typeParameters :: [Int]
   , familyParameters :: [(Int,Text)], relationParameter :: Maybe Int, recursivePeers :: [Text]
-  , schemaExtent :: Bool, storedSchema :: Maybe Text, contextIndices :: [Int] } deriving (Eq, Show)
+  , schemaExtent :: Bool, storedSchema :: Maybe Text, contextIndices :: [Int]
+  , relationRowOf :: Maybe Text } deriving (Eq, Show)
 pattern Shape :: Text -> Bool -> [Constructor] -> [Carrier] -> Shape
-pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing [] False Nothing []
+pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing [] False Nothing [] Nothing
 data Expression = Annotated D.Origin Expression
   | NInput Int
   | NArgument Int
@@ -655,13 +656,19 @@ shape inv finite helpers shapes d | get "nativeSchema" d /= Null = do
   (captures,context) <- foldM (\(prior,env) ty -> do
     domain <- carrierIn inv finite helpers shapes env ty
     pure (prior ++ [domain],(domain,Input (length prior)):env)) ([],[]) (array (get "schemaCaptures" d))
-  domains <- traverse (carrierIn inv finite helpers shapes context) (array (get "schemaDomains" d))
+  (domains,_) <- foldM (\(prior,env) ty -> do
+    domain <- carrierIn inv finite helpers shapes env ty
+    pure (prior ++ [domain],(domain,Input (length captures + length prior)):env))
+    ([],context) (array (get "schemaDomains" d))
   dataIndices (captures ++ domains)
   let symbol = string (get "name" d)
       binding = string (get "schemaBinding" d)
       row = binding <> ".row"
       indices = map Input [0..length captures-1]
       atCaptures owner = if null captures then Named owner else Fibre owner indices
+      memberDomain = mapCarrier (mapExpression (\e -> case e of
+        Input i | i >= length captures -> Just (Input (i+1))
+        _ -> Nothing))
       sh = case string (get "nativeSchema" d) of
         "binding" -> (Shape symbol True [] captures) {sequenceElement = Just (atCaptures row),schemaExtent = True}
         "row" -> Shape symbol True [Constructor (symbol <> ".row")
@@ -669,15 +676,18 @@ shape inv finite helpers shapes d | get "nativeSchema" d /= Null = do
             ++ [(indexField symbol (i+length captures),t) | (i,t) <- zip [0..] domains]
             ++ [(familyValue symbol,AnyValue)]) indices] captures
         _ -> (Shape symbol True [Constructor (symbol <> ".member") [(familyValue symbol,AnyValue)] []]
-          (captures ++ [atCaptures binding] ++ domains)) {storedSchema = Just binding}
+          (captures ++ [atCaptures binding] ++ map memberDomain domains)) {storedSchema = Just binding}
   pure (sh {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d})
 shape inv finite helpers shapes d | get "nativeFamily" d /= Null = do
   slot <- integer (get "nativeFamily" d)
-  domains <- traverse (carrierIn inv finite helpers shapes []) (array (get "familyDomains" d))
+  (domains,_) <- foldM (\(prior,env) ty -> do
+    domain <- carrierIn inv finite helpers shapes env ty
+    pure (prior ++ [domain],(domain,Input (length prior)):env))
+    ([],[]) (array (get "familyDomains" d))
   dataIndices domains
   let symbol = string (get "name" d)
       member = Shape symbol True [Constructor (symbol <> ".member") [(familyValue symbol,AnyValue)] []] domains
-  pure (member {typeParameters = Specialize.nativeParameters d,familyParameters = [(slot,symbol)],relationParameter = Just slot})
+  pure (member {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d,relationParameter = Just slot})
 shape inv finite helpers shapes d | get "nativeSequence" d /= Null = do
   element <- carrierIn inv finite helpers shapes [] (get "nativeSequence" d)
   case element of
@@ -1474,7 +1484,8 @@ familyRow s = s <> ".relation-row"
 familyValue :: Text -> Text
 familyValue s = s <> ".value"
 relationRow :: Shape -> Shape
-relationRow member = Shape s True [Constructor (s <> ".row") fields []] []
+relationRow member = (Shape s True [Constructor (s <> ".row") fields []] [])
+  {relationRowOf = Just (shapeSymbol member)}
   where
     s = familyRow (shapeSymbol member)
     unbound TypeParameter{} = AnyValue
@@ -1950,8 +1961,9 @@ familyDomainConstraints shapes label binding families =
   [binding (familyName slot) <> "->forAll { in row; " <> condition <> " }"
   | (slot,symbol) <- families,Just member <- [M.lookup symbol shapes]
   ,(i,domain) <- zip [0..] (indexTypes member)
-  ,let field = "(row as " <> quote (label (familyRow symbol)) <> ")." <> quote (label (indexField (familyRow symbol) i))
-  ,condition <- refinementTextIn shapes label (T.pack . show) binding field domain
+  ,let rowField j = "(row as " <> quote (label (familyRow symbol)) <> ")." <> quote (label (indexField (familyRow symbol) j))
+       field = rowField i
+  ,condition <- refinementTextIn shapes label rowField binding field domain
     ++ parameterRefinements shapes label binding field domain]
 
 validity :: Shapes -> (Text -> Text) -> Shape -> Text
@@ -1971,10 +1983,11 @@ validity shapes label sh = case constraints of
          | c <- variants sh,(i,(domain,e)) <- zip [0..] (zip (indexTypes sh) (resultIndices c)),i `notElem` contextIndices sh, null (contextIndices sh)]
       ++ [guarded c constraint | c <- variants sh,(f,t) <- storedFields sh c
          ,constraint <- (if null (contextIndices sh) then refinementTextIn shapes label (\j -> fieldText (fst (payload c !! j))) fieldText (fieldText f) t else [])
-           ++ parameterRefinements shapes label fieldText (fieldText f) t]
+           ++ [condition | relationRowOf sh == Nothing
+              ,condition <- parameterRefinements shapes label fieldText (fieldText f) t]]
       ++ [condition | (i,t) <- zip [0..] (indexTypes sh)
          ,condition <- parameterRefinements shapes label fieldText (fieldText (indexField (shapeSymbol sh) i)) t
-           ++ [condition | storedSchema sh /= Nothing
+           ++ [condition | storedSchema sh /= Nothing || relationParameter sh /= Nothing
               ,condition <- refinementTextIn shapes label (\j -> fieldText (indexField (shapeSymbol sh) j)) fieldText (fieldText (indexField (shapeSymbol sh) i)) t]]
       ++ familyDomainConstraints shapes label fieldText (familyParameters sh)
       ++ (if null (recursivePeers sh) then [] else

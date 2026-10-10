@@ -1176,3 +1176,30 @@ unsupported. The existing callback purity/totality requirement and Pilot
 execution limitations still apply. The emitted-model tests execute supplied
 SysML callbacks and check complete results, mismatched bindings and evidence,
 and removal of a contextual input constraint.
+
+### Dependent family parameters and partial application
+
+A family parameter may have an ordered dependent telescope, for example
+`Member : (tag : Tag) → Index tag → Set`. Later domains retain references to
+earlier indices. Applying `Member tag` produces a checked residual family over
+`Index tag`; applying it to a member of `Index otherTag` is refused. Named,
+transparent family aliases can be eta-expanded using their checked domains.
+Family binders, enclosing runtime inputs, and callback arguments have distinct
+scopes. Nested lambdas are alpha-renamed before substitution and capture
+deduplication, including lambdas inside projection type arguments.
+
+Open-family relation rows retain every index and the complete payload. Their
+constraints relate later indices to preceding row fields and to the supplied
+family bindings. Stored schemas use the same ordered domains; member indices
+also account for the stored schema binding and any external captures. Neither
+partial application nor equality transport erases an index or an equality
+witness. Callback arguments applied under a family binder are captured with
+their checked domains, and dependent capture projections refer to the earlier
+captured fields.
+
+This extension targets the unchanged `DependentSums.Constructors.encode`,
+`decode`, and `native`, and `SpecializedFamilies.Instantiation.encode`, `decode`,
+and `specialize`. `DependentSums.Constructors.dispatch` still needs support for
+static type and universe parameters that follow runtime inputs. These changes
+have compiler and independent emitted-model checks; Pilot is not part of this
+stage's verification.
