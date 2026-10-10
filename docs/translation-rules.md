@@ -1145,3 +1145,34 @@ results, including non-identity substitutions and unequal context sizes, rejects
 invalid bounds/counts/bindings, and checks a removed-captured-constraint mutation.
 Unsupported indexed records, index calculations and higher-order signatures
 still produce explicit refusals; this rule does not encode a general Agda evaluator.
+
+### Runtime-computed membership
+
+A dependent field can select its index through a supplied calculation, for
+example `Σ Prefix (λ prefix → Member (index prefix))`. Specialization retains
+the checked type of each free callback while abstracting its surrounding
+family expression. Nested carriers are prepared with the caller's actual
+arguments before those arguments become captured slots.
+
+Callable parameters become contextual membership bindings. They remain native
+calculation inputs; they are neither stored as data attributes nor compared for
+function identity. Ordinary data captures and indices remain stored. Input and
+result assertions substitute the actual callback into the dependent payload
+constraints, including nested fields and constructor result indices. Two
+callbacks may therefore admit the same value when they agree on its relevant
+inputs, even if they differ elsewhere. Pattern matching recovers the callback
+from the checked input context instead of projecting a fictional record field.
+
+This rule supports the unchanged `DependentRecords.Record.encode`, `decode`,
+`native`, `forgetInput`, and `admitInput`, and `IndexedValues.Family.encode`,
+`decode`, and `admit-result`. Complete members, schema bindings and equality
+witnesses remain in the generated values. The correspondence report distinguishes
+`contextParameters` from physical `indices`; contextual payload refinements are
+checked at calculation membership boundaries.
+
+Recursive contextual carriers, contextual carriers with additional stored
+callable payloads, and genuinely function-valued datatype indices remain
+unsupported. The existing callback purity/totality requirement and Pilot
+execution limitations still apply. The emitted-model tests execute supplied
+SysML callbacks and check complete results, mismatched bindings and evidence,
+and removal of a contextual input constraint.

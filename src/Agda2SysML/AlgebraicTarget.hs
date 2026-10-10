@@ -30,9 +30,9 @@ data Shape = ShapeData
   { shapeSymbol :: Text, isRecord :: Bool, variants :: [Constructor], indexTypes :: [Carrier]
   , sequenceElement :: Maybe Carrier, typeParameters :: [Int]
   , familyParameters :: [(Int,Text)], relationParameter :: Maybe Int, recursivePeers :: [Text]
-  , schemaExtent :: Bool, storedSchema :: Maybe Text } deriving (Eq, Show)
+  , schemaExtent :: Bool, storedSchema :: Maybe Text, contextIndices :: [Int] } deriving (Eq, Show)
 pattern Shape :: Text -> Bool -> [Constructor] -> [Carrier] -> Shape
-pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing [] False Nothing
+pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing [] False Nothing []
 data Expression = Annotated D.Origin Expression
   | NInput Int
   | NArgument Int
@@ -583,6 +583,21 @@ dataIndices = mapM_ $ \t -> case t of
   Callable{} -> refuse Representation "Function-valued family indices require a separate representation rule"
   _ -> pure ()
 
+contextualPositions :: Value -> [Int]
+contextualPositions d = [round n | Number n <- array (get "nativeContextIndices" d)]
+
+virtualFields :: Shape -> Constructor -> [Text]
+virtualFields sh con = [f | i <- contextIndices sh, Input slot <- take 1 (drop i (resultIndices con))
+  ,(f,Callable{}):_ <- [drop slot (payload con)]]
+
+contextFields :: Shape -> [Expression] -> Constructor -> [(Text,Expression)]
+contextFields sh xs con = [(f,value) | i <- contextIndices sh
+  ,Input slot <- take 1 (drop i (resultIndices con)),(f,_):_ <- [drop slot (payload con)]
+  ,value <- take 1 (drop i xs)]
+
+storedFields :: Shape -> Constructor -> [(Text,Carrier)]
+storedFields sh con = filter ((`notElem` virtualFields sh con) . fst) (payload con)
+
 discover :: Inventory -> M.Map Text F.Domain -> (Shapes,M.Map Text Refusal)
 discover inv finite = go M.empty candidates
   where
@@ -595,9 +610,9 @@ discover inv finite = go M.empty candidates
       unless (get "kind" d == String "datatype" && get "parameters" d == Number 0) (refuse Representation "No provisional datatype header")
       ty <- field inv "type" d
       (args,_,out) <- typedTelescope inv finite helpers accepted ty
-      dataIndices args
+      dataIndices [t | (i,t) <- zip [0..] args,i `notElem` contextualPositions d]
       unless (get "tag" (get "term" out) == String "sort") (refuse Representation "Invalid datatype header")
-      pure ((Shape (string (get "name" d)) False [] args) {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d})
+      pure ((Shape (string (get "name" d)) False [] args) {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d,contextIndices = contextualPositions d})
     deps sh = S.fromList [s | t <- indexTypes sh ++ case sequenceElement sh of
         Just element -> [element]
         Nothing -> [t | c <- variants sh,(_,t) <- payload c]
@@ -616,7 +631,7 @@ discover inv finite = go M.empty candidates
       components = stronglyConnComp [(sh,s,S.toList (deps sh)) | (s,sh) <- M.toList parsed]
       checked (AcyclicSCC sh) = Right [sh]
       checked (CyclicSCC shapes') = do
-        unless (all (\sh -> not (isRecord sh) && sequenceElement sh == Nothing
+        unless (all (\sh -> null (contextIndices sh) && not (isRecord sh) && sequenceElement sh == Nothing
           && maybe False (inductiveChecked inv) (M.lookup (shapeSymbol sh) (declarations inv))) shapes')
           (refuse Semantics "Recursive carrier component lacks safe inductive positivity evidence")
         let peers = map shapeSymbol shapes'
@@ -685,7 +700,10 @@ shape inv finite helpers shapes d = do
   pars <- field inv "parameters" d >>= integer
   ty <- field inv "type" d
   (familyArgs,_,familyResult) <- typedTelescope inv finite helpers shapes ty
-  dataIndices familyArgs
+  let contexts = contextualPositions d
+  unless (all (\i -> i >= 0 && i < length familyArgs && case familyArgs !! i of Callable{} -> True; _ -> False) contexts)
+    (refuse Syntax "Invalid contextual family parameter")
+  dataIndices [t | (i,t) <- zip [0..] familyArgs,i `notElem` contexts]
   unless (pars == 0 && get "tag" (get "term" familyResult) == String "sort")
     (refuse Representation "Family requires admitted indices and no unresolved parameters")
   let s = string (get "name" d); record = get "kind" d == String "record"
@@ -721,10 +739,15 @@ shape inv finite helpers shapes d = do
     unless (length names == length types && S.size (S.fromList names) == length names) $
       refuse Semantics "Record fields do not correspond one-to-one with its constructor telescope"
     let con = Constructor c (zip names types) indices
-        candidate = Shape s record [con] familyArgs
+        candidate = (Shape s record [con] familyArgs) {contextIndices = contexts}
+    unless (length (virtualFields candidate con) == length contexts
+      && all (\i -> case drop i indices of Input slot:_ -> slot == i; _ -> False) contexts)
+      (refuse Semantics "Context parameters must be distinct leading constructor bindings")
+    unless (null contexts || all (\(_,typ) -> case typ of Callable{} -> False; _ -> True) (storedFields candidate con))
+      (refuse Representation "Stored callbacks with contextual member contracts require a separate binding rule")
     if record then mapM_ (checkProjection candidate) (zip names types) else pure ()
     pure con
-  pure ((Shape s record constructors familyArgs) {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d})
+  pure ((Shape s record constructors familyArgs) {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d,contextIndices = contexts})
   where
     checkProjection candidate (f,ty) = do
       let s = shapeSymbol candidate
@@ -970,6 +993,8 @@ functionWith inv finite helpers shapes signatures d = do
     pure (located "native.natural-primitive" ty (get "primitive" d) (Numeric op (Input 0) (Input 1)))
     else case M.lookup s projections of
     Just (owner,typ) -> do
+      unless (maybe True (null . contextIndices) (M.lookup owner shapes))
+        (refuse Representation "Context-dependent projection requires its receiver refinement")
       unless (ins == [Named owner] && out == typ) (refuse Syntax "Proper projection signature mismatch")
       pure (Project (Input 0) s)
     Nothing -> do
@@ -1084,14 +1109,20 @@ functionWith inv finite helpers shapes signatures d = do
           arity <- integer (get "arity" b)
           unless (arity == length fields) (refuse Syntax "Case branch arity does not preserve every constructor payload")
           whenEta eta fields
-          let project f = located "native.case-payload" tree
+          let context f = case typ of
+                Fibre owner xs | Just sh <- M.lookup owner shapes
+                  ,con:_ <- filter ((== c) . constructorSymbol) (variants sh) -> lookup f (contextFields sh xs con)
+                _ -> Nothing
+              project f = located "native.case-payload" tree
                 (object ["constructor" .= c,"field" .= f,"argument" .= i])
-                (case typ of
-                  Natural -> Numeric "monus" selected (NumberLiteral 1)
-                  Named owner | Just sh <- M.lookup owner shapes, Just element <- sequenceElement sh ->
-                    if any ((== f) . fst) (take 1 fields) then SequenceHead element (Project selected sequenceField)
-                    else Construct owner [(sequenceField,SequenceOp "tail" (Project selected sequenceField))]
-                  _ -> Project selected f)
+                (case context f of
+                  Just value -> value
+                  Nothing -> case typ of
+                    Natural -> Numeric "monus" selected (NumberLiteral 1)
+                    Named owner | Just sh <- M.lookup owner shapes, Just element <- sequenceElement sh ->
+                      if any ((== f) . fst) (take 1 fields) then SequenceHead element (Project selected sequenceField)
+                      else Construct owner [(sequenceField,SequenceOp "tail" (Project selected sequenceField))]
+                    _ -> Project selected f)
               fieldValues = [project f | (f,_) <- allFields]
               expanded = take i env ++ [(mapCarrier (instantiate fieldValues) t,project f) | (f,t) <- fields] ++ drop (i+1) env
           equations <- branchEquations equationsInScope typ selected c
@@ -1120,8 +1151,9 @@ functionWith inv finite helpers shapes signatures d = do
     alternatives _ AnyValue _ = refuse Semantics "Cannot inspect a native relation payload"
     alternatives equations (Fibre s indices) selected = do
       sh <- maybe (refuse Representation "Missing indexed carrier") Right (M.lookup s shapes)
-      pure [(constructorSymbol c,payload c) | c <- variants sh,compatible equations (indexTypes sh) indices (endpoints selected c)]
+      pure [(constructorSymbol c,payload c) | c <- variants sh,compatible equations (indexTypes sh) indices (endpointsFor sh indices selected c)]
     alternatives equations (Named s) selected = case M.lookup s shapes of
+      Just sh | not (null (contextIndices sh)) -> refuse Representation "Contextual carrier lacks its membership context"
       Just sh -> let options = [(constructorSymbol c,payload c) | c <- variants sh]
         in Right $ case (sequenceElement sh,normalize (reduce equations (Project selected sequenceField))) of
           (Just _,Sequence []) -> take 1 options
@@ -1130,7 +1162,7 @@ functionWith inv finite helpers shapes signatures d = do
               , owner == tagType s -> filter ((== tag) . fst) options
             | otherwise -> options
       Nothing -> maybe (refuse Representation "Missing case carrier") (Right . map (,[]) . F.constructors) (M.lookup s finite)
-    endpoints selected c = map (instantiate [Project selected f | (f,_) <- payload c]) (resultIndices c)
+    endpointsFor sh xs selected c = map (instantiate [maybe (Project selected f) id (lookup f (contextFields sh xs c)) | (f,_) <- payload c]) (resultIndices c)
     distinct (Literal a) (Literal b) = a /= b
     distinct (Enumeration a x) (Enumeration b y) = a /= b || x /= y
     distinct (NumberLiteral a) (NumberLiteral b) = a /= b
@@ -1167,7 +1199,7 @@ functionWith inv finite helpers shapes signatures d = do
       -- Only replace symbolic references. Constants are never rewritten.
       let tagFact = [(Project selected tagField,Enumeration (tagType s) c)
             | not (isRecord sh),sequenceElement sh == Nothing]
-      pure (tagFact ++ concatMap orient (zip (map (reduce scope) xs) (map (reduce scope) (endpoints selected con))))
+      pure (tagFact ++ concatMap orient (zip (map (reduce scope) xs) (map (reduce scope) (endpointsFor sh xs selected con))))
       where
         orient (Numeric "+" x (NumberLiteral a),Numeric "+" y (NumberLiteral b)) | a == b = orient (x,y)
         orient (NumberLiteral a,Numeric "+" y (NumberLiteral b)) | a >= b = orient (NumberLiteral (a-b),y)
@@ -1370,8 +1402,8 @@ construction _ sh _ values | Just _ <- sequenceElement sh = [(sequenceField,case
   [x,xs] -> Sequence [x,Project xs sequenceField]
   _ -> error "admitted sequence constructor lost its payload arity")]
 construction callSite sh con values =
-  let supplied = zip (map fst (payload con)) values
-      indices = zipWith (\i e -> (indexField (shapeSymbol sh) i,instantiate values e)) [0..] (resultIndices con)
+  let supplied = [(f,v) | ((f,_),v) <- zip (payload con) values,f `notElem` virtualFields sh con]
+      indices = [(indexField (shapeSymbol sh) i,instantiate values e) | (i,e) <- zip [0..] (resultIndices con),i `notElem` contextIndices sh]
       -- Discovery verified the canonical family result and ordered telescope
       -- for each constructor. These schema roots justify the generated value;
       -- a call site is additional evidence, never a replacement for the schema.
@@ -1389,7 +1421,7 @@ construction callSite sh con values =
         ,owner <- recursiveOwner sh typ]) | not (null (recursivePeers sh))]
   in if isRecord sh then indices ++ supplied else
     (tagField,tag) : indices ++ measure ++ [(f,maybe (missing v i f) id (lookup f supplied))
-      | v <- variants sh,(i,(f,_)) <- zip [0 :: Int ..] (payload v)]
+      | v <- variants sh,(i,(f,_)) <- zip [0 :: Int ..] (payload v),f `notElem` virtualFields sh v]
 
 quote :: Text -> Text
 quote x = "'" <> T.replace "'" "\\'" (T.replace "\\" "\\\\" x) <> "'"
@@ -1754,10 +1786,32 @@ refinementTextIn _ _ _ _ value Natural = ["(" <> value <> " < *)"]
 refinementTextIn shapes label input binding value (Fibre s xs) =
   [indexEquality shapes label input binding domain (value <> "." <> quote (label (indexField s i))) x
   | Just sh <- [M.lookup s shapes]
-  , (i,(domain,x)) <- zip [0..] (zip (indexTypes sh) xs)]
+  , (i,(domain,x)) <- zip [0..] (zip (indexTypes sh) xs),i `notElem` contextIndices sh]
+  ++ contextualRefinements shapes label input binding value s xs
   ++ ["(" <> value <> "." <> quote (label (indexField s i)) <> " == " <> renderIndexIn shapes label input binding x <> ")"
      | (i,x) <- zip [0..] xs, M.notMember s shapes]
 refinementTextIn _ _ _ _ _ _ = []
+
+-- A contextual carrier is a domain value plus a membership condition in the
+-- caller's scope. Callable bindings are not data indices or stored identities.
+contextualRefinements :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> Text -> Text -> [Expression] -> [Text]
+contextualRefinements shapes label input binding value symbol indices =
+  [guarded sh con condition
+  | Just sh <- [M.lookup symbol shapes],not (null (contextIndices sh)),con <- variants sh
+  ,let contextual = [(f,renderIndexIn shapes label input binding x)
+          | i <- contextIndices sh,Input slot <- take 1 (drop i (resultIndices con))
+          ,(f,_):_ <- [drop slot (payload con)],x <- take 1 (drop i indices)]
+       field f = maybe (value <> "." <> quote (label f)) id (lookup f contextual)
+       argument i = field (fst (payload con !! i))
+  ,condition <- concat [refinementTextIn shapes label argument binding (field f) typ
+                        | (f,typ) <- storedFields sh con]
+       ++ [indexEquality shapes label argument binding domain (value <> "." <> quote (label (indexField symbol i))) endpoint
+          | (i,(domain,endpoint)) <- zip [0..] (zip (indexTypes sh) (resultIndices con)),i `notElem` contextIndices sh]]
+  where
+    guarded sh con condition | isRecord sh = condition
+      | otherwise = "(if " <> value <> "." <> quote (label tagField) <> " == "
+          <> quote (label (tagType symbol)) <> "::" <> quote (label (constructorSymbol con))
+          <> " ? " <> condition <> " else true)"
 
 -- Type extents are representation bindings, not elements of a source list.
 -- Membership constraints still check them; schema equality retains precisely
@@ -1804,7 +1858,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
       ["  attribute def " <> quote (label (shapeSymbol sh)) <> " {"
       ] ++ parameterFields sh
       ++ ["    attribute " <> quote (label (indexField (shapeSymbol sh) i)) <> " : " <> renderCarrier label t <> " [1];"
-         | (i,t) <- zip [0..] (indexTypes sh)]
+         | (i,t) <- zip [0..] (indexTypes sh),i `notElem` contextIndices sh]
       ++ ["    attribute " <> quote sequenceField <> " : " <> renderCarrier label element
         <> " [0..*]" <> (if schemaExtent sh then ";" else " ordered nonunique;")]
       ++ ["    assert constraint 'finite-sequence' { SequenceFunctions::size(" <> quote sequenceField <> ") < * }" | not (schemaExtent sh)]
@@ -1834,8 +1888,8 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
       ++ (if isRecord sh then [] else
         ["    attribute " <> quote (label tagField) <> " : " <> quote (label (tagType (shapeSymbol sh))) <> " [1];"])
       ++ ["    attribute " <> quote (label (indexField (shapeSymbol sh) i)) <> " : " <> renderCarrier label t <> " [1];"
-         | (i,t) <- zip [0..] (indexTypes sh)]
-      ++ concat [renderField sh f ty | c <- variants sh,(f,ty) <- payload c]
+         | (i,t) <- zip [0..] (indexTypes sh),i `notElem` contextIndices sh]
+      ++ concat [renderField sh f ty | c <- variants sh,(f,ty) <- storedFields sh c]
       ++ (if not (hasValidity sh) then [] else
         ["    assert constraint 'valid-payload' { " <> quote (label (validitySymbol (shapeSymbol sh)))
           <> "(" <> quote (label (shapeSymbol sh)) <> "::self) }"])
@@ -1845,7 +1899,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
         ,"    in 'value' : " <> quote (label (shapeSymbol sh)) <> " [1];"
         ,"    " <> validity shapes label sh
         ,"  }"])
-      ++ concat [renderInvoker sh f a b | c <- variants sh,(f,Callable a b) <- payload c]
+      ++ concat [renderInvoker sh f a b | c <- variants sh,(f,Callable a b) <- storedFields sh c]
     renderField sh f (Callable domain out) =
       ["    ref calc " <> quote (label f) <> multiplicity sh <> " {"]
       ++ ["      in " <> quote (argumentName i) <> " : " <> renderCarrier label typ <> " [1];" | (i,typ) <- zip [0..] domain]
@@ -1911,12 +1965,12 @@ validity shapes label sh = case constraints of
     fieldText f = "'value'." <> quote (label f)
     constraints = (if isRecord sh then [] else
       ["(SequenceFunctions::size(" <> fieldText f <> ") == (if " <> selected c <> " ? 1 else 0))"
-      | c <- variants sh,(f,_) <- payload c])
+      | c <- variants sh,(f,_) <- storedFields sh c])
       ++ [guarded c (indexEquality shapes label (\j -> fieldText (fst (payload c !! j))) fieldText domain
            (fieldText (indexField (shapeSymbol sh) i)) e)
-         | c <- variants sh,(i,(domain,e)) <- zip [0..] (zip (indexTypes sh) (resultIndices c))]
-      ++ [guarded c constraint | c <- variants sh,(f,t) <- payload c
-         ,constraint <- refinementTextIn shapes label (\j -> fieldText (fst (payload c !! j))) fieldText (fieldText f) t
+         | c <- variants sh,(i,(domain,e)) <- zip [0..] (zip (indexTypes sh) (resultIndices c)),i `notElem` contextIndices sh, null (contextIndices sh)]
+      ++ [guarded c constraint | c <- variants sh,(f,t) <- storedFields sh c
+         ,constraint <- (if null (contextIndices sh) then refinementTextIn shapes label (\j -> fieldText (fst (payload c !! j))) fieldText (fieldText f) t else [])
            ++ parameterRefinements shapes label fieldText (fieldText f) t]
       ++ [condition | (i,t) <- zip [0..] (indexTypes sh)
          ,condition <- parameterRefinements shapes label fieldText (fieldText (indexField (shapeSymbol sh) i)) t
@@ -2044,16 +2098,21 @@ carrierReport label shapes = toJSON [object
         ,"itemsTarget" .= (target (shapeSymbol sh) <> "::" <> quote sequenceField),"finite" .= not (schemaExtent sh)]
       Nothing -> Null)
   ,"admissibility" .= (if hasValidity sh then String (target (validitySymbol (shapeSymbol sh))) else Null)
+  ,"contextParameters" .= [object ["position" .= i,"representation" .= ("contextual-membership" :: Text)] | i <- contextIndices sh]
   ,"indices" .= [object ["position" .= i,"type" .= renderCarrier label t
     ,"target" .= (target (shapeSymbol sh) <> "::" <> quote (label (indexField (shapeSymbol sh) i)))]
-    | (i,t) <- zip [0 :: Int ..] (indexTypes sh)]
+    | (i,t) <- zip [0 :: Int ..] (indexTypes sh),i `notElem` contextIndices sh]
   ,"constructors" .= [object ["symbol" .= constructorSymbol c,"target" .= target (constructorSymbol c)
-    ,"resultIndices" .= map (renderIndexIn shapes label (\i -> quote (label (fst (payload c !! i)))) quote) (resultIndices c)
+    ,"resultIndices" .= [renderIndexIn shapes label (\i -> quote (label (fst (payload c !! i)))) quote endpoint
+      | (i,endpoint) <- zip [0..] (resultIndices c),i `notElem` contextIndices sh]
     ,"payload" .= [object ["position" .= i,"field" .= f
       ,"type" .= renderCarrier label typ
-      ,"refinements" .= refinementTextIn shapes label (\j -> quote (label (fst (payload c !! j)))) quote (quote (label f)) typ
+      ,"refinementScope" .= (if null (contextIndices sh) then "carrier" else "calculation-membership" :: Text)
+      ,"refinements" .= (if null (contextIndices sh)
+          then refinementTextIn shapes label (\j -> quote (label (fst (payload c !! j)))) quote (quote (label f)) typ
+          else [])
       ,"target" .= (case sequenceElement sh of
           Just _ -> Null
           Nothing -> String (target (shapeSymbol sh) <> "::" <> quote (label f)))]
-      | (i,(f,typ)) <- zip [0 :: Int ..] (payload c)]] | c <- variants sh]] | sh <- M.elems shapes]
+      | (i,(f,typ)) <- zip [0 :: Int ..] (payload c),f `notElem` virtualFields sh c]] | c <- variants sh]] | sh <- M.elems shapes]
   where target s = "AgdaModel::" <> quote (label s)
