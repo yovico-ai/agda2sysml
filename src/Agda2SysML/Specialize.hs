@@ -495,10 +495,10 @@ readType inv env t = case string (get "tag" t) of
         args <- readStaticArguments inv env kinds staticEs
         -- Later index domains may depend on earlier index values. Their
         -- telescope positions are not runtime inputs of the enclosing term.
-        -- Instantiate before inserting static arguments: those arguments can
-        -- themselves mention values in the caller's telescope.
+        -- Instantiate both namespaces together: supplied arguments can
+        -- themselves mention types and values in the caller's telescope.
         values <- foldM (\prior (domain,e) -> do
-          contextual <- substitute args (replaceInputs [ix | Runtime _ ix <- prior] domain)
+          contextual <- instantiate args (M.fromList (zip [0..] [ix | Runtime _ ix <- prior])) domain
           value <- app e >>= readIndex inv env contextual
           pure (prior ++ [value])) [] (zip indices valueEs)
         pure (Named name (args ++ values))
@@ -568,12 +568,12 @@ readType inv env t = case string (get "tag" t) of
               valueEs = [e | (ValuePosition _,e) <- zip (argumentSlots sig) es]
           args <- readStaticArguments inv env (parameterKinds sig) staticEs
           values <- foldM (\prior (e,domain) -> do
-            contextual <- substitute args (replaceInputs prior domain)
+            contextual <- instantiate args (M.fromList (zip [0..] prior)) domain
             value <- app e >>= readIndex inv env contextual
             case value of
               Runtime domain ix -> pure (prior ++ [case domain of Callable{} -> typedIndex domain ix; _ -> ix])
               _ -> refuse Semantics "Computed index argument is not a value") [] (zip valueEs (inputs sig))
-          out <- substitute args (replaceInputs values (output sig))
+          out <- instantiate args (M.fromList (zip [0..] values)) (output sig)
           eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop arity es)
 
 -- Projection-like checked calls omit a source prefix. Infer that prefix only
@@ -593,9 +593,9 @@ readOmittedIndexCall inv env sig name es = do
   values <- traverse (\i -> maybe (refuse Representation "Cannot recover computed index value parameter") Right
     (M.lookup i indices)) [0..length (inputs sig)-1]
   forM_ actuals $ \(i,actual) -> do
-    expected <- substitute args (replaceInputs values (inputs sig !! i))
+    expected <- instantiate args (M.fromList (zip [0..] values)) (inputs sig !! i)
     unless (expected == actual) (refuse Semantics "Recovered computed index argument domain mismatch")
-  out <- substitute args (replaceInputs values (output sig))
+  out <- instantiate args (M.fromList (zip [0..] values)) (output sig)
   eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop (length slots) es)
   where
     step (known,indices,actuals) (i,e) = do
@@ -695,7 +695,7 @@ readIndex inv env expected term
   | get "tag" term == String "constructor" = do
       actual <- readConstructorIndex inv env (Just expected) term
       case actual of
-        Runtime domain _ | domain == expected -> Right actual
+        Runtime domain _ | indexNormalForm domain == indexNormalForm expected -> Right actual
         _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
       actual <- case readType inv env term of
@@ -707,9 +707,32 @@ readIndex inv env expected term
             FamilyApplication (SelectedFamily bound) [] -> bound
             _ -> actual
       case value of
-        Runtime domain _ | domain == expected -> Right value
+        Runtime domain _ | indexNormalForm domain == indexNormalForm expected -> Right value
         _ -> refuse Semantics ("Index expression has the wrong declared domain: expected "
           <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
+
+-- Comparison only: an applied checked lambda and its beta-reduced body denote
+-- the same index. Keep all carrier arguments and runtime indices; no opaque
+-- function is inverted or equated merely because its result type matches.
+indexNormalForm :: Type -> Type
+indexNormalForm = normal . canonicalFamilies
+  where
+    normal = mapIndices index
+    index (IndexTyped ty x) = typedIndex (normal ty) (index x)
+    index (IndexLambda slots ty x) = IndexLambda slots (normal ty) (index x)
+    index (IndexApply f x) = beta (IndexApply (index f) (index x))
+    index (IndexProject f ts x) = IndexProject f (map normal ts) (index x)
+    index (IndexCall f ts xs) = IndexCall f (map normal ts) (map index xs)
+    index (IndexConstructor f ts xs) = IndexConstructor f (map normal ts) (map index xs)
+    index (IndexSuccessor x) = IndexSuccessor (index x)
+    index x = x
+    spine (IndexApply f x) xs = spine f (x:xs)
+    spine (IndexTyped _ f) xs = spine f xs
+    spine f xs = (f,xs)
+    beta expression = case spine expression [] of
+      (IndexLambda slots _ body,args) | length args >= length slots ->
+        index (foldl IndexApply (bindIndexLocals (zip slots args) body) (drop (length slots) args))
+      _ -> expression
 
 -- Check a value closure against its complete callback contract. Eta expansion
 -- only supplies the missing value binders; the checked helper signature still
@@ -763,8 +786,9 @@ readConstructorIndex inv env expected term = do
   initial <- maybe (Right M.empty) (unify M.empty (output sig)) expected
   (known,payloads) <- foldM (step sig) (initial,contextual) (zip (drop runtimeParameters (inputs sig)) values)
   final <- complete sig known
-  args <- traverse (\i -> maybe (refuse Representation "Cannot recover index constructor parameter") Right (M.lookup i final)) [0..parameters sig-1]
-  result <- substitute args (replaceInputs payloads (output sig))
+  args <- traverse (\i -> maybe (refuse Representation ("Cannot recover index constructor parameter "
+    <> T.pack (show i) <> " of " <> c)) Right (M.lookup i final)) [0..parameters sig-1]
+  result <- instantiate args (M.fromList (zip [0..] payloads)) (output sig)
   pure (Runtime result (IndexConstructor c args
     (if get "kind" owner == String "record" then payloads else drop runtimeParameters payloads)))
   where
@@ -772,9 +796,9 @@ readConstructorIndex inv env expected term = do
       completed <- complete sig known
       let args = [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
       -- Telescope indices belong to this constructor; inferred static
-      -- arguments can contain indices belonging to the caller. Substitute
-      -- the former before inserting the latter, keeping both scopes intact.
-      concrete <- substitute args (replaceInputs prior domain)
+      -- arguments and supplied index expressions belong to the caller.
+      -- Instantiate both namespaces without rewriting inserted arguments.
+      concrete <- instantiate args (M.fromList (zip [0..] prior)) domain
       let contextualConstructor = get "tag" value == String "constructor" && case concrete of Named{} -> True; _ -> False
       actual <- if hasParameter concrete && not contextualConstructor then readType inv env value else readIndex inv env concrete value
       case actual of
@@ -799,19 +823,6 @@ readConstructorIndex inv env expected term = do
           Just ty | closed ty -> universeOf inv ty >>= constrainUniverse table level
           _ -> Right table
         step table _ = Right table
-
-replaceInputs :: [IndexExpr] -> Type -> Type
-replaceInputs values = mapIndices go
-  where
-    go (IndexInput i) | i < length values = values !! i
-    go (IndexConstructor c ts xs) = IndexConstructor c (map (replaceInputs values) ts) (map go xs)
-    go (IndexSuccessor x) = IndexSuccessor (go x)
-    go (IndexProject f ts x) = IndexProject f (map (replaceInputs values) ts) (go x)
-    go (IndexCall f ts xs) = IndexCall f (map (replaceInputs values) ts) (map go xs)
-    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
-    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty) (go x)
-    go (IndexApply f x) = IndexApply (go f) (go x)
-    go x = x
 
 replaceKnownInputs :: M.Map Int IndexExpr -> Type -> Type
 replaceKnownInputs values = mapIndices go
@@ -888,7 +899,7 @@ projectIndex inv (Runtime (Named owner args) receiver) elimination = do
       contextual = take runtimeParameters [ix | Runtime _ ix <- args]
   unless (runtimeParameters >= 0 && length contextual == runtimeParameters)
     (refuse Representation "Index projection needs its contextual value parameters")
-  out <- substitute concrete (replaceInputs (contextual ++ [receiver]) (output sig))
+  out <- instantiate concrete (M.fromList (zip [0..] (contextual ++ [receiver]))) (output sig)
   pure (Runtime out (IndexProject name concrete receiver))
 projectIndex _ _ _ = refuse Representation "Index projection requires a record receiver"
 
@@ -969,31 +980,38 @@ substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscLis
         Level l -> Right (joinLevel total (shiftLevel offset l))
         _ -> refuse Semantics "Type argument used in a universe-level position"
 substitute :: [Type] -> Type -> Either Refusal Type
-substitute args (Callable a b) = Callable <$> traverse (substitute args) a <*> substitute args b
-substitute args (SchemaValue ds l) = SchemaValue <$> traverse (substitute args) ds <*> substituteLevel args l
-substitute args (SelectedFamily value) = SelectedFamily <$> substitute args value
-substitute _ Unused = Right Unused
-substitute args (Parameter i) = at i args
-substitute _ t@Open{} = Right t
-substitute args (FamilyParameter i _ _) = at i args
-substitute args (OpenFamily i domains level) = OpenFamily i <$> traverse (substitute args) domains <*> pure level
-substitute args (FamilyApplication family indices) = do
-  actual <- substitute args family
-  values <- traverse (substitute args) indices
-  applyTypeFamily actual values
-substitute args (FamilyExpression domain slot body level) = FamilyExpression <$> substitute args domain <*> pure slot
-  <*> substitute args body <*> substituteLevel args level
-substitute args (Named s ts) = Named s <$> traverse (substitute args) ts
-substitute args (Level l) = Level <$> substituteLevel args l
-substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
+substitute args = instantiate args M.empty
+
+-- Substitute both template namespaces in one pass. Supplied static arguments
+-- and index expressions already belong to the caller; neither may be traversed
+-- by the other substitution (a captured callback can itself contain types).
+instantiate :: [Type] -> M.Map Int IndexExpr -> Type -> Either Refusal Type
+instantiate args values (Callable a b) = Callable <$> traverse (instantiate args values) a <*> instantiate args values b
+instantiate args values (SchemaValue ds l) = SchemaValue <$> traverse (instantiate args values) ds <*> substituteLevel args l
+instantiate args values (SelectedFamily value) = SelectedFamily <$> instantiate args values value
+instantiate _ _ Unused = Right Unused
+instantiate args _ (Parameter i) = at i args
+instantiate _ _ t@Open{} = Right t
+instantiate args _ (FamilyParameter i _ _) = at i args
+instantiate args values (OpenFamily i domains level) = OpenFamily i <$> traverse (instantiate args values) domains <*> pure level
+instantiate args values (FamilyApplication family indices) = do
+  actual <- instantiate args values family
+  supplied <- traverse (instantiate args values) indices
+  applyTypeFamily actual supplied
+instantiate args values (FamilyExpression domain slot body level) = FamilyExpression <$> instantiate args values domain <*> pure slot
+  <*> instantiate args values body <*> substituteLevel args level
+instantiate args values (Named s ts) = Named s <$> traverse (instantiate args values) ts
+instantiate args _ (Level l) = Level <$> substituteLevel args l
+instantiate args values (Runtime ty index) = Runtime <$> instantiate args values ty <*> go index
   where
-    go (IndexProject f ts receiver) = IndexProject f <$> traverse (substitute args) ts <*> go receiver
-    go (IndexCall f ts values) = IndexCall f <$> traverse (substitute args) ts <*> traverse go values
-    go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (substitute args) ts <*> traverse go xs
+    go (IndexProject f ts receiver) = IndexProject f <$> traverse (instantiate args values) ts <*> go receiver
+    go (IndexCall f ts xs) = IndexCall f <$> traverse (instantiate args values) ts <*> traverse go xs
+    go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (instantiate args values) ts <*> traverse go xs
     go (IndexSuccessor i) = IndexSuccessor <$> go i
-    go (IndexTyped ty x) = typedIndex <$> substitute args ty <*> go x
-    go (IndexLambda slots ty x) = IndexLambda slots <$> substitute args ty <*> go x
+    go (IndexTyped ty x) = typedIndex <$> instantiate args values ty <*> go x
+    go (IndexLambda slots ty x) = IndexLambda slots <$> instantiate args values ty <*> go x
     go (IndexApply f x) = IndexApply <$> go f <*> go x
+    go original@(IndexInput i) = Right (M.findWithDefault original i values)
     go i = Right i
 closed :: Type -> Bool
 closed (Callable a b) = all closed (b:a)
@@ -1141,26 +1159,26 @@ constrainUniverse known (LevelExpr n xs) target0 = do
   partial <- foldM collect (levelConstant n) (M.toList xs)
   let LevelExpr c remaining = partial
       target@(LevelExpr t atoms) = normalLevel target0
-      unknown = [(i,k) | (BoundLevel i,k) <- M.toList remaining]
-      rigid = M.filterWithKey (\key _ -> case key of RigidLevel{} -> True; _ -> False) remaining
+      -- Unknowns belong to the template. Atoms inside an already supplied
+      -- level belong to the caller, even if represented by BoundLevel there.
+      unknown = [(i,k) | (BoundLevel i,k) <- M.toList xs,M.notMember i known]
       assign i value = Right (M.insert i (Level value) known)
   case unknown of
     [] -> if partial == target then Right known else refuse Semantics "Universe-level mismatch"
-    [(i,offset)] | M.null rigid -> case M.null atoms of
+    [(i,offset)] | M.null remaining -> case M.null atoms of
       True -> do
         unless (c <= t && offset <= t) (refuse Semantics "Inconsistent universe-level constraint")
         if c < t || offset == t then assign i (levelConstant (t-offset)) else Right known
-      False | c <= offset && (t == 0 || t >= offset) && all (>= offset) (M.elems atoms)
-        , all (\key -> case key of RigidLevel{} -> True; _ -> False) (M.keys atoms) ->
+      False | c <= offset && (t == 0 || t >= offset) && all (>= offset) (M.elems atoms) ->
           assign i (normalLevel (LevelExpr (max 0 (t-offset)) (M.map (subtract offset) atoms)))
       _ -> Right known
-    _ | M.null atoms && (c > t || any (> t) (M.elems remaining)) ->
+    _ | M.null atoms && (c > t || any ((> t) . snd) unknown || any (> t) (M.elems remaining)) ->
           refuse Semantics "Inconsistent universe-level constraint"
       | otherwise -> Right known
   where
     collect total (RigidLevel i,offset) = Right (joinLevel total (shiftLevel offset (openLevel i)))
     collect total (BoundLevel i,offset) = case M.lookup i known of
-      Nothing -> Right (joinLevel total (shiftLevel offset (levelParameter i)))
+      Nothing -> Right total
       Just (Level l) -> Right (joinLevel total (shiftLevel offset l))
       _ -> refuse Semantics "Type argument used as a level"
 
@@ -1958,11 +1976,11 @@ specializeTreeIn inv stack equations env out tree
               bindings = map rewrite contextual ++ payloadIndices
               change (Dynamic domain) = Dynamic (reindex domain)
               change binding = binding
-          fields <- liftEither (traverse (substitute (map reindex args) . replaceInputs bindings) fieldSchemas)
+          fields <- liftEither (traverse (instantiate (map reindex args) (M.fromList (zip [0..] bindings))) fieldSchemas)
           arity <- liftEither (number (get "arity" b))
           unless (arity == length fields) (abort Syntax "Specialized case payload arity mismatch")
           let branchEnv = map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env)
-          constructorResult <- liftEither (substitute (map reindex args) (replaceInputs bindings (output sig)))
+          constructorResult <- liftEither (instantiate (map reindex args) (M.fromList (zip [0..] bindings)) (output sig))
           let branchEquations = (constructorResult,reindex ty) : [(reindex a,reindex b) | (a,b) <- equations]
               (facts,premises) = branchIndexBindings inv (reverse branchEnv) position count branchEquations
               refine (Dynamic domain) = Dynamic (replaceKnownInputs facts domain)
@@ -2299,7 +2317,7 @@ expression inv stack env expected term = do
           maybe (pure M.empty) (liftEither . unifyIn inv env M.empty (output sig)) expected else pure M.empty
         (types,values,indices,rest) <- argumentsFor valueSig runtimeParameters (take runtimeParameters contextualIndices) known es
         let tyArgs = types
-        schemaOut <- liftEither (substitute tyArgs (replaceKnownInputs indices (output sig)))
+        schemaOut <- liftEither (instantiate tyArgs indices (output sig))
         out <- if runtimeParameters == 0 then pure schemaOut else case expected of
           Just actual | typeKey actual == typeKey schemaOut -> pure actual
           _ -> abort Representation "Value-parameter constructor needs its contextual family type"
@@ -2331,7 +2349,7 @@ expression inv stack env expected term = do
         let omitted = runtimeDropped sig
         (types,values,indices,rest) <- argumentsFor (sig {inputs = drop omitted (inputs sig)}) omitted [] known valueElims
         ensureFunction inv stack s types
-        out <- liftEither (substitute types (replaceKnownInputs indices (output sig)))
+        out <- liftEither (instantiate types indices (output sig))
         let resultTerm = set "symbol" (String (instanceKey s types)) $ set "eliminations" (toJSON (map application ([indexTerm (length (filter isDynamic env)) ix | (_,ix) <- snd (captureArguments types)] ++ values))) term
         eliminate out resultTerm rest
       _ -> abort Syntax "Term outside first-order specialization"
@@ -2351,7 +2369,7 @@ expression inv stack env expected term = do
       where
         step (known,values,actuals,indices) (patternType,e) = do
           value <- liftEither (app e)
-          let fill t = case substitute [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] (replaceKnownInputs indices t) of
+          let fill t = case instantiate [M.findWithDefault (Parameter i) i known | i <- [0..parameters sig-1]] indices t of
                 Right actual | resolved actual -> Just actual
                 _ -> Nothing
               resolved Parameter{} = False
@@ -2376,8 +2394,7 @@ expression inv stack env expected term = do
           (actual,v) <- expression inv stack env (fill patternType) value
           known' <- liftEither (unifyIn inv env known patternType actual)
           completed <- liftEither (completeKnown inv sig known')
-          let concrete = substitute [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
-                (replaceKnownInputs indices patternType)
+          let concrete = instantiate [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]] indices patternType
               -- The actual domain has already passed checked comparison.
               -- Reading against the unreduced declaration can lose an index
               -- whose domain is definitionally equal through a projection.
@@ -2440,13 +2457,13 @@ schemaConstruction inv stack env schema@(SchemaValue domains level) declaration 
   unless (length staticEs == length kinds) (abort Representation "Computed schema has incomplete static arguments")
   types <- liftEither (readStaticArguments inv (runtimeBindings env) kinds staticEs)
   values <- foldM (\prior (domain,e) -> do
-    contextual <- liftEither (substitute types (replaceInputs [ix | Runtime _ ix <- prior] domain))
+    contextual <- liftEither (instantiate types (M.fromList (zip [0..] [ix | Runtime _ ix <- prior])) domain)
     value <- liftEither (app e >>= readIndex inv (runtimeBindings env) contextual)
     pure (prior ++ [value])) [] (zip indices valueEs)
   let remaining = drop (length values) indices
       variables = [Runtime domain (IndexInput (depth+i)) | (i,domain) <- zip [0..] domains]
       allValues = values ++ variables
-  actualDomains <- liftEither (traverse (substitute types . replaceInputs [ix | Runtime _ ix <- allValues]) remaining)
+  actualDomains <- liftEither (traverse (instantiate types (M.fromList (zip [0..] [ix | Runtime _ ix <- allValues]))) remaining)
   actualLevel <- liftEither (substituteLevel types universe)
   unless (actualDomains == domains && actualLevel == level)
     (abort Semantics "Computed schema does not match its stored family telescope")

@@ -11,6 +11,12 @@ You can generate directly from an Agda library and entry module. An optional
 YAML mapping identifies local modeling roles, such as state, commands, and
 transitions. Unsupported constructs remain visible as incomplete requirements.
 
+The translator targets independent Agda projects through general rules for
+checked language constructs. Its own specification supplies a reproducible
+walkthrough and regression corpus. Compatibility with another project depends
+on the supported constructs and their composition; self-specification coverage
+alone does not establish that compatibility.
+
 Start with the [alpha walkthrough](docs/alpha.md). It explains how to run the
 generator on **its own Agda specification**, what output to expect, and how to
 explore it. The [interactive SysML guide](docs/interactive-sysml.md) covers the
@@ -124,12 +130,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 395 native calculation functions out of 722 (54.7%)
-and 223 native equality statements, including 66 compiler-generated or module-copied helpers.
-Nineteen functions have both representations: 599/722 function declarations (83.0%)
+The default self model has 396 native calculation functions out of 722 (54.8%)
+and 231 native equality statements, including 69 compiler-generated or module-copied helpers.
+Nineteen functions have both representations: 608/722 function declarations (84.2%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 299 unresolved requirements. Source-only proof retention is
+There are still 303 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

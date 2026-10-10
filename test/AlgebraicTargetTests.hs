@@ -633,6 +633,21 @@ universeChecks base = do
   check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton (P.BoundLevel 0) 2)) 2 == Right (M.singleton 0 zero))
     "uniquely determined zero level was not inferred"
   check (isLeft (P.constrainLevel M.empty (P.LevelExpr 3 M.empty) 2)) "inconsistent level constraint accepted"
+  let consumePhantom = function "consumePhantom" (piType True (named "Level#builtin")
+        (piType False (phantomTy (variable 0 [])) (named "Bool"))) (done 2 (constructor "true" []))
+      phantomInventory = inv {declarations = M.insert "consumePhantom" consumePhantom (declarations inv)}
+      callerLevels = [P.Level (P.LevelExpr 0 (M.singleton atom 0))
+        | atom <- map P.BoundLevel [0,1,8,31] ++ map P.RigidLevel [0,8]] ++
+        [P.Level (P.LevelExpr 2 (M.fromList [(P.BoundLevel 3,0),(P.BoundLevel 7,1)]))]
+  forM_ callerLevels $ \callerLevel -> do
+    check (isLeft (P.constrainLevel (M.singleton 0 callerLevel)
+        (P.LevelExpr 0 (M.singleton (P.BoundLevel 0) 0)) 0))
+      "a supplied caller level was solved as an unknown callee level"
+    check (P.readType phantomInventory [Just callerLevel]
+        (call "consumePhantom" [variable 0 [],constructor "phantom" []] []) == Right
+        (P.Runtime (P.Named "Bool" []) (P.IndexCall "consumePhantom" [callerLevel]
+          [P.IndexConstructor "phantom" [callerLevel] []])))
+      "an omitted constructor level was not recovered from its symbolic expected carrier"
   forM_ [0..4] $ \constant -> forM_ [0..4] $ \offset -> forM_ [0..4] $ \target -> do
     let solutions = [x | x <- [0..target],max constant (x+offset) == target]
         solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton (P.BoundLevel 0) offset)) target
@@ -2621,6 +2636,64 @@ interleavedParameterChecks base = do
         (set "projection" (object ["proper" .= ("OtherRecord" :: Text),"index" .= (1 :: Int)])) "flag" (declarations indexInv)}
   check (isLeft (P.readType foreignOwner [Just receiver] (call "indexRecord" [variable 0 []] ["flag"])))
     "computed record index admitted another record's projection"
+  let valueIndex = set "parameters" (Number 1) $ set "constructors" (toJSON (["indexedValue"] :: [Text]))
+        $ declaration "ValueIndex" "datatype"
+        (signature [universe,var 0] universe)
+      indexedValue = set "parameters" (Number 1) $ set "family" (String "ValueIndex")
+        $ declaration "indexedValue" "constructor" (signature [universe,var 0]
+          (object ["term" .= call "ValueIndex" [variable 1 [],variable 0 []] []]))
+      apply f xs = set "eliminations" (toJSON (map application xs)) (variable f [])
+      computed = safe $ set "type" (signature
+        [universe,signature [var 0] (var 1),var 1]
+        (object ["term" .= call "ValueIndex" [variable 2 [],apply 1 [variable 0 []]] []]))
+        $ operation "computedContract" [] "Bool" (done 3 (constructor "indexedValue" [apply 1 [variable 0 []]]))
+      indexInventory = inv {declarations = M.insert "ValueIndex" valueIndex
+        $ M.insert "indexedValue" indexedValue
+        $ M.insert "computedContract" computed (declarations inv)}
+      identity = object ["tag" .= ("lambda" :: Text),"abstraction" .= object
+        ["binds" .= True,"body" .= variable 0 []]]
+      consume = safe $ set "type" (signature
+        [universe,signature [var 0] (var 1),var 1
+        ,object ["term" .= call "ValueIndex" [variable 2 [],apply 1 [variable 0 []]] []]] (named "Bool"))
+        $ operation "consumeComputed" [] "Bool" (done 4 (constructor "true" []))
+      consuming = indexInventory {declarations = M.insert "consumeComputed" consume (declarations indexInventory)}
+      -- Caller names and slot numbers are independent of the helper's. A
+      -- supplied type can itself capture a caller runtime index.
+      callerTypes = map P.Parameter [0,1,7,31] ++
+        [P.Named "CallerIndexed" [P.Runtime (P.Named "Bool" []) (P.IndexInput slot)] | slot <- [0,2,9]]
+  forM_ callerTypes $ \outer -> forM_ [0,2,9] $ \position -> do
+    let domain = P.Callable [outer] outer
+        supplied = P.IndexLambda [0] domain (P.IndexLocal 0)
+        value = P.IndexInput position
+    computedType <- either (fail . show) pure (P.readType indexInventory
+      [Just (P.Runtime outer value),Just outer]
+      (call "computedContract" [variable 1 [],identity,variable 0 []] []))
+    check (computedType == P.Runtime (P.Named "ValueIndex" [outer,P.Runtime outer
+        (P.IndexApply (P.IndexTyped domain supplied) value)])
+        (P.IndexCall "computedContract" [outer] [P.IndexTyped domain supplied,value]))
+      "callee substitution rewrote the caller's callback types or captured value indices"
+    let consumeAt actualDomain ix = P.readType consuming
+          [Just (P.Runtime (P.Named "ValueIndex" [actualDomain,P.Runtime actualDomain ix]) (P.IndexInput 17))
+          ,Just (P.Runtime outer value),Just outer]
+          (call "consumeComputed" [variable 2 [],identity,variable 1 [],variable 0 []] [])
+    check (not (isLeft (consumeAt outer value)))
+      "a beta-reduced callback index was refused at its dependent input contract"
+    check (isLeft (consumeAt outer (P.IndexInput (position+1))))
+      "callback index comparison erased a mismatched runtime value"
+    check (isLeft (consumeAt (P.Named "Unrelated" []) value))
+      "callback index comparison erased a mismatched carrier"
+    -- Adding a leading runtime binder changes template positions but must not
+    -- change the caller's type or value identities.
+    let shifted = set "compiled" (done 4 (constructor "indexedValue" [apply 1 [variable 0 []]]))
+          $ set "type" (signature [named "Bool"] (get "type" computed)) computed
+        shiftedInventory = indexInventory {declarations = M.insert "computedContract" shifted (declarations indexInventory)}
+    shiftedType <- either (fail . show) pure (P.readType shiftedInventory
+      [Just (P.Runtime outer value),Just outer]
+      (call "computedContract" [constructor "true" [],variable 1 [],identity,variable 0 []] []))
+    check (shiftedType == P.Runtime (P.Named "ValueIndex" [outer,P.Runtime outer
+        (P.IndexApply (P.IndexTyped domain supplied) value)])
+        (P.IndexCall "computedContract" [outer] [P.IndexConstructor "true" [] [],P.IndexTyped domain supplied,value]))
+      "interleaving a runtime binder with static parameters captured caller positions"
 
 familyParameterChecks :: IO ()
 familyParameterChecks = do
