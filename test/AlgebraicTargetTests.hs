@@ -1938,11 +1938,64 @@ naturalChecks = do
       forM_ [("add",Z (a+b)),("monus",Z (max 0 (a-b))),("multiply",Z (a*b)),("less",B (a<b)),("equal",B (a==b))] $ \(name,expected) ->
         check (evalWith table [Z a,Z b] (A.body (table M.! name)) == expected) "native arithmetic changed unbounded natural semantics"
   check (length (A.calculationContracts id (table M.! "add")) == 3) "natural boundary omitted finiteness"
+  let indexContext = reverse [Just (P.Runtime (P.Named "Nat" []) (P.IndexInput i)) | i <- [0,1]]
+  forM_ ["add","sumNatural"] $ \symbol -> do
+    let indexed = inv {declarations = M.insert symbol (primitive symbol "PrimNatPlus" "Nat") (declarations inv)}
+        addition = call symbol [variable 1 [],variable 0 []] []
+    check (P.readType indexed indexContext addition == Right
+      (P.Runtime (P.Named "Nat" []) (P.IndexCall symbol [] [P.IndexInput 0,P.IndexInput 1])))
+      "primitive addition in a dependent index was mistaken for a named carrier"
+    forM_ [[variable 0 []],[variable 1 [],variable 0 [],literal 0],[literal (-1),variable 0 []]] $ \arguments ->
+      check (isLeft (P.readType indexed indexContext (call symbol arguments [])))
+        "primitive index admitted an incomplete, excess, or invalid argument"
   let malformed = primitive "bad" "PrimNatPlus" "Bool"
       missing = set "primitive" Null (primitive "bad" "PrimNatPlus" "Nat")
       negative = operation "negative" [] "Nat" (done 0 (literal (-1)))
   forM_ [malformed,missing,negative] $ \d ->
     check (isLeft (A.function inv M.empty M.empty d)) "invalid numeric schema admitted"
+  let v i = variable i []
+      plus a b = call "add" [a,b] []
+      successor x = constructor "suc" [x]
+      indexed x = object ["term" .= call "Measured" [x] []]
+      measured = set "constructors" (toJSON (["measured"] :: [Text])) $
+        declaration "Measured" "datatype" (signature [named "Nat"] universe)
+      measuredCtor = set "family" (String "Measured") $
+        declaration "measured" "constructor" (signature [named "Nat"] (indexed (v 0)))
+      nested = set "sourceSyntax" (toJSON [object []]) $
+        set "compiled" (done 2 (constructor "measured" [successor (plus (v 1) (v 0))])) $
+        declaration "nestedAddition" "function"
+          (signature [named "Nat",named "Nat"] (indexed (plus (successor (v 1)) (v 0))))
+      branching = set "sourceSyntax" (toJSON [object []]) $
+        set "compiled" (split 0 [("zero",0,done 1 (constructor "measured" [v 0]))
+          ,("suc",1,done 2 (constructor "measured" [successor (plus (v 1) (v 0))]))]) $
+        declaration "branchAddition" "function"
+          (signature [named "Nat",named "Nat"] (indexed (plus (v 1) (v 0))))
+      additions = [measured,measuredCtor,nested,branching]
+      indexedInv = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations inv)
+        ,modelRequirements = M.insert "arithmetic-indices" (S.fromList
+          [("Measured","structure"),("measured","structure"),("nestedAddition","behavior"),("branchAddition","behavior")]) (modelRequirements inv)}
+      (shapes,errors) = A.discover indexedInv M.empty
+  check (M.null errors) (show errors)
+  nestedTable <- traverse (either (fail . show) pure) (A.functions indexedInv M.empty shapes)
+  forM_ [(0,0),(4,7),(10^(100 :: Int),10^(101 :: Int))] $ \(a,b) -> do
+    let result = R "Measured" (M.fromList [("constructor",E "Measured.constructor-tag" "measured")
+          ,("Measured.index0",Z (a+b+1)),("measured.payload0",Z (a+b+1))])
+    check (evalWith nestedTable [Z a,Z b] (A.body (nestedTable M.! "nestedAddition")) == result)
+      "addition under a successor lost its complete indexed result"
+    let branchResult = R "Measured" (M.fromList [("constructor",E "Measured.constructor-tag" "measured")
+          ,("Measured.index0",Z (a+b)),("measured.payload0",Z (a+b))])
+    check (evalWith nestedTable [Z a,Z b] (A.body (nestedTable M.! "branchAddition")) == branchResult)
+      "natural branch refinement failed to preserve its arithmetic index"
+  let wrong = indexedInv {declarations = M.adjust
+        (set "compiled" (done 2 (constructor "measured" [successor (successor (plus (v 1) (v 0)))])))
+        "nestedAddition" (declarations indexedInv)}
+  check (isLeft (A.functions wrong M.empty shapes M.! "nestedAddition"))
+    "different arithmetic result indices were treated as equal"
+  let noBranch = indexedInv {declarations = M.adjust (set "compiled" (done 2
+        (constructor "measured" [successor (plus (call "monus" [v 1,literal 1] []) (v 0))])))
+        "branchAddition" (declarations indexedInv)}
+  check (isLeft (A.functions noBranch M.empty shapes M.! "branchAddition"))
+    "predecessor/successor equality escaped its positive natural branch"
 
 constructorFibreChecks :: IO ()
 constructorFibreChecks = do

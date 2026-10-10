@@ -28,6 +28,7 @@ from dependent_callbacks import verify_dependent_callbacks
 from multi_callbacks import verify_multi_callbacks
 from schema_records import verify_schema_records
 from dependent_schemas import verify_dependent_schemas
+from arithmetic_indices import verify_arithmetic_indices
 
 
 def check(condition, message):
@@ -316,6 +317,15 @@ models:
     multi_callback_evidence = verify_multi_callbacks(self_output)
     schema_record_evidence = verify_schema_records(self_output)
     dependent_schema_evidence = verify_dependent_schemas(self_output)
+    arithmetic_index_evidence = verify_arithmetic_indices(self_output)
+    check(arithmetic_index_evidence['operations'] == 7
+          and arithmetic_index_evidence['statements'] == 8
+          and arithmetic_index_evidence['comparisons'] >= 1000
+          and arithmetic_index_evidence['invalidCasesRejected'] == 12
+          and arithmetic_index_evidence['bodyMutationsDetected'] == 15
+          and arithmetic_index_evidence['differentContextSizes'] > 0
+          and arithmetic_index_evidence['completeEvidencePreserved'],
+          'arithmetic indices lack complete values, preserved bounds, or rejection checks')
     check(dependent_schema_evidence['operations'] == 11
           and dependent_schema_evidence['comparisons'] >= 102
           and dependent_schema_evidence['invalidCasesRejected'] >= 160
