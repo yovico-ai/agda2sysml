@@ -55,6 +55,9 @@ browser review and the official SysML notebook tools.
   The self model classifies reports, accepts only fully translated reports, and
   validates mapping candidates, distinguishing missing, ambiguous, and incompatible
   choices. Constructor and list patterns retain their dependent input contracts.
+- Translate supported typed collection conversions that filter static slots,
+  preserve dynamic payloads, and adjust positions. Checked map/filter helpers can
+  compute dependent indices, including callback-based member conversion.
 - Retain supported type and indexed-family fields in records as runtime schema
   bindings. Conversion, selection, and reindexing preserve complete domain
   values and membership evidence, with constraints linking them to their binding.
@@ -121,12 +124,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 385 native calculation functions out of 722 (53.3%)
-and 220 native equality statements, including 66 compiler-generated or module-copied helpers.
-Seventeen functions have both representations: 588/722 function declarations (81.4%)
+The default self model has 395 native calculation functions out of 722 (54.7%)
+and 223 native equality statements, including 66 compiler-generated or module-copied helpers.
+Nineteen functions have both representations: 599/722 function declarations (83.0%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 319 unresolved requirements. Source-only proof retention is
+There are still 299 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

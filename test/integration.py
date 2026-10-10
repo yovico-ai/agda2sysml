@@ -35,6 +35,7 @@ from dependent_family_parameters import verify_dependent_family_parameters
 from specialized_callbacks import verify_specialized_callbacks
 from index_closures import verify_index_closures
 from indexed_validation import verify_indexed_validation
+from computed_lists import verify_computed_lists
 
 
 def check(condition, message):
@@ -330,6 +331,12 @@ models:
     specialized_evidence = verify_specialized_callbacks(self_output)
     closure_evidence = verify_index_closures(self_output)
     validation_evidence = verify_indexed_validation(self_output)
+    list_evidence = verify_computed_lists(self_output)
+    check(list_evidence['operations'] == 8 and list_evidence['statements'] == 3
+          and list_evidence['comparisons'] >= 366
+          and list_evidence['invalidCasesRejected'] >= 128
+          and list_evidence['bodyMutationsDetected'] == 6,
+          'computed lists lack complete environment/member conversions and refusal checks')
     check(validation_evidence['operations'] == 7 and validation_evidence['statements'] == 1
           and validation_evidence['comparisons'] >= 155
           and validation_evidence['invalidCasesRejected'] >= 80

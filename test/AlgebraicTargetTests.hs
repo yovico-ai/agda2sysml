@@ -2281,6 +2281,27 @@ constructorFibreChecks = do
           ,("empty",0,absurd 2)]) reconstruct
   check (isLeft (A.function inv M.empty shapes changed))
     "constructor reconstruction ignored a changed payload"
+  let tokenList = (A.Shape "TokenList" False [A.Constructor "noTokens" [] []
+        ,A.Constructor "moreTokens" [("head",A.Named "Token"),("tail",A.Named "TokenList")] []] [])
+        {A.sequenceElement = Just (A.Named "Token")}
+      listWitness = A.Shape "TokenListWitness" False
+        [A.Constructor "tokenListWitness" [("tokens",A.Named "TokenList")] [A.Input 0]] [A.Named "TokenList"]
+      listShapes = M.insert "TokenList" tokenList $ M.insert "TokenListWitness" listWitness shapes
+      listResult n = object ["term" .= call "TokenListWitness" [variable n []] []]
+      witnessList term = constructor "tokenListWitness" [term]
+      rebuild = set "type" (signature [named "TokenList"] (listResult 0)) $ set "compiled" (split 0
+        [("noTokens",0,done 0 (witnessList (constructor "noTokens" [])))
+        ,("moreTokens",2,split 0
+          [("packed",1,done 2 (witnessList (constructor "moreTokens" [constructor "packed" [variable 1 []],variable 0 []])))
+          ,("empty",0,done 1 (witnessList (constructor "moreTokens" [constructor "empty" [],variable 0 []])))])]) decoder
+  _ <- either (fail . show) pure (A.function inv M.empty listShapes rebuild)
+  let changedHead = set "type" (signature [named "TokenList",named "Bool"] (listResult 1)) $ set "compiled" (split 0
+        [("noTokens",0,done 1 (witnessList (constructor "noTokens" [])))
+        ,("moreTokens",2,split 0
+          [("packed",1,done 3 (witnessList (constructor "moreTokens" [constructor "packed" [variable 0 []],variable 1 []])))
+          ,("empty",0,done 2 (witnessList (constructor "moreTokens" [constructor "empty" [],variable 1 []])))])]) rebuild
+  check (isLeft (A.function inv M.empty listShapes changedHead))
+    "list-index reconstruction ignored a changed head payload"
   forM_ [False,True] $ \b -> do
     let value = R "Token" (M.fromList [("constructor",E "Token.constructor-tag" "packed"),("packed.payload0",B b)])
     check (eval [value,N] (A.body calc) == B b) "constructor-index refinement changed a valid payload"
@@ -2481,6 +2502,20 @@ nestedSequencePatternChecks = do
   let unknown = set "type" (signature [named "List",object ["term" .= call "ListClass" [variable 0 []] []]] (named "Bool")) selectOne
   check (isLeft (A.function constructorInv M.empty shapes unknown))
     "unknown sequence length justified omitting a constructor branch"
+  let starts = A.Shape "Starts" False
+        [A.Constructor "startsTrue" [("rest",A.Named "List")] [list [A.Literal True,A.Project (A.Input 0) "items"]]
+        ,A.Constructor "startsFalse" [("rest",A.Named "List")] [list [A.Literal False,A.Project (A.Input 0) "items"]]] [A.Named "List"]
+      extended = M.insert "Starts" starts shapes
+      registry = object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text),"false" .= ("false" :: Text)]
+      source = constructorInv {document = set "builtins" registry (document constructorInv)}
+      startsAt head tail = object ["term" .= call "Starts" [constructor "cons" [head,tail]] []]
+      selectTrue = set "type" (signature [named "List",startsAt (constructor "true" []) (variable 0 [])] (named "Bool")) $
+        operation "selectTrue" [] "Bool" (split 1 [("startsTrue",1,done 2 (constructor "true" []))])
+  _ <- either (fail . show) pure (A.function source M.empty extended selectTrue)
+  let unknownHead = set "type" (signature [named "Bool",named "List",startsAt (variable 1 []) (variable 0 [])] (named "Bool")) $
+        set "compiled" (split 2 [("startsTrue",1,done 3 (constructor "true" []))]) selectTrue
+  check (isLeft (A.function source M.empty extended unknownHead))
+    "unknown list head justified omitting an indexed constructor"
 
 earlierIndexChecks :: IO ()
 earlierIndexChecks = do
@@ -3120,6 +3155,55 @@ sequenceChecks base = do
         recoveryShapes = fst (A.discover recovery M.empty)
     check (isLeft (A.functions recovery M.empty recoveryShapes M.! "recoverJoined"))
       "concatenation result was used to recover an unjustified split of its inputs"
+
+  -- Parameters are invariant across recursive map calls, including when the
+  -- selected list is not the first argument.
+  let shifted = set "constructors" (toJSON (["shifted"] :: [Text])) $
+        declaration "Shifted" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+      shiftedCtor = set "family" (String "Shifted") $ declaration "shifted" "constructor"
+        (signature [named "Nat",named "ListNat"]
+          (object ["term" .= call "Shifted" [call "shift" [variable 1 [],variable 0 []] []] []]))
+      shiftedInv = inv {declarations = M.union (M.fromList [("Shifted",shifted),("shifted",shiftedCtor)]) (declarations inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [("Shifted","structure"),("shifted","structure")]) (modelRequirements inv)}
+  check (M.member "Shifted" (fst (A.discover shiftedInv M.empty)))
+    "invariant runtime parameter prevented list-map admission"
+  let changedParameter = shiftedInv {declarations = M.adjust (set "compiled" (split 1
+        [("nil",0,done 1 (constructor "nil" [])),("cons",2,done 3 (constructor "cons"
+          [call "add" [variable 2 [],variable 1 []] [],call "shift" [variable 1 [],variable 0 []] []]))])) "shift" (declarations shiftedInv)}
+  check (M.notMember "Shifted" (fst (A.discover changedParameter M.empty)))
+    "list-map certificate ignored a changing recursive parameter"
+
+  forM_ ["retainPositive","compactValues"] $ \helper -> do
+    let resultType index = object ["term" .= call "Filtered" [index] []]
+        filtered = set "constructors" (toJSON (["filtered"] :: [Text])) $
+          declaration "Filtered" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        filteredCtor = set "family" (String "Filtered") $ declaration "filtered" "constructor"
+          (signature [named "ListNat"] (resultType (call helper [variable 0 []] [])))
+        recurse t = call helper [t] []
+        helperDef = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat"] "ListNat" (split 0
+            [("nil",0,done 0 (constructor "nil" [])),("cons",2,split 0
+              [("zero",0,done 1 (recurse (variable 0 [])))
+              ,("suc",1,done 2 (constructor "cons"
+                [constructor "suc" [variable 1 []],recurse (variable 0 [])]))])])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [filtered,filteredCtor,helperDef]
+        admitted = fst (A.discover valid M.empty)
+    check (M.member "Filtered" admitted) "constructor-based list filtering failed computed-index admission"
+    native <- traverse (either (fail . show) pure) (A.functions valid M.empty admitted)
+    forM_ [[],[0],[0,2,2,0,1],[10^(80 :: Int),0,3,3]] $ \values ->
+      check (evalWith native [list values] (A.body (native M.! helper)) == list (filter (>0) values))
+        "computed-index filtering changed order, multiplicity, or kept payloads"
+    let wrongTail = set "compiled" (split 0 [("nil",0,done 0 (constructor "nil" [])),("cons",2,
+          done 2 (recurse (constructor "cons" [variable 1 [],variable 0 []])))]) helperDef
+        inspectTail = set "compiled" (split 0 [("nil",0,done 0 (constructor "nil" [])),("cons",2,split 1
+          [("nil",0,done 1 (constructor "nil" [])),("cons",2,done 3 (recurse (variable 0 [])))])]) helperDef
+    forM_ [add [filtered,filteredCtor,wrongTail],add [filtered,filteredCtor,inspectTail]
+      ,valid {document = document base}
+      ,valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}] $ \invalid ->
+        check (M.notMember "Filtered" (fst (A.discover invalid M.empty)))
+          "list filtering admitted an unproved tail, branch, body or termination condition"
 
   forM_ ["bump","incrementList"] $ \helper -> do
     let mappedType index = object ["term" .= call "MappedList" [index] []]

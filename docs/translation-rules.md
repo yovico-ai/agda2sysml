@@ -723,15 +723,32 @@ Constructor facts apply to the expressions exposed by unfolding. If a recursive
 helper still has an unknown outer branch, comparison retains the call, allowing
 both sides of a recursive equation to meet at the same residual lookup.
 This bounded comparison does not assume injectivity or prove arbitrary recursive
-equations. Unindexed recursive helpers continue to require the concatenation
-certificate below.
+equations. Unindexed recursive helpers require a checked concatenation or
+map/filter certificate.
 
 A recursive list helper has a finite concatenation normal form only when its
 checked native body matches both constructor equations: the empty branch returns
 the second input, and the prepend branch retains the head and recursively joins
 the tail with the second input. Applicability uses checked shapes, signatures,
 case semantics and safe termination evidence; it does not inspect function names.
+The map/filter rule also supports invariant runtime arguments, including
+callbacks. The empty branch must return the empty target list. Each nonempty
+branch must either return the recursive result on the exact tail, or prepend
+one transformed head to that result. Decisions and transformed heads may use
+the source head and invariant arguments, but cannot inspect the unconsumed list.
+Changed recursive arguments, missing bodies, and unchecked termination are
+rejected. The original recursive calculations remain in the emitted model.
 Other recursion without indexed inputs or results remains unsupported.
+
+For dependent comparisons, a typed list-valued call or field equals the list
+reconstructed from its contents. Known list prefixes can distinguish incompatible
+head constructors, while unknown tails remain opaque. Reconstructing a known
+head compares all of its active payloads; a matching tag alone is insufficient.
+Branch equations normalize projection redexes between substitutions in one
+finite pass, so an earlier constructor substitution does not hide a later fact.
+These rules support filtering static slots from an indexed environment and
+transporting members through callback-driven list conversions without assuming
+that those callbacks are injective.
 
 Comparison uses the certified concatenation form, flattens nested ordered
 sequences, and handles empty contributions. List indices compare their contents;
@@ -1025,10 +1042,11 @@ Boolean flags. Available extents must cover every otherwise free payload domain.
 Conversion between a concrete record and a stored-family member requires
 checked definitional reduction identifying that record family. Constructor
 branch equations may resolve duplicated implicit indices, using constructor
-injectivity; computations are not assumed injective. A recursive unary list map
-can serve as a computed index only when its checked body recurses exactly on the
-tail and computes each output head solely from the corresponding input head and
-static bindings. The original recursive calculation remains in the output.
+injectivity; computations are not assumed injective. Recursive list maps and
+filters can serve as computed indices under the structural certificate described
+above: recursion uses the exact tail, and head computations retain their static
+bindings and invariant runtime arguments. The original recursive calculation
+remains in the output.
 
 Dependent callback signatures retain selections from those stored bindings.
 When a callback's result specializes another carrier at a callback-local index,
