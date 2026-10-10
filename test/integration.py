@@ -324,10 +324,10 @@ models:
     pattern_evidence = verify_dependent_patterns(self_output)
     contextual_evidence = verify_contextual_indices(self_output)
     family_evidence = verify_dependent_family_parameters(self_output)
-    check(family_evidence['operations'] == 6
-          and family_evidence['comparisons'] >= 60
-          and family_evidence['invalidCasesRejected'] >= 17
-          and family_evidence['mutationsDetected'] == 6,
+    check(family_evidence['operations'] == 7
+          and family_evidence['comparisons'] >= 68
+          and family_evidence['invalidCasesRejected'] >= 19
+          and family_evidence['mutationsDetected'] == 7,
           'dependent and partial families lack complete operations or mismatch checks')
     check(contextual_evidence['operations'] == 8
           and contextual_evidence['comparisons'] >= 50
@@ -357,10 +357,10 @@ models:
           and dependent_schema_evidence['structuredStates']
           and dependent_schema_evidence['completeEvidencePreserved'],
           'dependent schema construction and relation conversions lack complete behavior or refusal checks')
-    check(schema_record_evidence['operations'] == 8
-          and schema_record_evidence['comparisons'] >= 214
-          and schema_record_evidence['invalidBindingsRejected'] >= 16
-          and schema_record_evidence['bodyMutationsDetected'] == 16
+    check(schema_record_evidence['operations'] == 12
+          and schema_record_evidence['comparisons'] >= 262
+          and schema_record_evidence['invalidBindingsRejected'] >= 24
+          and schema_record_evidence['bodyMutationsDetected'] == 32
           and schema_record_evidence['proofCallbackChecks'] == 24,
           'stored schema conversions lack complete values, binding refusals, or mutation checks')
     check(multi_callback_evidence['operations'] == 7
@@ -418,7 +418,7 @@ models:
           and structured_evidence["repeatedPositions"] > 1000 and structured_evidence["reorderedBindings"] == 3,
           "structured indices lack ordered schemas, complete members, or invalid-index refusals")
     callback_evidence = verify_callbacks(self_output)
-    check(callback_evidence == {'comparisons': 218, 'invalidCasesRejected': 5, 'operations': 3},
+    check(callback_evidence == {'comparisons': 220, 'invalidCasesRejected': 6, 'operations': 5},
           "callback consumers lack complete outcomes and binding/schema refusals")
     record_path_evidence = verify_dependent_record_path(self_output)
     check(record_path_evidence == {'comparisons': 120, 'invalidCasesRejected': 12, 'operations': 4},

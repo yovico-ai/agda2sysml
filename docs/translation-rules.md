@@ -1127,6 +1127,14 @@ can establish an empty fibre. This fact is local to that scrutinee and branch;
 an unknown payload or an unrelated input cannot establish impossibility.
 Lazy matches require a record or a uniquely determined constructor.
 
+A required record field can also establish impossibility when its checked type
+has an empty fibre. Field types are instantiated with that receiver's fields
+and contextual indices, including the record constructor's result-index
+equalities, before applying branch equations. Descent stops at a
+repeated carrier; a recursive field alone supplies no emptiness evidence.
+Runtime schema bindings are collections, so absent constructor metadata never
+makes them empty types, even when the collection has no members.
+
 ## Captured runtime indices in type arguments
 
 A static type expression can contain runtime indices, for example `Vec (Expr m)
@@ -1199,7 +1207,26 @@ captured fields.
 
 This extension targets the unchanged `DependentSums.Constructors.encode`,
 `decode`, and `native`, and `SpecializedFamilies.Instantiation.encode`, `decode`,
-and `specialize`. `DependentSums.Constructors.dispatch` still needs support for
-static type and universe parameters that follow runtime inputs. These changes
-have compiler and independent emitted-model checks; Pilot is not part of this
-stage's verification.
+and `specialize`. These changes have compiler and independent emitted-model
+checks; Pilot is not part of this stage's verification.
+
+### Interleaved static and runtime parameters
+
+Type and universe parameters may follow runtime inputs in a checked telescope.
+Specialization records each binder's original source position separately from
+its static argument or runtime input position. Calls, family applications,
+constructors, projections, and compiled case environments use that same layout.
+Later type parameters remain native type extents; stored family parameters
+already represented by runtime schema bindings retain that representation.
+
+A complete calculation call used as a dependent index may be followed by
+checked record projections. The receiver's carrier, projection owner, and
+dependent result type must agree. Partial calls, extra value arguments, and
+foreign projections remain refused.
+
+Together these rules admit `DependentSums.Constructors.dispatch`, including
+its late `Result` type, and `OpenParameters.Transport.Container`, its constructor
+`pack`, and its projections. The emitted dispatch checks supply a callback that
+returns the complete tag and dependent payload, and reject inconsistent index
+bindings and results outside the supplied extent. Container checks preserve
+the runtime binding, classifier, equality witness, and payload.
