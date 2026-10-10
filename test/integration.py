@@ -32,6 +32,7 @@ from arithmetic_indices import verify_arithmetic_indices
 from dependent_patterns import verify_dependent_patterns
 from contextual_indices import verify_contextual_indices
 from dependent_family_parameters import verify_dependent_family_parameters
+from specialized_callbacks import verify_specialized_callbacks
 
 
 def check(condition, message):
@@ -324,6 +325,13 @@ models:
     pattern_evidence = verify_dependent_patterns(self_output)
     contextual_evidence = verify_contextual_indices(self_output)
     family_evidence = verify_dependent_family_parameters(self_output)
+    specialized_evidence = verify_specialized_callbacks(self_output)
+    check(specialized_evidence['operations'] == 3
+          and specialized_evidence['comparisons'] >= 48
+          and specialized_evidence['invalidCasesRejected'] >= 11
+          and specialized_evidence['bodyMutationsDetected'] == 3
+          and specialized_evidence['emptyConstraintMutationDetected'],
+          'recursive substitution and closed instantiation lack complete results or refusal checks')
     check(family_evidence['operations'] == 7
           and family_evidence['comparisons'] >= 68
           and family_evidence['invalidCasesRejected'] >= 19

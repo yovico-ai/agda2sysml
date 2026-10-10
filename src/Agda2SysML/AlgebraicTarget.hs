@@ -661,7 +661,12 @@ discover inv finite = go M.empty candidates
       parsed = close accepted (M.mapMaybe (either (const Nothing) Just) attempts)
       components = stronglyConnComp [(sh,s,S.toList (deps sh)) | (s,sh) <- M.toList parsed]
       checked (AcyclicSCC sh) = Right [sh]
-      checked (CyclicSCC shapes') = do
+      checked (CyclicSCC component) = do
+        -- A list nested in a recursive datatype cannot use the sequence
+        -- encoding's independent finiteness rule. Its checked nil/cons
+        -- constructors already form an ordinary inductive sum; include them
+        -- in the component's existing finite node-count representation.
+        let shapes' = map recursiveList component
         unless (all (\sh -> null (contextIndices sh) && not (isRecord sh) && sequenceElement sh == Nothing
           && maybe False (inductiveChecked inv) (M.lookup (shapeSymbol sh) (declarations inv))) shapes')
           (refuse Semantics "Recursive carrier component lacks safe inductive positivity evidence")
@@ -670,6 +675,12 @@ discover inv finite = go M.empty candidates
           ,s <- concatMap carrierDependencies (b:a),s `elem` peers])
           (refuse Representation "Recursive carrier through a callable requires a separate well-foundedness rule")
         pure [sh {recursivePeers = peers} | sh <- shapes']
+      recursiveList sh
+        | Just _ <- sequenceElement sh
+        , Just d <- M.lookup (shapeSymbol sh) (declarations inv)
+        , get "nativeSequence" d /= Null =
+            sh {sequenceElement = Nothing,familyParameters = Specialize.nativeFamilies d}
+        | otherwise = sh
       groups = map checked components
       members = close accepted (M.fromList [(shapeSymbol sh,sh) | Right group <- groups,sh <- group])
       admitted = M.union members (M.fromList [(shapeSymbol row,row) | sh <- M.elems members,Just _ <- [relationParameter sh],let row = relationRow sh])
@@ -755,9 +766,15 @@ shape inv finite helpers shapes d = do
       refuse Representation "Coinductive records require a separate carrier rule"
     c <- string <$> field inv "constructor" d
     pure [c]
-    else map string . array <$> field inv "constructors" d
-  unless (not (null cs) && length cs == S.size (S.fromList cs)) $
-    refuse Semantics "Algebraic carrier requires distinct, nonempty constructor coverage"
+    else do
+      checked <- field inv "constructors" d
+      case checked of
+        Array _ -> pure (map string (array checked))
+        _ -> refuse Syntax "Missing checked constructor coverage"
+  unless (length cs == S.size (S.fromList cs)) $
+    refuse Semantics "Algebraic carrier requires distinct constructor coverage"
+  unless (not (null cs) || inductiveChecked inv d) $
+    refuse Semantics "Empty carrier requires checked inductive datatype evidence"
   constructors <- forM cs $ \c -> do
     def <- maybe (refuse Syntax "Missing checked constructor declaration") Right (M.lookup c (declarations inv))
     unless (get "kind" def == String "constructor") (refuse Syntax "Carrier refers to a non-constructor declaration")
@@ -1932,7 +1949,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
          ,condition <- refinementTextIn shapes label field quote (field i) domain
            ++ parameterRefinements shapes label quote (field i) domain]
       ++ ["  }"]
-    renderShape sh = (if isRecord sh then [] else
+    renderShape sh = (if isRecord sh || null (variants sh) then [] else
       ["  enum def " <> quote (label (tagType (shapeSymbol sh))) <> " {"]
       ++ ["    enum " <> quote (label (constructorSymbol c)) <> ";" | c <- variants sh] ++ ["  }"])
       ++ ["  attribute def " <> quote (label (shapeSymbol sh)) <> " {"]
@@ -1941,7 +1958,7 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
            <> "::self hastype " <> quote (label (shapeSymbol sh)) <> " }"]
       ++ parameterFields sh
       ++ ["    attribute " <> quote (label (countField (shapeSymbol sh))) <> " : ScalarValues::Natural [1];" | not (null (recursivePeers sh))]
-      ++ (if isRecord sh then [] else
+      ++ (if isRecord sh || null (variants sh) then [] else
         ["    attribute " <> quote (label tagField) <> " : " <> quote (label (tagType (shapeSymbol sh))) <> " [1];"])
       ++ ["    attribute " <> quote (label (indexField (shapeSymbol sh) i)) <> " : " <> renderCarrier label t <> " [1];"
          | (i,t) <- zip [0..] (indexTypes sh),i `notElem` contextIndices sh]
@@ -2012,6 +2029,7 @@ familyDomainConstraints shapes label binding families =
     ++ parameterRefinements shapes label binding field domain]
 
 validity :: Shapes -> (Text -> Text) -> Shape -> Text
+validity _ _ sh | not (isRecord sh) && sequenceElement sh == Nothing && null (variants sh) = "false"
 validity shapes label sh = case constraints of
   [] -> "true"
   _ -> T.intercalate " and " constraints
@@ -2067,7 +2085,7 @@ references shapes = concat
     ++ [countField (shapeSymbol sh) | not (null (recursivePeers sh))]
     ++ [indexField (shapeSymbol sh) i | i <- [0..length (indexTypes sh)-1]]
     ++ (if hasValidity sh then [validitySymbol (shapeSymbol sh)] else [])
-    ++ (if isRecord sh then [] else [tagType (shapeSymbol sh),tagField]) | sh <- M.elems shapes]
+    ++ (if isRecord sh || null (variants sh) then [] else [tagType (shapeSymbol sh),tagField]) | sh <- M.elems shapes]
 
 generatedNames :: (Text -> Text) -> Shapes -> M.Map Text Text
 generatedNames display shapes = M.fromList $ concat

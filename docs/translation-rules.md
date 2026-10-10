@@ -283,6 +283,29 @@ source signature stays in the inventory: the generated behavior is independent
 of the choice of any well-typed source function argument. Type parameters,
 payloads, dependent indices and evidence retain their existing checks.
 
+A callback may consume or return a data carrier whose specialization arguments
+include these proven-unused markers. The markers describe static omission;
+they do not make the containing data type function-valued. The complete carrier,
+including its retained payload and bindings, still crosses the callback boundary.
+A marker alone is not a runtime callback domain or result. Direct callback-valued
+arguments remain subject to the existing higher-order restrictions, and missing
+unused-parameter evidence does not authorize omission.
+
+For a recursive datatype with list-valued children, the list and datatype use
+the existing tagged-constructor representation together. Checked `nil`/`cons`
+payloads retain order and repeated children, and finite node-count constraints
+cover the entire recursive component. Ordinary lists keep their sequence
+representation. This fallback still requires checked inductive positivity and
+valid constructor signatures; recursive callable payloads remain unsupported.
+
+A checked inductive datatype with an explicitly empty constructor list has an
+uninhabited native carrier: its validity constraint is `false`, and it has no
+constructor helpers or tag enumeration. This permits enclosing datatypes such
+as closed type expressions to retain their other, inhabited variants. Missing
+constructor metadata is not evidence of emptiness. The existing absurd-leaf
+rule can use this proven emptiness; no new rule for arbitrary impossible
+branches or general inhabitance reasoning is added.
+
 Agda module instantiation can create carrier aliases and function aliases.
 Carrier identity follows the compiler's recorded alias clause, requiring a
 transparent module copy with an ordinary variable telescope. Checked function
@@ -1266,3 +1289,30 @@ Two candidates remain textual: `SourceAlignment.Direct.unused-binder-preserves-r
 and `UniverseLevels.resolution-exact`. Their types contain partially applied
 named callback references inside computed indices. Recovering an omitted checked
 prefix does not provide a representation for those partial applications.
+
+### Callbacks over specialized recursive data
+
+Proven-unused module parameters remain static bookkeeping when their enclosing
+data carrier is an argument or result of a callback. Together with recursive
+list constructor encoding and empty data carriers, this admits the unchanged
+`Specialization.substitute`, `substituteArgs`, and `instantiate` operations.
+The implementation uses checked carrier structure and dependency cycles, with
+no module-name rules or project-specific mapping additions.
+
+Independent tests execute these three operations from the emitted SysML across
+distinct source and target parameter domains. They compare complete results
+for nested type expressions, empty and repeated argument lists, opaque payloads
+and closed instantiation; reject inconsistent bindings, node counts and
+fabricated empty values; and detect algorithm and empty-constraint mutations.
+The test interpreter caches repeated pure calls while retaining callback
+contexts, and clears its caches for mutation checks. These checks establish no
+interactive performance claim. Pilot validation and execution remain deferred.
+
+On the unchanged 722-function self specification, native declaration coverage
+is 534/722 (74.0%), up from 517/722 (71.6%), with no losses. The total comprises
+356 calculation functions and 188 statement functions, with ten declarations
+in both sets. Of the statements, 137 are authored and 51 are compiler-generated
+or module-copied. Empty carrier admission also enables existing translation
+rules for further helpers and impossible branches; these coverage gains do not
+mean every newly admitted declaration has runnable inputs or a dedicated
+behavioral test. There are 337 unresolved requirements.
