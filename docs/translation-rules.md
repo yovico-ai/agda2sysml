@@ -1285,6 +1285,27 @@ constructors, projections, and compiled case environments use that same layout.
 Later type parameters remain native type extents; stored family parameters
 already represented by runtime schema bindings retain that representation.
 
+Static arguments and runtime indices are instantiated simultaneously. Both
+supplied arguments belong to the caller: a callback's captured type parameters
+must survive substitution, and a supplied type's captured runtime indices must
+survive rebasing of the callee telescope. This applies to calls, constructor
+payloads, family applications, projections and branch signatures.
+
+Dependent input comparison accepts beta-equivalent applications of checked
+index lambdas, preserving their argument domains and complete runtime indices.
+Unknown callbacks remain distinct. This comparison does not change the emitted
+callback representation or add a source-reduction fallback.
+
+Omitted constructor universe parameters can be inferred from a symbolic
+expected carrier. Only unresolved parameters of the callee are inference
+variables; atoms inside a supplied caller level remain fixed in that scope.
+An ambiguous maximum remains unresolved instead of choosing an arbitrary level.
+
+Independent compiler fixtures exercise caller type and level renaming, captured
+runtime indices, interleaved telescope positions, and inconsistent domains and
+indices. These checks establish the tested specialization boundaries; coverage
+of the self specification is a separate regression measure.
+
 A complete calculation call used as a dependent index may be followed by
 checked record projections. The receiver's carrier, projection owner, and
 dependent result type must agree. Partial calls, extra value arguments, and
