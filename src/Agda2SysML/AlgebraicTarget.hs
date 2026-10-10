@@ -84,8 +84,30 @@ instance Eq Expression where
   x == y | NIterator a t <- unmark x, NIterator b u <- unmark y = a == b && t == u
   x == y | NCollect a t xs v <- unmark x, NCollect b u ys w <- unmark y = (a,t,xs,v) == (b,u,ys,w)
   x == y | NCast t a <- unmark x, NCast u b <- unmark y = (t,a) == (u,b)
-  x == y | NLambda as t a <- unmark x, NLambda bs u b <- unmark y = (as,t,a) == (bs,u,b)
+  x == y | NLambda as t a <- unmark x, NLambda bs u b <- unmark y =
+    lambdaForm as t a == lambdaForm bs u b
   _ == _ = False
+
+-- Local binder spelling is not part of a closure's meaning. Negative argument
+-- positions are comparison-only bound names; checked callback arguments use
+-- nonnegative positions. Normalize the entire nested scope at once so an inner
+-- binder cannot be confused with an outer capture.
+lambdaForm :: [(Text,Carrier)] -> Carrier -> Expression -> ([Carrier],Carrier,Expression)
+lambdaForm args out body = let (types,_,result,value) = bind M.empty 0 args out body
+  in (map snd types,result,value)
+  where
+    bind names next [] result value = ([],next,mapCarrier (go names next) result,go names next value)
+    bind names next ((name,typ):rest) result value =
+      let domain = mapCarrier (go names next) typ
+          (types,final,result',value') = bind (M.insert name next names) (next+1) rest result value
+      in (("$closure" <> T.pack (show next),domain):types,final,result',value')
+    go names next = mapExpression $ \e -> case e of
+      Iterator name _ | Just i <- M.lookup name names -> Just (Argument (-1-i))
+      Lambda inputs result value -> let (types,_,result',value') = bind names next inputs result value
+        in Just (Lambda types result' value')
+      Collect name typ xs value -> Just (Collect name (mapCarrier (go names next) typ)
+        (go names next xs) (go (M.delete name names) next value))
+      _ -> Nothing
 pattern Input :: Int -> Expression
 pattern Input i <- (unmark -> NInput i) where Input i = NInput i
 pattern Argument :: Int -> Expression
@@ -248,6 +270,19 @@ indexExpression inv finite helpers shapes env expected t = do
     infer term = fmap (\(typ,e) -> (typ,located "native.index-term" term (toJSON [renderWith id (T.pack . show) x | (_,x) <- env]) e)) $ do
       let es = array (get "eliminations" term)
       case string (get "tag" term) of
+        "native-lambda" -> do
+          let types = array (get "inputs" term)
+          unless (not (null types)) (refuse Syntax "Malformed index lambda telescope")
+          (locals,context) <- foldM (\(locals,context) ty -> do
+            domain <- carrierIn inv finite helpers shapes context ty
+            let name = "lambdaArgument" <> T.pack (show (length env + length locals))
+            pure (locals ++ [(name,domain)],(domain,Iterator name domain):context)) ([],env) types
+          out <- carrierIn inv finite helpers shapes context (get "result" term)
+          value <- indexExpression inv finite helpers shapes context out (get "body" term)
+          let rebase = mapCarrier (mapExpression (\e -> case e of
+                Iterator name _ -> Argument <$> lookup name (zip (map fst locals) [0..])
+                _ -> Nothing))
+          eliminate (Callable (map (rebase . snd) locals) (rebase out),Lambda locals out value) es
         "native-index-successor" -> do
           (typ,value) <- infer (get "predecessor" term)
           unless (typ == Natural) (refuse Semantics "Successor index is not natural")
@@ -417,6 +452,50 @@ applyCallback values = mapCarrier (mapExpression (\e -> case e of
 instantiate :: [Expression] -> Expression -> Expression
 instantiate args = mapExpression (\e -> case e of Input i | i >= 0 && i < length args -> Just (args !! i); _ -> Nothing)
 
+-- Beta substitution must not capture a caller's iterator under a nested
+-- lambda or collect binder. Freshen those binders before inserting arguments.
+applyLambda :: Expression -> [Expression] -> Maybe Expression
+applyLambda (Lambda args _ body) values | length args == length values =
+  Just (go occupied (M.fromList (zip (map fst args) values)) body)
+  where
+    occupied = S.unions (map names (body:values)) `S.union` S.fromList (map fst args)
+    fresh used = head ["$beta" <> T.pack (show i) | i <- [0 :: Int ..],S.notMember ("$beta" <> T.pack (show i)) used]
+    go used bindings = mapExpression $ \e -> case e of
+      Iterator name _ -> M.lookup name bindings
+      Lambda inputs result value -> Just (bind used bindings inputs result value)
+      Collect name typ xs value ->
+        let name' = fresh used; domain = mapCarrier (go used bindings) typ
+        in Just (Collect name' domain (go used bindings xs)
+          (go (S.insert name' used) (M.insert name (Iterator name' domain) bindings) value))
+      _ -> Nothing
+    bind used bindings [] result value = Lambda [] (mapCarrier (go used bindings) result) (go used bindings value)
+    bind used bindings ((name,typ):rest) result value =
+      let name' = fresh used; domain = mapCarrier (go used bindings) typ
+      in case bind (S.insert name' used) (M.insert name (Iterator name' domain) bindings) rest result value of
+        Lambda inputs result' value' -> Lambda ((name',domain):inputs) result' value'
+        _ -> error "lambda binding lost its telescope"
+    carrierNames (Callable inputs result) = S.unions (map carrierNames (result:inputs))
+    carrierNames (Fibre _ xs) = S.unions (map names xs)
+    carrierNames _ = S.empty
+    names e = case e of
+      Iterator name typ -> S.insert name (carrierNames typ)
+      Lambda inputs result value -> S.unions (names value:carrierNames result:
+        [S.insert name (carrierNames typ) | (name,typ) <- inputs])
+      Collect name typ xs value -> S.insert name (S.unions [carrierNames typ,names xs,names value])
+      Construct _ fs -> S.unions (map (names . snd) fs)
+      Project x _ -> names x
+      Equal x y -> names x `S.union` names y
+      Numeric _ x y -> names x `S.union` names y
+      Sequence xs -> S.unions (map names xs)
+      SequenceOp _ x -> names x
+      SequenceHead typ x -> carrierNames typ `S.union` names x
+      Conditional p x y -> S.unions (map names [p,x,y])
+      Call _ xs -> S.unions (map names xs)
+      Apply f xs -> S.unions (map names (f:xs))
+      Cast _ x -> names x
+      _ -> S.empty
+applyLambda _ _ = Nothing
+
 -- Beta reduction for a field of a known construction; calls stay opaque.
 normalize :: Expression -> Expression
 normalize e = retain "native.normalization" e (normalizeStep e)
@@ -494,7 +573,8 @@ expandWith rewrite helpers = go S.empty . rewrite
           _ -> unfolded
       _ -> Call s (map (go seen) args)
     step seen (Project x f) = normalize (Project (go seen x) f)
-    step seen (Apply f x) = Apply (go seen f) (map (go seen) x)
+    step seen (Apply f x) = let fn = go seen f; values = map (go seen) x
+      in maybe (Apply fn values) (go seen . rewrite) (applyLambda fn values)
     step seen (Collect name typ xs value) = Collect name (mapCarrier (go seen) typ) (go seen xs) (go seen value)
     step seen (Cast typ value) = Cast typ (go seen value)
     step seen (Construct s fs) = Construct s [(f,go seen x) | (f,x) <- fs]
@@ -1359,7 +1439,7 @@ functionWith inv finite helpers shapes signatures d = do
       case string (get "tag" term) of
         "native-lambda" -> do
           let types = array (get "inputs" term)
-          unless (not (null types) && null es) (refuse Syntax "Malformed native lambda telescope")
+          unless (not (null types)) (refuse Syntax "Malformed native lambda telescope")
           (locals,context) <- foldM (\(locals,context) ty -> do
             domain <- carrierIn inv finite helpers shapes (schemaContext equationsInScope context) ty
             let name = "lambdaArgument" <> T.pack (show (length env + length locals))
@@ -1369,7 +1449,7 @@ functionWith inv finite helpers shapes signatures d = do
           let rebase = mapCarrier (mapExpression (\e -> case e of
                 Iterator name _ -> Argument <$> lookup name (zip (map fst locals) [0..])
                 _ -> Nothing))
-          pure (Callable (map (rebase . snd) locals) (rebase out),Lambda locals out value)
+          eliminate (Callable (map (rebase . snd) locals) (rebase out),Lambda locals out value) es
         "native-schema-build" -> buildSchema inv finite helpers shapes (schemaContext equationsInScope env) term
         "native-schema-inject" -> do
           concrete <- carrierIn inv finite helpers shapes (schemaContext equationsInScope env) (get "memberType" term)

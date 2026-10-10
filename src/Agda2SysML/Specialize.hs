@@ -38,6 +38,7 @@ data Type = Unused | Parameter Int | Open Int LevelExpr | Named Text [Type] | Le
 data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexConstructor Text [Type] [IndexExpr]
   | IndexNatural Integer | IndexSuccessor IndexExpr | IndexArgument Int | IndexApply IndexExpr IndexExpr
   | IndexTyped Type IndexExpr | IndexFamilyArgument Int
+  | IndexLambda [Int] Type IndexExpr
   | IndexProject Text [Type] IndexExpr | IndexCall Text [Type] [IndexExpr] deriving (Eq,Ord,Show)
 
 -- Type evidence for a callable reference is retained while abstracting free
@@ -45,6 +46,22 @@ data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexCons
 typedIndex :: Type -> IndexExpr -> IndexExpr
 typedIndex ty (IndexTyped _ x) = typedIndex ty x
 typedIndex ty x = IndexTyped ty x
+
+-- Closure binders share the hygienic local namespace with type-family binders,
+-- never the enclosing runtime telescope or a callback's contract arguments.
+bindIndexLocals :: [(Int,IndexExpr)] -> IndexExpr -> IndexExpr
+bindIndexLocals bindings = go
+  where
+    go original@(IndexLocal i) = maybe original id (lookup i bindings)
+    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty)
+      (bindIndexLocals [(i,value) | (i,value) <- bindings,i `notElem` slots] x)
+    go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
+    go (IndexApply f x) = IndexApply (go f) (go x)
+    go (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices go) ts) (map go xs)
+    go (IndexCall f ts xs) = IndexCall f (map (mapIndices go) ts) (map go xs)
+    go (IndexProject f ts x) = IndexProject f (map (mapIndices go) ts) (go x)
+    go (IndexSuccessor x) = IndexSuccessor (go x)
+    go x = x
 
 -- A carrier/helper identity abstracts runtime values in its static arguments.
 -- The captured values become an explicit, ordered telescope prefix; repeated
@@ -77,6 +94,7 @@ familyLocals = free S.empty
     indices bound (IndexLocal i) = if S.member i bound then S.empty else S.singleton i
     indices bound IndexArgument{} = if S.member (-1) bound then S.empty else S.singleton (-1)
     indices bound (IndexTyped ty x) = free bound ty `S.union` indices bound x
+    indices bound (IndexLambda slots ty x) = free bound ty `S.union` indices (bound `S.union` S.fromList slots) x
     indices bound (IndexApply f x) = indices bound f `S.union` indices bound x
     indices bound (IndexConstructor _ ts xs) = S.unions (map (free bound) ts ++ map (indices bound) xs)
     indices bound (IndexProject _ ts x) = S.unions (indices bound x:map (free bound) ts)
@@ -107,6 +125,9 @@ canonicalFamiliesAvoiding avoid ty = go M.empty start ty
     ix names next (IndexCall f ts xs) = IndexCall f (map (go names next) ts) (map (ix names next) xs)
     ix names next (IndexSuccessor x) = IndexSuccessor (ix names next x)
     ix names next (IndexTyped ty x) = typedIndex (go names next ty) (ix names next x)
+    ix names next (IndexLambda slots ty x) =
+      let fresh = take (length slots) [next..]
+      in IndexLambda fresh (go names next ty) (ix (M.union (M.fromList (zip slots fresh)) names) (next+length slots) x)
     ix names next (IndexApply f x) = IndexApply (ix names next f) (ix names next x)
     ix _ _ x = x
 
@@ -125,6 +146,7 @@ applyTypeFamily family@(FamilyExpression domain _ _ _) (Runtime actual value:res
     replace slot (IndexCall f ts xs) = IndexCall f (map (replaceLocal slot) ts) (map (replace slot) xs)
     replace slot (IndexSuccessor x) = IndexSuccessor (replace slot x)
     replace slot (IndexTyped ty x) = typedIndex (replaceLocal slot ty) (replace slot x)
+    replace slot (IndexLambda slots ty x) = IndexLambda slots (replaceLocal slot ty) (replace slot x)
     replace slot (IndexApply f x) = IndexApply (replace slot f) (replace slot x)
     replace _ x = x
 applyTypeFamily FamilyExpression{} _ = refuse Semantics "Type-family lambda has incompatible index arguments"
@@ -170,6 +192,7 @@ bindFamilyInputs values = walk
     walk ty = ty
     go (IndexFamilyArgument i) | Runtime _ value:_ <- drop i values = value
     go (IndexTyped ty x) = typedIndex (walk ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (walk ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go (IndexProject f ts x) = IndexProject f (map walk ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map walk ts) (map go xs)
@@ -210,6 +233,7 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
           -- free value and must become an explicit captured index.
           erase IndexArgument{} = if bound then IndexCaptured 0 else IndexInput 0
           erase (IndexTyped ty x) = typedIndex (mapIndices erase ty) (erase x)
+          erase (IndexLambda slots ty x) = IndexLambda slots (mapIndices erase ty) (erase x)
           erase (IndexApply f x) = IndexApply (erase f) (erase x)
           erase x = x
           localsInIndex = familyLocals (Runtime domain ix)
@@ -231,6 +255,8 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
       case captured of
         Runtime _ value -> pure (typedIndex ty value)
         _ -> pure (typedIndex ty ix)
+    nested bound locals (IndexLambda slots ty ix) = IndexLambda slots <$> visit bound locals ty
+      <*> nested bound (locals `S.union` S.fromList slots) ix
     nested bound locals application@IndexApply{} = case spine [] application of
       (fn@(IndexTyped (Callable domains _) _),values) | length values <= length domains -> do
         capturedFn <- nested bound locals fn
@@ -257,6 +283,7 @@ shiftIndices offset = mapIndices go
     go (IndexProject f ts i) = IndexProject f (map (shiftIndices offset) ts) (go i)
     go (IndexCall f ts xs) = IndexCall f (map (shiftIndices offset) ts) (map go xs)
     go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go ix = ix
 
@@ -269,6 +296,7 @@ materializeCaptures = mapIndices go
     go (IndexProject f ts x) = IndexProject f (map materializeCaptures ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map materializeCaptures ts) (map go xs)
     go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go ix = ix
 
@@ -647,6 +675,7 @@ typeAlias _ _ = pure Nothing
 -- domain determines those parameters; source constructor terms omit them.
 readIndex :: Inventory -> [Maybe Type] -> Type -> Value -> Either Refusal Type
 readIndex inv env expected term
+  | callable@Callable{} <- expected,get "tag" term == String "lambda" = readIndexClosure inv env callable term
   | get "tag" term == String "native-family-input" =
       Runtime expected . IndexFamilyArgument <$> number (get "index" term)
   | expected == Named (builtin inv "nat") [] && not (T.null (builtin inv "nat"))
@@ -666,7 +695,10 @@ readIndex inv env expected term
         Runtime domain _ | domain == expected -> Right actual
         _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
-      actual <- readType inv env term
+      actual <- case readType inv env term of
+        Left failure | callable@Callable{} <- expected ->
+          either (const (Left failure)) Right (readIndexClosure inv env callable term)
+        result -> result
       let value = case actual of
             SelectedFamily bound -> bound
             FamilyApplication (SelectedFamily bound) [] -> bound
@@ -675,6 +707,34 @@ readIndex inv env expected term
         Runtime domain _ | domain == expected -> Right value
         _ -> refuse Semantics ("Index expression has the wrong declared domain: expected "
           <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
+
+-- Check a value closure against its complete callback contract. Eta expansion
+-- only supplies the missing value binders; the checked helper signature still
+-- validates all static arguments, captured values and the result carrier.
+readIndexClosure :: Inventory -> [Maybe Type] -> Type -> Value -> Either Refusal Type
+readIndexClosure inv env ty@(Callable domains out) term = do
+  unless (not (null domains)) (refuse Representation "Empty index closure telescope")
+  let firstSlot = maybe 0 (+1) (S.lookupMax (S.unions (familyLocals ty:[familyLocals t | Just t <- env])))
+      slots = take (length domains) [firstSlot..]
+      positions = map IndexLocal slots
+      localDomains = map (applyCallback positions) domains
+  (context,body) <- foldM (\(context,value) (slot,domain) -> do
+    let bound = Just (Runtime domain (IndexLocal slot))
+    if get "tag" value == String "lambda" then do
+      let abstraction = get "abstraction" value
+      case get "binds" abstraction of
+        Bool True -> pure (bound:context,get "body" abstraction)
+        Bool False -> pure (context,get "body" abstraction)
+        _ -> refuse Syntax "Index closure lacks checked binder information"
+    else do
+      applied <- maybe (refuse Representation "Cannot eta-expand an index callback") Right
+        (Reduction.applyTerms (Reduction.shift 1 value) [Reduction.variable 0])
+      pure (bound:context,applied)) (env,term) (zip slots localDomains)
+  value <- readIndex inv context (applyCallback positions out) body
+  case value of
+    Runtime _ ix -> pure (Runtime ty (IndexLambda slots ty ix))
+    _ -> refuse Semantics "Index closure result is not a value"
+readIndexClosure _ _ _ _ = refuse Representation "Index closure needs a callback contract"
 
 -- Constructor terms omit static parameters. Recover them from the expected
 -- result and ordered payload types, then check every dependent payload against
@@ -746,6 +806,7 @@ replaceInputs values = mapIndices go
     go (IndexProject f ts x) = IndexProject f (map (replaceInputs values) ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map (replaceInputs values) ts) (map go xs)
     go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go x = x
 
@@ -758,6 +819,7 @@ replaceKnownInputs values = mapIndices go
     go (IndexProject f ts x) = IndexProject f (map (replaceKnownInputs values) ts) (go x)
     go (IndexCall f ts xs) = IndexCall f (map (replaceKnownInputs values) ts) (map go xs)
     go (IndexTyped ty x) = typedIndex (mapIndices go ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (mapIndices go ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go x = x
 
@@ -779,6 +841,7 @@ applyCallback values = walk
     walk ty = ty
     go (IndexArgument i) | i >= 0 && i < length values = values !! i
     go (IndexTyped ty x) = typedIndex (walk ty) (go x)
+    go (IndexLambda slots ty x) = IndexLambda slots (walk ty) (go x)
     go (IndexApply f x) = IndexApply (go f) (go x)
     go (IndexConstructor c ts xs) = IndexConstructor c (map (applyCallback values) ts) (map go xs)
     go (IndexProject f ts x) = IndexProject f (map (applyCallback values) ts) (go x)
@@ -926,6 +989,7 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
     go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (substitute args) ts <*> traverse go xs
     go (IndexSuccessor i) = IndexSuccessor <$> go i
     go (IndexTyped ty x) = typedIndex <$> substitute args ty <*> go x
+    go (IndexLambda slots ty x) = IndexLambda slots <$> substitute args ty <*> go x
     go (IndexApply f x) = IndexApply <$> go f <*> go x
     go i = Right i
 closed :: Type -> Bool
@@ -947,6 +1011,7 @@ closed (FamilyExpression domain slot body level) = closed domain && closed (Leve
     erase (IndexCall f ts xs) = IndexCall f (map (mapIndices erase) ts) (map erase xs)
     erase (IndexSuccessor x) = IndexSuccessor (erase x)
     erase (IndexTyped ty x) = typedIndex (mapIndices erase ty) (erase x)
+    erase (IndexLambda slots ty x) = IndexLambda slots (mapIndices erase ty) (erase x)
     erase (IndexApply f x) = IndexApply (erase f) (erase x)
     erase x = x
 closed (Runtime ty index) = closed ty && go index
@@ -955,6 +1020,7 @@ closed (Runtime ty index) = closed ty && go index
     go IndexArgument{} = True
     go IndexFamilyArgument{} = True
     go (IndexTyped ty x) = closed ty && go x
+    go (IndexLambda slots ty x) = closed ty && closed (Runtime Unused (bindIndexLocals (zip slots (repeat (IndexCaptured 0))) x))
     go (IndexApply f x) = go f && go x
     go IndexLocal{} = False
     go IndexInput{} = False
@@ -1137,6 +1203,7 @@ indexValue (IndexFamilyArgument i) = object ["familyArgument" .= i]
 indexValue (IndexArgument 0) = object ["callbackArgument" .= True]
 indexValue (IndexArgument i) = object ["callbackArgument" .= i]
 indexValue (IndexTyped _ x) = indexValue x
+indexValue (IndexLambda slots ty x) = object ["closureInputs" .= slots,"closureType" .= typeValue ty,"body" .= indexValue x]
 indexValue (IndexApply f x) = object ["callback" .= indexValue f,"argument" .= indexValue x]
 indexValue (IndexNatural n) = object ["natural" .= n]
 indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
@@ -1216,6 +1283,13 @@ indexTerm _ (IndexLocal _) = object ["tag" .= ("unbound-family-input" :: Text)]
 indexTerm _ (IndexFamilyArgument i) = object ["tag" .= ("native-family-input" :: Text),"index" .= i]
 indexTerm _ IndexArgument{} = object ["tag" .= ("unbound-callback-input" :: Text)]
 indexTerm depth (IndexTyped _ x) = indexTerm depth x
+indexTerm depth (IndexLambda slots (Callable domains out) body) = object
+  ["tag" .= ("native-lambda" :: Text)
+  ,"inputs" .= [asType (depth+i) (applyCallback positions domain) | (i,domain) <- zip [0..] domains]
+  ,"result" .= asType (depth+length slots) (applyCallback positions out)
+  ,"body" .= indexTerm (depth+length slots) (bindIndexLocals (zip slots positions) body)]
+  where positions = map IndexInput [depth..depth+length slots-1]
+indexTerm _ IndexLambda{} = object ["tag" .= ("invalid-index-closure" :: Text)]
 indexTerm depth (IndexApply f x) = let t = indexTerm depth f in
   set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (indexTerm depth x)])) t
 indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .= (depth-i-1),"eliminations" .= ([] :: [Value])]
@@ -1453,6 +1527,7 @@ showType inv (Runtime _ index) = showIndex index
     showIndex (IndexInput i) = "input" <> T.pack (show i)
     showIndex (IndexArgument i) = "argument" <> if i == 0 then "" else T.pack (show i)
     showIndex (IndexTyped _ x) = showIndex x
+    showIndex (IndexLambda _ _ x) = "lambda(" <> showIndex x <> ")"
     showIndex (IndexApply f x) = showIndex f <> "(" <> showIndex x <> ")"
     showIndex (IndexNatural n) = T.pack (show n)
     showIndex (IndexSuccessor i) = "suc(" <> showIndex i <> ")"
@@ -1662,6 +1737,7 @@ ensureType inv stack ty@(Named s allArgs) = do
             rebaseIndex (IndexCall f ts xs) = IndexCall f (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexSuccessor x) = IndexSuccessor (rebaseIndex x)
             rebaseIndex (IndexTyped ty x) = typedIndex (mapIndices rebaseIndex ty) (rebaseIndex x)
+            rebaseIndex (IndexLambda slots ty x) = IndexLambda slots (mapIndices rebaseIndex ty) (rebaseIndex x)
             rebaseIndex (IndexApply f x) = IndexApply (rebaseIndex f) (rebaseIndex x)
             rebaseIndex x = x
         forM_ (zip prefixFields (take recordPrefix ins)) $ \(f,domain) ->
@@ -1719,6 +1795,7 @@ ensureIndex inv (IndexCall f args values) = do
 ensureIndex inv (IndexProject _ _ receiver) = ensureIndex inv receiver
 ensureIndex inv (IndexSuccessor i) = ensureIndex inv i
 ensureIndex inv (IndexTyped _ x) = ensureIndex inv x
+ensureIndex inv (IndexLambda _ ty x) = ensureType inv [] ty >> ensureIndex inv x
 ensureIndex inv (IndexApply f x) = ensureIndex inv f >> ensureIndex inv x
 ensureIndex inv (IndexConstructor _ _ xs) = mapM_ (ensureIndex inv) xs
 ensureIndex _ _ = pure ()
@@ -1869,6 +1946,7 @@ specializeTree inv stack env out tree
               rewrite (IndexCall name ts xs) = IndexCall name (map reindex ts) (map rewrite xs)
               rewrite (IndexSuccessor x) = IndexSuccessor (rewrite x)
               rewrite (IndexTyped ty x) = typedIndex (reindex ty) (rewrite x)
+              rewrite (IndexLambda slots ty x) = IndexLambda slots (reindex ty) (rewrite x)
               rewrite (IndexApply f x) = IndexApply (rewrite f) (rewrite x)
               rewrite x = x
               bindings = map rewrite contextual ++ payloadIndices
@@ -2019,6 +2097,9 @@ sourceTypeTerm inv = sourceTypeAt
       set "eliminations" (toJSON (array (get "eliminations" t)
         ++ [object ["tag" .= ("project" :: Text),"symbol" .= f]])) t
     sourceIndex depth (IndexTyped _ x) = sourceIndex depth x
+    sourceIndex depth (IndexLambda slots _ body) = foldr (\_ value -> object
+      ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= value]])
+      (sourceIndex (depth+length slots) (bindIndexLocals (zip slots (map IndexInput [depth..])) body)) slots
     sourceIndex depth (IndexApply f x) = let t = sourceIndex depth f in
       set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (sourceIndex depth x)])) t
     sourceIndex depth index = indexTerm depth index
@@ -2109,6 +2190,11 @@ resolveStoredFamily inv env family@(FamilyApplication SelectedFamily{} _) = do
 resolveStoredFamily _ _ _ = Nothing
 
 expression :: Inventory -> [Text] -> [Binding] -> Maybe Type -> Value -> Build (Type,Value)
+expression inv _ env (Just ty@Callable{}) term
+  | get "tag" term /= String "lambda"
+  ,Right (Runtime _ ix@IndexLambda{}) <- readIndex inv (runtimeBindings env) ty term = do
+      ensureIndex inv ix
+      pure (ty,set "$occurrence" (get "$occurrence" term) (indexTerm (length (filter isDynamic env)) ix))
 expression inv stack env (Just stored) term
   | get "tag" term == String "constructor"
   ,Just (concrete,premises) <- resolveStoredFamily inv env stored = do
@@ -2255,6 +2341,7 @@ expression inv stack env expected term = do
               resolvedIndex (IndexCall _ ts xs) = all resolved ts && all resolvedIndex xs
               resolvedIndex (IndexSuccessor x) = resolvedIndex x
               resolvedIndex (IndexTyped ty x) = resolved ty && resolvedIndex x
+              resolvedIndex (IndexLambda _ ty x) = resolved ty && resolvedIndex x
               resolvedIndex (IndexApply f x) = resolvedIndex f && resolvedIndex x
               resolvedIndex _ = True
           (actual,v) <- expression inv stack env (fill patternType) value
@@ -2379,6 +2466,7 @@ higherOrder inv stack env term = do
       descend (IndexCall f ts xs) = IndexCall f (map refine ts) (map (refineIndex . descend) xs)
       descend (IndexProject f ts x) = IndexProject f (map refine ts) (refineIndex (descend x))
       descend (IndexTyped ty x) = typedIndex (refine ty) (refineIndex (descend x))
+      descend (IndexLambda slots ty x) = IndexLambda slots (refine ty) (refineIndex (descend x))
       descend (IndexApply f x) = IndexApply (refineIndex (descend f)) (refineIndex (descend x))
       descend x = x
       callerPosition i = length (filter isDynamic (drop (i+1) env))
@@ -2395,6 +2483,7 @@ higherOrder inv stack env term = do
       rename (IndexCall f ts xs) = IndexCall f (map rebase ts) (map rename xs)
       rename (IndexProject f ts x) = IndexProject f (map rebase ts) (rename x)
       rename (IndexTyped ty x) = typedIndex (rebase ty) (rename x)
+      rename (IndexLambda slots ty x) = IndexLambda slots (rebase ty) (rename x)
       rename (IndexApply f x) = IndexApply (rename f) (rename x)
       rename x = x
       allTypes = map (rebase . refine) (captureTypes ++ runtimeTypes)
@@ -2476,6 +2565,7 @@ higherOrder inv stack env term = do
         check _ IndexArgument{} = True
         check _ IndexFamilyArgument{} = True
         check locals (IndexTyped ty x) = go locals ty && check locals x
+        check locals (IndexLambda slots ty x) = go locals ty && check (locals `S.union` S.fromList slots) x
         check locals (IndexApply f x) = check locals f && check locals x
         check locals (IndexConstructor _ types values) = all (go locals) types && all (check locals) values
         check locals (IndexSuccessor value) = check locals value

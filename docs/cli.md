@@ -581,3 +581,8 @@ arguments/capture types. A closure instance has ordinary runtime inputs and no
 runtime closure object; its source link refers to the original checked helper.
 `specializations[].arguments` continues to describe type arguments, while closure
 arguments are described separately in `preparationEvidence`.
+
+Computed indices may include `closureInputs`, `closureType`, and `body` in
+specialization argument metadata. These describe checked lexical binders and
+their callback contract. The emitted model uses native calculation expressions
+with captured inputs; this metadata is not a runtime Agda evaluator.

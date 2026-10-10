@@ -288,6 +288,7 @@ main = do
   contextualModel <- contextualMembershipChecks inv
   moduleAliasChecks inv
   interleavedParameterChecks inv
+  indexClosureChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
   options <- getArgs
@@ -1661,6 +1662,63 @@ indexedLookupChecks base = do
     "unknown computed index equality was guessed"
 
 -- Computed finite indices require checked bodies, not merely signatures.
+indexClosureChecks :: Inventory -> IO ()
+indexClosureChecks base = do
+  let closure name body = A.Lambda [(name,A.Boolean)] A.Boolean body
+      reference name = A.Iterator name A.Boolean
+      nested outer inner = closure outer (closure inner (reference outer))
+  check (closure "x" (reference "x") == closure "y" (reference "y")) "closure comparison depends on binder spelling"
+  check (nested "outer" "inner" == nested "a" "b") "nested closure comparison lost alpha equivalence"
+  check (nested "outer" "inner" /= closure "a" (closure "b" (reference "b")))
+    "closure comparison confused an outer capture with an inner binder"
+  check (closure "x" (A.Input 0) /= closure "y" (A.Input 1)) "closure comparison discarded captured values"
+  let boolean = named "Bool"
+      v i = variable i []
+      ty s xs = object ["term" .= call s xs []]
+      callback = signature [boolean] boolean
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "IndexClosures")
+      fn s ins out body = safe $ set "type" (signature ins out) $ operation s [] "Bool" body
+      xor = safe $ operation "indexXor" ["Bool","Bool"] "Bool" $ split 0
+        [("false",0,done 1 (v 0)),("true",0,split 0
+          [("false",0,done 0 (constructor "true" [])),("true",0,done 0 (constructor "false" []))])]
+      invoke = fn "indexInvoke" [callback,boolean] boolean (done 2 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      lambda body = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= body]]
+      partial = call "indexXor" [v 1] []
+      explicit = lambda (call "indexXor" [v 2,v 0] [])
+      index closure = call "indexInvoke" [closure,v 0] []
+      flag = set "constructors" (toJSON (["indexFlag"] :: [Text])) $
+        declaration "IndexFlag" "datatype" (signature [boolean] (universeAt (level 0)))
+      ctor = set "family" (String "IndexFlag") $ declaration "indexFlag" "constructor"
+        (signature [boolean] (ty "IndexFlag" [v 0]))
+      carry s closure = fn s [boolean,boolean,ty "IndexFlag" [index closure]]
+        (ty "IndexFlag" [call "indexInvoke" [Reduction.shift 1 closure,v 1] []]) (done 3 (v 0))
+      explicitCarry = carry "explicitIndexClosure" explicit
+      partialCarry = carry "partialIndexClosure" partial
+      betaCarry = fn "appliedIndexClosure" [boolean,boolean,ty "IndexFlag" [index explicit]]
+        (ty "IndexFlag" [call "indexXor" [v 2,v 1] []]) (done 3 (v 0))
+      additions = [xor,invoke,flag,ctor,explicitCarry,partialCarry,betaCarry]
+      inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $
+          M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "index-closures") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("index-closures" :: Text)],"definitions" .= additions]]) $
+          set "checking" (toJSON [object ["module" .= ("IndexClosures" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "closures" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- additions])}
+      env = [Just (P.Runtime (P.Named "Bool" []) (P.IndexInput 1)),Just (P.Runtime (P.Named "Bool" []) (P.IndexInput 0))]
+  explicitType <- either (fail . show) pure (P.readType inv env (index explicit))
+  partialType <- either (fail . show) pure (P.readType inv env (index partial))
+  check (explicitType == partialType) "eta-expanded index closure differs from its explicit lambda"
+  forM_ [lambda (constructor "red" []),call "indexXor" [constructor "red" []] [],
+      object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["body" .= v 0]]] $ \invalid ->
+    check (isLeft (P.readType inv env (index invalid))) "ill-typed or malformed index closure admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("lambdaArgument" `Text.isInfixOf` T.modelText generated) "index callback was erased from its boundary constraint"
+  forM_ [set "opaque" (Bool True) xor,set "compiled" Null xor,
+      set "compiled" (done 2 (call "missingIndexBody" [v 0] [])) xor] $ \broken ->
+    check (not (T.complete (T.generate inv {declarations = M.insert "indexXor" broken (declarations inv)})))
+      "opaque or missing computation was admitted through an index closure"
+
 computedChecks :: Inventory -> IO ()
 computedChecks base = do
   let piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
@@ -2720,7 +2778,8 @@ closureChecks base = do
     calculation <- either (fail . show) pure (calculations M.! name)
     forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument ->
       check (evalWith table [B captured,B argument] (A.body calculation) == B (captured /= argument)) "closure specialization lost a capture or argument"
-  check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 2) "closure templates were merged or specialized by runtime value"
+  check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 1)
+    "native callback arguments unnecessarily cloned their shared helper"
   let bodyOnlyInventory = inv
         { document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture")
             $ set "modules" (toJSON [object ["name" .= ("Checked" :: Text)
@@ -2745,8 +2804,8 @@ closureChecks base = do
     check (evalWith table [B guardCapture,B effectCapture,B argument] (A.body treeCalculation)
       == B (if guardCapture /= argument then effectCapture /= argument else argument))
       "static tree specialization changed predicate/effect captures or branch choice"
-  check (M.member "runCallback" (P.failures prepared) && M.member "evaluateTree" (P.failures prepared))
-    "unknown runtime callbacks were admitted"
+  check (all (maybe False isLeft . (`M.lookup` calculations)) ["runCallback","evaluateTree"])
+    "a missing field declaration or unchecked recursive carrier reached native admission"
   let monomorphicInventory = inv {modelRequirements = M.singleton "monomorphic"
         (S.fromList [("recordCaller","behavior"),("runCallback","behavior"),("xor","behavior"),("Callbacks","structure"),("Bool","structure")])}
       monomorphicPrepared = P.prepare monomorphicInventory

@@ -1285,7 +1285,7 @@ transport. Native declaration coverage rises from 499/722 (69.1%) to 517/722
 (71.6%), with no calculation or statement losses. The total is 341 calculation
 functions and 186 statement functions, with ten declarations in both sets.
 
-Two candidates remain textual: `SourceAlignment.Direct.unused-binder-preserves-resolution`
+At that stage, two candidates remained textual: `SourceAlignment.Direct.unused-binder-preserves-resolution`
 and `UniverseLevels.resolution-exact`. Their types contain partially applied
 named callback references inside computed indices. Recovering an omitted checked
 prefix does not provide a representation for those partial applications.
@@ -1316,3 +1316,51 @@ or module-copied. Empty carrier admission also enables existing translation
 rules for further helpers and impossible branches; these coverage gains do not
 mean every newly admitted declaration has runnable inputs or a dedicated
 behavioral test. There are 337 unresolved requirements.
+
+### Closures inside dependent indices
+
+A computed index can supply a checked lambda or a partially applied named
+function to a callback argument. The expected callback telescope determines
+the missing value arguments. Each captured value, argument domain and result
+domain is checked before the closure reaches native admission. Missing static
+arguments, incompatible domains and malformed binders remain refusals.
+
+Closure binders occupy a separate lexical scope from the surrounding operation
+inputs and from callback contract arguments. Specialization preserves that
+scope through type substitution, capture abstraction, constructor branches and
+source-term reconstruction. Helpers used only inside such a closure still
+need admitted bodies and dependency coverage.
+
+The target uses the existing native calculation-expression representation.
+Captured callbacks remain calculation inputs and contextual contract values;
+they do not become data fields whose equality depends on function identity.
+This rule does not add an Agda evaluator or project-specific translations.
+
+Type comparison respects alpha equivalence of closure binders and reduces
+complete applications of known closures. Beta substitution freshens nested
+binders before inserting captured expressions, and retains the existing
+recursion guard when expanding helpers. Neither rule assumes that different
+unknown callbacks are equal.
+
+The unchanged `Specialization.encode`, `decode`, and `specializeOperation`
+translate as complete native calculations. Their instantiation, source/target
+round-trip and operation-preservation statements translate as constraints.
+`test/index_closures.py` executes the emitted calculations and constraints with
+nested type expressions and complete opaque payloads. It checks distinct
+callbacks with equal behavior, rejects inconsistent indices, membership,
+replacement results and node counts, and detects a constant-body mutation of
+each operation. Pilot validation and execution remain deferred.
+
+On the unchanged self specification, coverage rises from 534/722 (74.0%) to
+565/722 (78.3%): 365 calculation functions and 215 statement functions, with
+15 in both sets. The 31 additional declarations comprise 17 authored
+declarations and 14 compiler-generated or module-copied declarations. No
+previous calculation, statement or discharged requirement is lost. These
+figures measure declarations, not the percentage of application behavior.
+
+The expanded specialization graph also exposes further generated-helper
+obligations: total requirements rise from 4,338 to 4,417, and unresolved
+requirements from 337 to 346. More translated declarations therefore does not
+imply fewer diagnostic requirements. Of the 215 translated statements, 151
+are authored and 64 are generated or copied; retaining a checked source proof
+alone is excluded from these counts.

@@ -33,6 +33,7 @@ from dependent_patterns import verify_dependent_patterns
 from contextual_indices import verify_contextual_indices
 from dependent_family_parameters import verify_dependent_family_parameters
 from specialized_callbacks import verify_specialized_callbacks
+from index_closures import verify_index_closures
 
 
 def check(condition, message):
@@ -326,6 +327,13 @@ models:
     contextual_evidence = verify_contextual_indices(self_output)
     family_evidence = verify_dependent_family_parameters(self_output)
     specialized_evidence = verify_specialized_callbacks(self_output)
+    closure_evidence = verify_index_closures(self_output)
+    check(closure_evidence['operations'] == 3 and closure_evidence['statements'] == 4
+          and closure_evidence['comparisons'] >= 117
+          and closure_evidence['invalidCasesRejected'] >= 11
+          and closure_evidence['bodyMutationsDetected'] == 3
+          and closure_evidence['functionIdentityNotStored'],
+          'dependent-index closures lack complete conversion, operation, law or refusal checks')
     check(specialized_evidence['operations'] == 3
           and specialized_evidence['comparisons'] >= 48
           and specialized_evidence['invalidCasesRejected'] >= 11
