@@ -1121,12 +1121,14 @@ functionWith inv finite helpers shapes signatures d = do
     alternatives equations (Fibre s indices) selected = do
       sh <- maybe (refuse Representation "Missing indexed carrier") Right (M.lookup s shapes)
       pure [(constructorSymbol c,payload c) | c <- variants sh,compatible equations (indexTypes sh) indices (endpoints selected c)]
-    alternatives _ (Named s) selected = case M.lookup s shapes of
+    alternatives equations (Named s) selected = case M.lookup s shapes of
       Just sh -> let options = [(constructorSymbol c,payload c) | c <- variants sh]
-        in Right $ case (sequenceElement sh,normalize (Project selected sequenceField)) of
+        in Right $ case (sequenceElement sh,normalize (reduce equations (Project selected sequenceField))) of
           (Just _,Sequence []) -> take 1 options
           (Just _,Sequence (_:_)) -> drop 1 options
-          _ -> options
+          _ | not (isRecord sh), Enumeration owner tag <- normalize (reduce equations (Project selected tagField))
+              , owner == tagType s -> filter ((== tag) . fst) options
+            | otherwise -> options
       Nothing -> maybe (refuse Representation "Missing case carrier") (Right . map (,[]) . F.constructors) (M.lookup s finite)
     endpoints selected c = map (instantiate [Project selected f | (f,_) <- payload c]) (resultIndices c)
     distinct (Literal a) (Literal b) = a /= b
@@ -1172,6 +1174,10 @@ functionWith inv finite helpers shapes signatures d = do
         orient (Numeric "+" x (NumberLiteral a),NumberLiteral b) | b >= a = orient (x,NumberLiteral (b-a))
         orient (Construct s [(f,x)],Construct t [(g,y)])
           | s == t && f == sequenceField && g == sequenceField = orientSequence s (x,y)
+        orient (Construct s xs,Construct t ys)
+          | s == t, Just sh <- M.lookup s shapes
+          , isRecord sh || sameConstructor xs ys
+          , map fst xs == map fst ys = concatMap orient (zip (map snd xs) (map snd ys))
         orient (Sequence (x:xs),Sequence (y:ys)) = orient (x,y) ++ orient (Sequence xs,Sequence ys)
         orient (x@Call{},y@Project{}) = [(y,x)]
         orient (x@Project{},y@Call{}) = [(x,y)]
@@ -1179,6 +1185,9 @@ functionWith inv finite helpers shapes signatures d = do
                      | isReference x = [(x,y)]
                      | isReference y = [(y,x)]
                      | otherwise = []
+        sameConstructor xs ys = case (lookup tagField xs,lookup tagField ys) of
+          (Just (Enumeration a x),Just (Enumeration b y)) -> a == b && x == y
+          _ -> False
         orientSequence _ (Sequence [x,Project xs f],Sequence [y,Project ys g])
           | f == sequenceField && g == sequenceField = orient (x,y) ++ orient (xs,ys)
         orientSequence owner (Sequence (x:xs),Sequence [y,Project ys f])

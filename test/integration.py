@@ -29,6 +29,7 @@ from multi_callbacks import verify_multi_callbacks
 from schema_records import verify_schema_records
 from dependent_schemas import verify_dependent_schemas
 from arithmetic_indices import verify_arithmetic_indices
+from dependent_patterns import verify_dependent_patterns
 
 
 def check(condition, message):
@@ -318,6 +319,15 @@ models:
     schema_record_evidence = verify_schema_records(self_output)
     dependent_schema_evidence = verify_dependent_schemas(self_output)
     arithmetic_index_evidence = verify_arithmetic_indices(self_output)
+    pattern_evidence = verify_dependent_patterns(self_output)
+    check(pattern_evidence['operations'] == 8
+          and pattern_evidence['statements'] == 6
+          and pattern_evidence['comparisons'] >= 1000
+          and pattern_evidence['invalidCasesRejected'] >= 18
+          and pattern_evidence['bodyMutationsDetected'] == 14
+          and pattern_evidence['differentContextSizes'] > 0
+          and pattern_evidence['completeEvidencePreserved'],
+          'dependent pattern matches lack complete operations, evidence preservation, or refusal checks')
     check(arithmetic_index_evidence['operations'] == 7
           and arithmetic_index_evidence['statements'] == 8
           and arithmetic_index_evidence['comparisons'] >= 1000

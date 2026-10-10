@@ -1089,6 +1089,27 @@ of symbolic operands. A positive-branch predecessor/successor equation can then
 justify an index comparison without escaping that branch. Arbitrary arithmetic
 identities and injectivity of unknown calls are not inferred.
 
+Dependent matches also retain facts about constructed, non-indexed values used
+as indices. A preceding witness match can establish the tag of such a value;
+a later lazy split then uses that known tag instead of requiring every constructor
+of its declared datatype. Equal record constructions, or equal constructions
+with the same datatype tag, establish equality of corresponding payloads. This
+decomposition requires the same carrier and ordered fields. It does not infer
+injectivity of arbitrary helpers or permit an ambiguous lazy split. Facts remain
+local to their branch and the particular values they describe.
+
+These rules admit the unchanged `RelationBindings.lookup`, `position`,
+`boundValues`, `embed`, `evaluate`, and `lower`, together with `Sharing.expand`
+and `Derivations.Trace.Readiness.combine-ready`. They also make six existing
+preservation statements native constraints: `lookup-preserves`,
+`nonbinding-preserves-position`, `endpoint-preserves`, `equation-complete`,
+`equation-sound`, and `Sharing.reconstruction`. Their Agda proof implementations
+remain separately accounted for. The emitted-model checks compare complete
+contexts, values, layouts, trees, and readiness evidence; exercise both binding
+and nonbinding slots; and reject mismatched indices and evidence. Compiler-shaped
+regressions also reject a lazy split with no established constructor and prevent
+one input's witness from refining an unrelated input.
+
 This admits the unchanged `CapturedIndices.append`, `captureSlot`, and
 `runtimeSlot` calculations, their two lookup statement constraints, and
 `Derivations.shift-order` and `Trace.shift-preserves-bounds`. Complete vectors,
