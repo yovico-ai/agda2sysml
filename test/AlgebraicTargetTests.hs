@@ -274,6 +274,7 @@ main = do
   unusedParameterChecks inv
   callbackModel <- callableFieldChecks inv
   dependentCallbackModel <- dependentCallableChecks inv
+  schemaRecordModel <- schemaRecordChecks inv
   statementModel <- equalityStatementChecks inv
   moduleAliasChecks inv
   let generated = T.generate callInventory
@@ -289,7 +290,7 @@ main = do
         first = cmd "first" p "true" "null"
         second = cmd "second" "null" "null" "'Tone'::'blue'"
         none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> statementModel)
+    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel)
     callProcess (root </> "bin/agda2sysml-validate") [file]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -1300,6 +1301,81 @@ dependentCallableChecks base = do
     check (maybe False (Text.isInfixOf "Function-valued family indices" . Text.pack . show)
       (M.lookup s unsupportedErrors)) "function-valued family index lacks an explicit refusal"
   pure (Text.replace "package 'AgdaModel' {" "package 'DependentCallableFixture' {" (T.modelText generated))
+
+-- Stored type/family fields are runtime bindings, distinct from a record's
+-- declared parameters. The member keeps both that binding and its payload.
+schemaRecordChecks :: Inventory -> IO Text
+schemaRecordChecks base = do
+  check (either (const True) (const False) (P.readType base [] (object
+    ["tag" .= ("sort" :: Text),"sort" .= object ["tag" .= ("universe" :: Text)
+      ,"kind" .= ("UProp" :: Text),"level" .= level 0]])))
+    "proof-irrelevant universe admitted by the stored Set schema rule"
+  let boolean = P.Named "Bool" []
+      indexed i = P.Named "Indexed" [P.Runtime boolean i]
+      wrapper i = P.Named "Wrapper" [indexed i]
+  check (P.typeKey (wrapper (P.IndexArgument 0)) == P.typeKey (wrapper (P.IndexInput 4)))
+    "callback-local static carrier argument was not captured like a caller-local argument"
+  check (P.typeKey (P.Named "Wrapper" [P.Callable [boolean] (indexed (P.IndexArgument 0))])
+      /= P.typeKey (P.Named "Wrapper" [P.Callable [boolean] (indexed (P.IndexInput 0))]))
+    "bound callback argument was confused with a captured outer value"
+  let term t = object ["term" .= t]
+      v i = variable i []
+      apply f x = set "eliminations" (toJSON (array (get "eliminations" f) ++ [application x])) f
+      record name ctor fields = set "constructor" (String ctor) $ set "fields" (toJSON (fields :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration name "record" (universeAt (level 1))
+      field owner name result = set "projection" (object ["proper" .= owner,"index" .= (1 :: Int)])
+        $ declaration name "function" (signature [named owner] result)
+      box = record "SchemaBox" "schemaBox" ["schemaType","schemaPayload"]
+      ctor = set "family" (String "SchemaBox") $ declaration "schemaBox" "constructor"
+        (signature [universeAt (level 0),term (v 0)] (named "SchemaBox"))
+      typ = field "SchemaBox" "schemaType" (universeAt (level 0))
+      value = field "SchemaBox" "schemaPayload" (term (variable 0 ["schemaType"]))
+      rebuild = operation "rebuildSchemaBox" ["SchemaBox"] "SchemaBox"
+        (done 1 (constructor "schemaBox" [variable 0 ["schemaType"],variable 0 ["schemaPayload"]]))
+      familyType = signature [named "Bool"] (universeAt (level 0))
+      wrapped value = object ["term" .= call "SchemaWrapper" [value] []]
+      wrapper = set "parameters" (Number 1) $ set "type" (signature [universeAt (level 0)] (universeAt (level 0)))
+        $ record "SchemaWrapper" "schemaWrapper" ["wrappedPayload"]
+      wrapperCtor = set "parameters" (Number 1) $ set "family" (String "SchemaWrapper")
+        $ declaration "schemaWrapper" "constructor" (signature [universeAt (level 0),term (v 0)] (wrapped (v 1)))
+      wrapperProjection = set "projection" (object ["proper" .= ("SchemaWrapper" :: Text),"index" .= (2 :: Int)])
+        $ declaration "wrappedPayload" "function" (signature [universeAt (level 0),wrapped (v 0)] (term (v 1)))
+      receipt familyTerm = signature [named "Bool"] (wrapped (apply familyTerm (v 0)))
+      family = record "FamilyBox" "familyBox" ["storedFamily","otherFamily","familyIndex","familyPayload","familyReceipt"]
+      familyCtor = set "family" (String "FamilyBox") $ declaration "familyBox" "constructor"
+        (signature [familyType,familyType,named "Bool",term (apply (v 2) (v 0)),receipt (v 4)] (named "FamilyBox"))
+      stored = field "FamilyBox" "storedFamily" familyType
+      other = field "FamilyBox" "otherFamily" familyType
+      index = field "FamilyBox" "familyIndex" (named "Bool")
+      payload = field "FamilyBox" "familyPayload" (term (apply (variable 0 ["storedFamily"]) (variable 0 ["familyIndex"])))
+      receiptProjection = field "FamilyBox" "familyReceipt" (receipt (variable 1 ["storedFamily"]))
+      rebuildFamily = operation "rebuildFamilyBox" ["FamilyBox"] "FamilyBox"
+        (done 1 (constructor "familyBox" [variable 0 [f] | f <- ["storedFamily","otherFamily","familyIndex","familyPayload","familyReceipt"]]))
+      ds = [box,ctor,typ,value,rebuild,wrapper,wrapperCtor,wrapperProjection,family,familyCtor,stored,other,index,payload,receiptProjection,rebuildFamily]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "schema-fields" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      calculations = A.functions expanded M.empty shapes
+  sig <- either (fail . show) pure (P.signature inv ctor)
+  check (P.parameters sig == 0 && length (P.inputs sig) == 2) "stored type field was mistaken for a declaration parameter"
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (all (`M.member` shapes) ["SchemaBox","FamilyBox"]) (show errors)
+  forM_ ["rebuildSchemaBox","rebuildFamilyBox"] $ \symbol ->
+    check (maybe False (either (const False) (const True)) (M.lookup symbol calculations)) (show (symbol,calculations))
+  let bad = inv {declarations = M.adjust (set "type" (signature [named "FamilyBox"]
+        (term (apply (variable 0 ["otherFamily"]) (variable 0 ["familyIndex"]))))) "familyPayload" (declarations inv)}
+      wrong = P.inventory (P.prepare bad)
+  check (M.notMember "FamilyBox" (fst (A.discover wrong M.empty)))
+    "projection from a different stored family was accepted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("->exists" `Text.isInfixOf` T.modelText generated) "stored family membership constraint missing"
+  check (Trace.validate (T.modelText generated) (get "sourceCorrespondence" (T.correspondence generated)) == Right ())
+    "stored schema generated provenance does not resolve"
+  pure (Text.replace "package 'AgdaModel' {" "package 'SchemaRecordFixture' {" (T.modelText generated))
 
 -- Recursive lookups with indexed inputs reduce only under justified branch
 -- facts. Different caller expressions must meet at the same residual call.

@@ -935,6 +935,40 @@ Direct sequences of callables
 and recursive carrier cycles through a callable's domain/result remain outside
 the rule. No generic Agda evaluator or callback table is emitted.
 
+## Stored type and type-family fields
+
+A record's declared parameters and its actual fields have different scopes.
+A field of type `Set`, or an independently indexed first-order family ending in
+`Set`, is retained as a runtime schema binding. It is not mistaken for another
+static parameter of the record constructor. Proper projections must still agree
+with the constructor telescope, including which earlier field they select.
+
+The binding is an immutable attribute value containing unordered relation rows.
+Each row retains every index and the complete member payload. A value belonging
+to that family carries the binding, its indices, and its payload; its constraint
+requires a matching row. A type field uses the same representation with no
+indices. Extents are not ordered source lists and have no imposed finite-size
+constraint. Reordering rows preserves the binding's meaning. Substituting a
+different extent or changing an index or evidence payload does not.
+
+Dependent callback signatures retain selections from those stored bindings.
+When a callback's result specializes another carrier at a callback-local index,
+that index becomes an explicit captured value of the specialized carrier.
+It remains bound within the callback signature and cannot be confused with an
+outer input. Generated schema carriers have generated provenance boundaries;
+the containing declarations, calculations, and contracts retain their source
+correspondence.
+
+The self specification exercises this with `OpenParameters.Transport` value and
+list conversion and `FamilyRelations.Transport` indexed conversion, selection,
+and reindexing. Complete membership and equality evidence remains part of the
+model. Runtime-polymorphic callbacks, function-valued indices, and constructing
+runtime closures remain outside this rule. Supplied callable references are
+retained; the rule does not establish extensional equality between different
+callbacks. The existing Pilot callback execution
+and unordered data-value equality limitations still apply; independent behavior
+checks are separate from official model validation.
+
 ## Checked reduction and retained source dependencies
 
 Demand-driven reduction follows transparent, terminating checked definitions,

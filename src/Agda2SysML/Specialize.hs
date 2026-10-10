@@ -29,6 +29,7 @@ data LevelAtom = BoundLevel Int | RigidLevel Int deriving (Eq,Ord,Show)
 data LevelExpr = LevelExpr Integer (M.Map LevelAtom Integer) deriving (Eq,Ord,Show)
 data Type = Unused | Parameter Int | Open Int LevelExpr | Named Text [Type] | Level LevelExpr
   | Callable [Type] Type
+  | SchemaValue [Type] LevelExpr | SelectedFamily Type
   | FamilyParameter Int [Type] LevelExpr | OpenFamily Int [Type] LevelExpr | FamilyApplication Type [Type]
   | FamilyExpression Type Int Type LevelExpr
   | Runtime Type IndexExpr deriving (Eq,Ord,Show)
@@ -43,6 +44,8 @@ data IndexExpr = IndexInput Int | IndexCaptured Int | IndexLocal Int | IndexCons
 -- references share one slot. Closed fibres retain their concrete identity.
 mapIndices :: (IndexExpr -> IndexExpr) -> Type -> Type
 mapIndices f (Callable a b) = Callable (map (mapIndices f) a) (mapIndices f b)
+mapIndices f (SchemaValue ds l) = SchemaValue (map (mapIndices f) ds) l
+mapIndices f (SelectedFamily value) = SelectedFamily (mapIndices f value)
 mapIndices f (Named s xs) = Named s (map (mapIndices f) xs)
 mapIndices f (Runtime ty ix) = Runtime (mapIndices f ty) (f ix)
 mapIndices f (FamilyApplication ty xs) = FamilyApplication (mapIndices f ty) (map (mapIndices f) xs)
@@ -58,6 +61,8 @@ familyLocals = free S.empty
     free bound (FamilyExpression domain slot body _) = free bound domain `S.union` free (S.insert slot bound) body
     free bound (Named _ xs) = S.unions (map (free bound) xs)
     free bound (Callable a b) = S.unions (map (free bound) (b:a))
+    free bound (SchemaValue ds _) = S.unions (map (free bound) ds)
+    free bound (SelectedFamily value) = free bound value
     free bound (FamilyApplication f xs) = S.unions (map (free bound) (f:xs))
     free bound (OpenFamily _ xs _) = S.unions (map (free bound) xs)
     free bound (Runtime domain index) = free bound domain `S.union` indices bound index
@@ -79,6 +84,8 @@ canonicalFamilies ty = go M.empty start ty
       (go (M.insert slot next names) (next+1) body) level
     go names next (Named s xs) = Named s (map (go names next) xs)
     go names next (Callable a b) = Callable (map (go names next) a) (go names next b)
+    go names next (SchemaValue ds l) = SchemaValue (map (go names next) ds) l
+    go names next (SelectedFamily value) = SelectedFamily (go names next value)
     go names next (FamilyApplication f xs) = FamilyApplication (go names next f) (map (go names next) xs)
     go names next (OpenFamily i xs l) = OpenFamily i (map (go names next) xs) l
     go names next (Runtime domain index) = Runtime (go names next domain) (ix names next index)
@@ -106,31 +113,38 @@ applyTypeFamily FamilyExpression{} _ = refuse Semantics "Type-family lambda has 
 applyTypeFamily family xs = Right (FamilyApplication family xs)
 
 captureArguments :: [Type] -> ([Type],[(Type,IndexExpr)])
-captureArguments args = let (result,slots) = runState (traverse (visit S.empty . canonicalFamilies) args) [] in (result,slots)
+captureArguments args = let (result,slots) = runState (traverse (visit False S.empty . canonicalFamilies) args) [] in (result,slots)
   where
-    visit locals (Named symbol xs) = Named symbol <$> traverse (visit locals) xs
-    visit locals (Callable a b) = Callable <$> traverse (visit locals) a <*> visit locals b
-    visit locals (FamilyApplication ty xs) = FamilyApplication <$> visit locals ty <*> traverse (visit locals) xs
-    visit locals (FamilyExpression domain slot body level) = FamilyExpression <$> visit locals domain <*> pure slot
-      <*> visit (S.insert slot locals) body <*> pure level
-    visit locals (Runtime ty ix) = do
-      domain <- visit locals ty
+    visit bound locals (Named symbol xs) = Named symbol <$> traverse (visit bound locals) xs
+    visit _ locals (Callable a b) = Callable <$> traverse (visit True locals) a <*> visit True locals b
+    visit bound locals (SchemaValue ds l) = SchemaValue <$> traverse (visit bound locals) ds <*> pure l
+    visit bound locals (SelectedFamily value) = SelectedFamily <$> visit bound locals value
+    visit bound locals (FamilyApplication ty xs) = FamilyApplication <$> visit bound locals ty <*> traverse (visit bound locals) xs
+    visit bound locals (FamilyExpression domain slot body level) = FamilyExpression <$> visit bound locals domain <*> pure slot
+      <*> visit bound (S.insert slot locals) body <*> pure level
+    visit bound locals (Runtime ty ix) = do
+      domain <- visit bound locals ty
       let erase (IndexLocal slot) | S.member slot locals = IndexCaptured 0
           erase (IndexConstructor c ts xs) = IndexConstructor c ts (map erase xs)
           erase (IndexSuccessor x) = IndexSuccessor (erase x)
           erase (IndexProject f ts x) = IndexProject f ts (erase x)
           erase (IndexCall f ts xs) = IndexCall f ts (map erase xs)
-          erase IndexArgument{} = IndexCaptured 0
+          -- A callback argument is bound inside its callable telescope. When
+          -- specializing a carrier used by that telescope, it is instead a
+          -- free value and must become an explicit captured index.
+          erase IndexArgument{} = if bound then IndexCaptured 0 else IndexInput 0
           erase (IndexApply f x) = IndexApply (erase f) (erase x)
           erase x = x
-      if closed (Runtime domain (erase ix)) || not (S.null (familyLocals (Runtime domain ix)))
+          localsInIndex = familyLocals (Runtime domain ix)
+          remainingLocals = if bound then localsInIndex else S.delete (-1) localsInIndex
+      if closed (Runtime domain (erase ix)) || not (S.null remainingLocals)
         then pure (Runtime domain ix) else do
         slots <- gets id
         let value = (domain,ix)
             slot = length (takeWhile (/= value) slots)
         when (slot == length slots) (modify' (++ [value]))
         pure (Runtime domain (IndexCaptured slot))
-    visit _ ty = pure ty
+    visit _ _ ty = pure ty
 
 shiftIndices :: Int -> Type -> Type
 shiftIndices offset = mapIndices go
@@ -264,7 +278,13 @@ readLevelTerm inv env t = case string (get "tag" t) of
 -- NoAbs codomains retain the previous context; Abs codomains extend it.
 readType :: Inventory -> [Maybe Type] -> Value -> Either Refusal Type
 readType inv env t = case string (get "tag" t) of
-  "pi" -> callback env [] t
+  "native-schema-value" -> SchemaValue <$> traverse (readType inv env) (array (get "domains" t)) <*> readLevelValue (get "universe" t)
+  "sort" | isUniverse (object ["term" .= t]) -> SchemaValue [] <$> readLevel inv env (get "level" (get "sort" t))
+  "pi" -> do
+    kind <- parameterKind inv env (object ["term" .= t])
+    case kind of
+      Just (FamilyKind domains level) -> pure (SchemaValue domains level)
+      _ -> callback env [] t
   "native-open-type" -> Open <$> number (get "slot" t) <*> readLevelValue (get "universe" t)
   "native-open-family" -> do
     domains <- traverse (readType inv env) (array (get "domains" t))
@@ -279,6 +299,7 @@ readType inv env t = case string (get "tag" t) of
       FamilyParameter _ domains _ -> applyFamily value domains es
       OpenFamily _ domains _ -> applyFamily value domains es
       FamilyExpression domain _ _ _ -> applyFamily value [domain] es
+      SelectedFamily (Runtime (SchemaValue domains _) _) -> applyFamily value domains es
       _ -> eliminateIndices inv env value es
   "constructor" -> do
     let c = string (get "symbol" t)
@@ -301,7 +322,9 @@ readType inv env t = case string (get "tag" t) of
             Nothing -> refuse Representation "Module carrier alias lacks a checked reducible equation"
       Just d | get "kind" d == String "function" -> do
         declared <- field inv "type" d
-        if returnsUniverse declared then do
+        projection <- field inv "projection" d
+        if get "proper" projection /= Null then readFunctionType d name es
+        else if returnsUniverse declared then do
           unless (get "abstract" d == Bool False && get "opaque" d == Bool False && terminationChecked inv d)
             (refuse Semantics "Type alias is not transparently terminating")
           case Reduction.reduceHead inv t of
@@ -341,8 +364,11 @@ readType inv env t = case string (get "tag" t) of
       pure (Callable domains out)
     valueCarrier Runtime{} = False
     valueCarrier Level{} = False
+    valueCarrier SchemaValue{} = False
     valueCarrier t = firstOrder t
     firstOrder Callable{} = False
+    firstOrder (SchemaValue ds _) = all firstOrder ds
+    firstOrder (SelectedFamily value) = firstOrder value
     firstOrder (Runtime ty _) = firstOrder ty
     firstOrder (Named _ xs) = all firstOrder xs
     firstOrder Parameter{} = True
@@ -445,8 +471,12 @@ readIndex inv env expected term
         _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
       actual <- readType inv env term
-      case actual of
-        Runtime domain _ | domain == expected -> Right actual
+      let value = case actual of
+            SelectedFamily bound -> bound
+            FamilyApplication (SelectedFamily bound) [] -> bound
+            _ -> actual
+      case value of
+        Runtime domain _ | domain == expected -> Right value
         _ -> refuse Semantics ("Index expression has the wrong declared domain: expected "
           <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
 
@@ -495,6 +525,8 @@ readConstructorIndex inv env expected term = do
         _ -> refuse Semantics "Constructor index payload is not a runtime value"
     hasParameter Parameter{} = True
     hasParameter FamilyParameter{} = True
+    hasParameter (SchemaValue ds _) = any hasParameter ds
+    hasParameter (SelectedFamily value) = hasParameter value
     hasParameter (Named _ xs) = any hasParameter xs
     hasParameter (FamilyApplication f xs) = hasParameter f || any hasParameter xs
     hasParameter (Runtime ty _) = hasParameter ty
@@ -545,6 +577,12 @@ applyCallback values = mapIndices go
     go x = x
 
 eliminateIndices :: Inventory -> [Maybe Type] -> Type -> [Value] -> Either Refusal Type
+eliminateIndices inv env bound@(Runtime (SchemaValue domains _) _) es
+  | null es && not (null domains) = Right (SelectedFamily bound)
+  | otherwise = do
+      unless (length es == length domains) (refuse Representation "Stored type-family application must supply every index")
+      values <- sequence [app e >>= readIndex inv env domain | (domain,e) <- zip domains es]
+      pure (FamilyApplication (SelectedFamily bound) values)
 eliminateIndices _ _ value [] = Right value
 eliminateIndices inv env (Runtime (Callable domains out) fn) es = do
   unless (length es >= length domains) (refuse Representation "Partial callback application requires runtime closure construction")
@@ -624,8 +662,13 @@ signature inv d = do
           extend x = if get "binds" cod == Bool False then env else x:env
       kind <- if null ins && toJSON (length kinds) `elem` array (get "unusedModuleParameters" d)
         then pure (Just UnusedKind) else parameterKind inv env (get "type" dom)
+      -- The owning carrier declares the parameter boundary. A constructor's
+      -- first payload can itself be a type/family; it must remain a field.
+      let owner = M.findWithDefault d (string (get "family" d)) (declarations inv)
+          inHeader = get "kind" d /= String "constructor"
+            || length kinds + length ins < either (const 0) id (number (get "parameters" owner))
       case kind of
-        Just k | null ins -> go projectionEnd (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
+        Just k | null ins && inHeader -> go projectionEnd (extend (Just (parameterSlot (length kinds) k))) (kinds ++ [k]) ins (get "body" cod)
         _ -> do
           let modality = get "info" dom
           unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
@@ -645,6 +688,8 @@ substituteLevel args (LevelExpr n xs) = foldM step (levelConstant n) (M.toAscLis
         _ -> refuse Semantics "Type argument used in a universe-level position"
 substitute :: [Type] -> Type -> Either Refusal Type
 substitute args (Callable a b) = Callable <$> traverse (substitute args) a <*> substitute args b
+substitute args (SchemaValue ds l) = SchemaValue <$> traverse (substitute args) ds <*> substituteLevel args l
+substitute args (SelectedFamily value) = SelectedFamily <$> substitute args value
 substitute _ Unused = Right Unused
 substitute args (Parameter i) = at i args
 substitute _ t@Open{} = Right t
@@ -668,6 +713,8 @@ substitute args (Runtime ty index) = Runtime <$> substitute args ty <*> go index
     go i = Right i
 closed :: Type -> Bool
 closed (Callable a b) = all closed (b:a)
+closed (SchemaValue ds l) = all closed ds && closed (Level l)
+closed (SelectedFamily value) = closed value
 closed Unused = True
 closed Parameter{} = False
 closed (Open _ level) = closed (Level level)
@@ -744,6 +791,10 @@ familySignature inv d = do
 universeOf :: Inventory -> Type -> Either Refusal LevelExpr
 universeOf _ (Open _ level) = Right level
 universeOf _ (FamilyApplication (OpenFamily _ _ level) _) = Right level
+universeOf _ (FamilyApplication (SelectedFamily (Runtime (SchemaValue _ level) _)) _) = Right level
+universeOf inv (SchemaValue domains level) = do
+  levels <- traverse (universeOf inv) domains
+  pure (foldl joinLevel (shiftLevel 1 level) levels)
 universeOf inv (FamilyExpression _ _ body _) = universeOf inv body
 universeOf inv (Named s args) = do
   d <- maybe (refuse Syntax "Unknown concrete type universe") Right (M.lookup s (declarations inv))
@@ -767,6 +818,11 @@ validateArguments inv kinds args = do
       expectedLevel <- substituteLevel args level
       unless (actualDomains == expectedDomains && actualLevel == expectedLevel)
         (refuse Semantics "Type-family argument has incompatible index domains or universe")
+    (FamilyKind domains level,SelectedFamily (Runtime (SchemaValue actualDomains actualLevel) _)) -> do
+      expectedDomains <- traverse (substitute args) domains
+      expectedLevel <- substituteLevel args level
+      unless (actualDomains == expectedDomains && actualLevel == expectedLevel)
+        (refuse Semantics "Stored type-family argument has incompatible index domains or universe")
     (FamilyKind domains level,FamilyExpression domain _ body actualLevel) -> do
       expectedDomains <- traverse (substitute args) domains
       expectedLevel <- substituteLevel args level
@@ -825,6 +881,8 @@ completeKnown inv sig known = do
 typeValue :: Type -> Value
 typeValue (Callable [a] b) = object ["callableInput" .= typeValue a,"callableResult" .= typeValue b]
 typeValue (Callable as b) = object ["callableInputs" .= map typeValue as,"callableResult" .= typeValue b]
+typeValue (SchemaValue ds l) = object ["schemaDomains" .= map typeValue ds,"schemaUniverse" .= levelValue l]
+typeValue (SelectedFamily value) = object ["selectedFamily" .= typeValue value]
 typeValue Unused = object ["unusedModuleParameter" .= True]
 typeValue (Level l) = case levelNumber l of
   Right n -> object ["level" .= n]
@@ -860,6 +918,9 @@ instanceKey s [] = s
 instanceKey s ts = s <> "@" <> digest (BL.toStrict (encode (object ["symbol" .= s,"arguments" .= map typeValue (fst (captureArguments ts))])))
 typeKey :: Type -> Text
 typeKey ty@Callable{} = "$native-callable:" <> digest (BL.toStrict (encode (typeValue ty)))
+typeKey ty@SchemaValue{} = "$native-schema:" <> digest (BL.toStrict (encode (typeValue ty)))
+typeKey (SelectedFamily (Runtime schema _)) = typeKey schema <> ".member"
+typeKey SelectedFamily{} = "$invalid-stored-schema"
 typeKey Unused = "$unused-module-parameter"
 typeKey (Named s ts) = instanceKey s (staticArguments ts)
 typeKey (Level l) = "level:" <> levelKey l
@@ -906,8 +967,12 @@ typeTerm depth (Callable domains out) = object ["tag" .= ("native-callable" :: T
 typeTerm depth ty@(Named _ args) = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
   ,"eliminations" .= [application (indexTerm depth i) | i <- map snd (snd (captureArguments (staticArguments args))) ++ [ix | Runtime _ ix <- args]]]
 typeTerm depth ty@(FamilyApplication _ args) = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
-  ,"eliminations" .= [application (indexTerm depth i) | Runtime _ i <- args]]
+  ,"eliminations" .= [application (indexTerm depth i) | Runtime _ i <- familyArguments ty args]]
 typeTerm _ ty = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty,"eliminations" .= ([] :: [Value])]
+
+familyArguments :: Type -> [Type] -> [Type]
+familyArguments (FamilyApplication (SelectedFamily value) _) args = value:args
+familyArguments _ args = args
 indexTerm :: Int -> IndexExpr -> Value
 indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
 indexTerm _ (IndexLocal _) = object ["tag" .= ("unbound-family-input" :: Text)]
@@ -1126,6 +1191,8 @@ definition :: Inventory -> Text -> Build Value
 definition inv s = maybe (abort Syntax ("Missing checked declaration: " <> s)) pure (M.lookup s (declarations inv))
 showType :: Inventory -> Type -> Text
 showType inv (Callable a b) = "(" <> T.intercalate " → " (map (showType inv) (a ++ [b])) <> ")"
+showType _ schema@SchemaValue{} = "stored schema " <> T.takeEnd 12 (typeKey schema)
+showType inv (SelectedFamily value) = "member of " <> showType inv value
 showType _ Unused = "unused module parameter"
 showType _ (Level (LevelExpr n xs)) = "level " <> case terms of
     [term] -> term
@@ -1187,6 +1254,22 @@ cached inv s args = do
 
 ensureType :: Inventory -> [Text] -> Type -> Build ()
 ensureType inv stack (Callable a b) = mapM_ (ensureType inv stack) (b:a)
+ensureType inv stack (SelectedFamily (Runtime schema index)) = ensureType inv stack schema >> ensureIndex inv index
+ensureType _ _ SelectedFamily{} = abort Semantics "Stored family lacks its schema value"
+ensureType inv stack schema@(SchemaValue domains level) = do
+  unless (all closed domains && all firstOrder domains) (abort Representation "Stored schema needs independently bound first-order index domains")
+  mapM_ (ensureType inv stack) domains
+  let key = typeKey schema
+  forM_ [(key,"binding"),(key <> ".row","row"),(key <> ".member","member")] $ \(symbol,kind) -> do
+    when (M.member symbol (declarations inv)) (abort Syntax "Native schema identity collides with a source declaration")
+    modify' $ \st -> st {ready = M.insert symbol (object
+      ["name" .= symbol,"displayName" .= (showType inv schema <> "." <> kind),"kind" .= ("native-schema-value" :: Text)
+      ,"nativeSchema" .= kind,"schemaBinding" .= key,"schemaDomains" .= map (asType 0) domains
+      ,"specializationArguments" .= [typeValue schema],"universe" .= levelValue level]) (ready st)}
+  where
+    firstOrder Callable{} = False
+    firstOrder Runtime{} = False
+    firstOrder _ = True
 ensureType _ _ Unused = abort Semantics "Unused module parameter used as a runtime carrier"
 ensureType _ _ Level{} = abort Semantics "Universe level cannot be a runtime carrier"
 ensureType _ _ Runtime{} = abort Semantics "Runtime index cannot be a static carrier"
@@ -1369,6 +1452,8 @@ nonRecursiveTemplate inv root = inspect (S.singleton root) root
     walk seen (Named s xs) = all (walk seen) xs && s /= root && (S.member s seen || inspect (S.insert s seen) s)
     walk seen (FamilyApplication f xs) = all (walk seen) (f:xs)
     walk seen (Callable a b) = all (walk seen) (b:a)
+    walk seen (SchemaValue ds _) = all (walk seen) ds
+    walk seen (SelectedFamily value) = walk seen value
     walk seen (Runtime domain _) = walk seen domain
     walk _ _ = True
 -- Signatures can be the only use of an index calculation. Clone its checked
@@ -1547,6 +1632,10 @@ unify :: M.Map Int Type -> Type -> Type -> Either Refusal (M.Map Int Type)
 unify known (Callable as b) (Callable cs d) = do
   unless (length as == length cs) (refuse Semantics "Callback arity mismatch")
   foldM (\next (a,c) -> unify next a c) known (zip (as ++ [b]) (cs ++ [d]))
+unify known (SchemaValue ds l) (SchemaValue es m) | length ds == length es = do
+  levels <- constrainUniverse known l m
+  foldM (\next (d,e) -> unify next d e) levels (zip ds es)
+unify known (SelectedFamily value) (SelectedFamily actual) = unify known value actual
 unify known Unused Unused = Right known
 unify known (Level l) (Level actual) = constrainUniverse known l actual
 -- This pass infers only static substitutions. Runtime equalities are retained
@@ -1566,6 +1655,7 @@ unify known (Open i l) (Open j m) | i == j && l == m = Right known
 unify known a@(FamilyParameter i _ _) b@FamilyParameter{} | a == b = unify known (Parameter i) b
 unify known (FamilyParameter i _ _) actual@OpenFamily{} = unify known (Parameter i) actual
 unify known (FamilyParameter i _ _) actual@FamilyExpression{} = unify known (Parameter i) actual
+unify known (FamilyParameter i _ _) actual@SelectedFamily{} = unify known (Parameter i) actual
 unify known a@(FamilyExpression domainA _ bodyA levelA) b@(FamilyExpression domainB _ bodyB levelB) = do
   domains <- unify known domainA domainB
   levels <- unify domains (Level levelA) (Level levelB)
@@ -1602,6 +1692,9 @@ sourceTypeTerm inv = sourceTypeAt
         arrows n (domain:rest) result = object ["term" .= object ["tag" .= ("pi" :: Text)
           ,"domain" .= object ["info" .= info,"type" .= sourceTypeAt n domain]
           ,"codomain" .= object ["binds" .= True,"body" .= arrows (n+1) rest result]]]
+    sourceTypeAt depth (SchemaValue ds l) = object ["term" .= object
+      ["tag" .= ("native-schema-value" :: Text),"domains" .= map (get "term" . sourceTypeAt depth) ds,"universe" .= levelValue l]]
+    sourceTypeAt depth (SelectedFamily (Runtime _ index)) = object ["term" .= sourceIndex depth index]
     sourceTypeAt depth (Named s args) = object ["term" .= object ["tag" .= ("definition" :: Text)
       ,"symbol" .= s,"eliminations" .= map (application . get "term" . sourceTypeAt depth) args]]
     sourceTypeAt _ (Open slot level) = object ["term" .= object ["tag" .= ("native-open-type" :: Text)
@@ -1650,6 +1743,8 @@ unifyIn inv bindings known expected actual = case unify known expected actual of
     depth = length (filter isDynamic bindings)
     normal (Named s xs) = Named s (map normal xs)
     normal (Callable a b) = Callable (map normal a) (normal b)
+    normal (SchemaValue ds l) = SchemaValue (map normal ds) l
+    normal (SelectedFamily value) = SelectedFamily (normal value)
     normal (FamilyApplication f xs) = FamilyApplication (normal f) (map normal xs)
     normal (OpenFamily i xs l) = OpenFamily i (map normal xs) l
     normal (Runtime domain ix) =
@@ -1761,6 +1856,8 @@ expression inv stack env expected term = do
               resolved FamilyParameter{} = False
               resolved (Named _ ts) = all resolved ts
               resolved (Callable a b) = all resolved (b:a)
+              resolved (SchemaValue ds l) = all resolved ds && closed (Level l)
+              resolved (SelectedFamily value) = resolved value
               resolved (FamilyApplication f xs) = all resolved (f:xs)
               resolved (FamilyExpression domain _ body level) = resolved domain && resolved body && closed (Level level)
               resolved (OpenFamily _ xs _) = all resolved xs
@@ -1927,6 +2024,8 @@ higherOrder inv stack env term = do
       where
         go locals (Named _ xs) = all (go locals) xs
         go locals (Callable a b) = all (go locals) (b:a)
+        go locals (SchemaValue ds l) = all (go locals) ds && closed (Level l)
+        go locals (SelectedFamily value) = go locals value
         go _ Open{} = True
         go _ family@OpenFamily{} = closed family
         go locals (FamilyExpression domain slot body level) = go locals domain && go (S.insert slot locals) body && closed (Level level)

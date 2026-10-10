@@ -215,7 +215,7 @@ generate original = Generated text report problems (null problems)
       <> mconcat [D.boundary (Finite.domainSymbol shape) "native.finite-domain" (Finite.enumText targetLabel shape) | shape <- M.elems finiteDomains]
       <> mconcat [let {symbol = Algebraic.shapeSymbol shape;
                       fragment = Algebraic.renderShapesIn targetLabel algebraicShapes (M.singleton symbol shape)}
-                 in if maybe True ((/= Null) . get "nativeFamily") (M.lookup symbol (declarations inv))
+                 in if maybe True (\d -> get "nativeFamily" d /= Null || get "nativeSchema" d /= Null) (M.lookup symbol (declarations inv))
                     then D.mark symbol "generated-family-shape" (D.generated "native.family-relation") (D.linesDoc (map D.text fragment))
                     else D.boundary symbol "native.algebraic-shape" fragment
                  | shape <- M.elems algebraicShapes]

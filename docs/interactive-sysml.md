@@ -245,6 +245,19 @@ shows a callback whose position argument and expression result share the first
 argument's type index. `Derivations.Trace.combine` and the sequence case operations
 show ordinary binary callbacks. Partial runtime application is explicitly refused.
 
+For stored schema fields, find `OpenParameters.Binding` or
+`FamilyRelations.Binding` in the review and follow its generated carrier.
+Inspect the schema field, its unordered `items` relation rows, and the member
+carrier's binding, index, and payload fields. The membership constraint requires
+a matching complete row. Schema rows and membership values use native `new`
+construction; the Agda records also have their emitted constructor calculations.
+Follow `Transport.encodeValue`/`decodeValue` and their
+list operations, or `Transport.encodeAt`/`decodeAt`, `select`, and `reindex`.
+Their contracts retain the chosen binding and indices; reindexing requires
+actual equality evidence. Lists whose element type captures a runtime binding
+may use recursive constructor carriers rather than a single `items` field;
+use the emitted constructors and their capture parameters when inspecting them.
+
 Pilot 0.58.0 accepts these models but may leave callback invocations
 unevaluated, including forwarded bindings whose direct calculations evaluate
 successfully. Inspect their signatures, bodies and contracts interactively;
