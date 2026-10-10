@@ -20,7 +20,7 @@ import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Environment (getEnv)
+import System.Environment (getArgs, getEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (callProcess)
@@ -288,46 +288,49 @@ main = do
   moduleAliasChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
-  root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
-  java <- getEnv "AGDA2SYSML_TEST_JAVA"
-  withSystemTempDirectory "algebraic-target" $ \directory -> do
-    let file = directory </> "model.sysml"
-        library = root </> "share/agda2sysml-validator/sysml"
-        p = "new 'Pair'('flag'=true,'tone'='Tone'::'red')"
-        cmd tag x y z = "new 'Choice'('constructor'='Choice.constructor-tag'::'" ++ tag
-          ++ "','first.payload0'=" ++ x ++ ",'first.payload1'=" ++ y ++ ",'second.payload0'=" ++ z ++ ")"
-        first = cmd "first" p "true" "null"
-        second = cmd "second" "null" "null" "'Tone'::'blue'"
-        none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel)
-    callProcess (root </> "bin/agda2sysml-validate") [file]
-    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
-      ,"test/TargetEvaluation.java",library </> "sysml.library",file
-      ,"'flag'(" ++ p ++ ")","true"
-      ,"'tone'(" ++ p ++ ") == 'Tone'::'red'","true"
-      ,"'selected'(" ++ p ++ "," ++ first ++ ")","true"
-      ,"'selected'(" ++ p ++ "," ++ second ++ ")","false"
-      ,"'selected'(" ++ p ++ "," ++ none ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ first ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ second ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ none ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
-      ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"
-      ,"SequenceFunctions::size('SchemaRecordFixture'::'produceSchema'().'producedFamily'.items) == 4","true"]
-    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
-      ,"test/TargetEvaluation.java",library </> "sysml.library",file
-      ,"'nested'(" ++ p ++ ")","true"
-      ,"'throughRecord'(" ++ p ++ ")","true"
-      ,"'callSelected'(" ++ second ++ "," ++ p ++ ")","false"
-      ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
-      ,"'callZero'(true)","false"
-      ,"'clashCaller'(true)","false"
-      ,"'clashCaller'(false)","true"
-      ,"'EqualityFixture'::'unrelatedIdentity.law'(true)","true"
-      ,"'EqualityFixture'::'unrelatedIdentity.law'(false)","true"
-      ,"'EqualityFixture'::'unrelatedSymmetry.law'(true, true, 'EqualityFixture'::'witness'(true))","true"
-      ,"'EqualityFixture'::'unrelatedComparison.law'(true, false)","false"]
-  putStrLn "algebraic carrier, binding, rejection, and native evaluation checks passed"
+  options <- getArgs
+  unless (options `elem` [[],["--compiler-only"]]) (fail "Expected --compiler-only or no test options")
+  unless (options == ["--compiler-only"]) $ do
+    root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
+    java <- getEnv "AGDA2SYSML_TEST_JAVA"
+    withSystemTempDirectory "algebraic-target" $ \directory -> do
+      let file = directory </> "model.sysml"
+          library = root </> "share/agda2sysml-validator/sysml"
+          p = "new 'Pair'('flag'=true,'tone'='Tone'::'red')"
+          cmd tag x y z = "new 'Choice'('constructor'='Choice.constructor-tag'::'" ++ tag
+            ++ "','first.payload0'=" ++ x ++ ",'first.payload1'=" ++ y ++ ",'second.payload0'=" ++ z ++ ")"
+          first = cmd "first" p "true" "null"
+          second = cmd "second" "null" "null" "'Tone'::'blue'"
+          none = cmd "none" "null" "null" "null"
+      Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel)
+      callProcess (root </> "bin/agda2sysml-validate") [file]
+      callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+        ,"test/TargetEvaluation.java",library </> "sysml.library",file
+        ,"'flag'(" ++ p ++ ")","true"
+        ,"'tone'(" ++ p ++ ") == 'Tone'::'red'","true"
+        ,"'selected'(" ++ p ++ "," ++ first ++ ")","true"
+        ,"'selected'(" ++ p ++ "," ++ second ++ ")","false"
+        ,"'selected'(" ++ p ++ "," ++ none ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ first ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ second ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ none ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
+        ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"
+        ,"SequenceFunctions::size('SchemaRecordFixture'::'produceSchema'().'producedFamily'.items) == 4","true"]
+      callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+        ,"test/TargetEvaluation.java",library </> "sysml.library",file
+        ,"'nested'(" ++ p ++ ")","true"
+        ,"'throughRecord'(" ++ p ++ ")","true"
+        ,"'callSelected'(" ++ second ++ "," ++ p ++ ")","false"
+        ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
+        ,"'callZero'(true)","false"
+        ,"'clashCaller'(true)","false"
+        ,"'clashCaller'(false)","true"
+        ,"'EqualityFixture'::'unrelatedIdentity.law'(true)","true"
+        ,"'EqualityFixture'::'unrelatedIdentity.law'(false)","true"
+        ,"'EqualityFixture'::'unrelatedSymmetry.law'(true, true, 'EqualityFixture'::'witness'(true))","true"
+        ,"'EqualityFixture'::'unrelatedComparison.law'(true, false)","false"]
+  putStrLn (if options == ["--compiler-only"] then "algebraic compiler checks passed; Pilot skipped" else "algebraic carrier, binding, rejection, and native evaluation checks passed")
 
 equalityStatementChecks :: Inventory -> IO Text
 equalityStatementChecks base = do
@@ -2239,6 +2242,70 @@ familyParameterChecks = do
   let dependent = arrow True (named "Bool") (arrow False (variableType 0 []) universe)
       unsupported = set "type" (arrow True dependent (named "Bool")) declaration'
   check (isLeft (P.signature inv unsupported)) "dependent family argument domain silently flattened"
+  -- A family telescope has its own bound indices, distinct from the caller's
+  -- inputs and a callback's arguments. Partial application closes only the
+  -- supplied prefix and retains the dependency in the remaining domain.
+  let z = P.LevelExpr 0 M.empty
+      indexFamily = P.FamilyParameter 0 [bool] z
+      localTag = P.Runtime bool (P.IndexFamilyArgument 0)
+      localIndex = P.FamilyApplication indexFamily [localTag]
+      memberFamily = P.FamilyParameter 1 [bool,localIndex] z
+      memberDomain = arrow True (named "Bool")
+        (arrow False (variableType 1 [variable 0 []]) universe)
+      dependentSignature = declaration "dependentFamily" "function"
+        (arrow True familyDomain (arrow True memberDomain
+          (arrow True (named "Bool") (arrow True (variableType 2 [variable 0 []])
+            (variableType 2 [variable 1 [],variable 0 []])))))
+      atTag ix = P.FamilyApplication indexFamily [P.Runtime bool ix]
+      callerTag = P.IndexInput 7
+      callerIndex = P.Runtime (atTag callerTag) (P.IndexInput 11)
+      partial = P.FamilyExpression (atTag callerTag) 0
+        (P.FamilyApplication memberFamily
+          [P.Runtime bool callerTag,P.Runtime (atTag callerTag) (P.IndexLocal 0)]) z
+      env = [Just callerIndex,Just (P.Runtime bool callerTag),Just memberFamily]
+  dep <- either (fail . show) pure (P.signature inv dependentSignature)
+  check (P.parameters dep == 2 && P.parameterKinds dep ==
+    [P.FamilyKind [bool] z,P.FamilyKind [bool,localIndex] z])
+    "dependent family telescope lost an earlier bound index"
+  check (P.inputs dep == [bool,atTag (P.IndexInput 0)] && P.output dep ==
+    P.FamilyApplication memberFamily [P.Runtime bool (P.IndexInput 0),
+      P.Runtime (atTag (P.IndexInput 0)) (P.IndexInput 1)])
+    "dependent family signature confused caller and family positions"
+  check (P.readType inv env (get "term" (variableType 2 [variable 1 []])) == Right partial)
+    "partial family application lost the dependent residual domain"
+  let fullyApplied = P.FamilyApplication memberFamily [P.Runtime bool callerTag,callerIndex]
+  check (P.readType inv env (get "term" (variableType 2 [variable 1 [],variable 0 []])) == Right fullyApplied)
+    "dependent application failed to instantiate the later argument domain"
+  check (P.readType inv [Just callerIndex,Just partial]
+    (get "term" (variableType 1 [variable 0 []])) == Right fullyApplied)
+    "applying a residual family changed the supplied prefix"
+  check (isLeft (P.readType inv
+    [Just (P.Runtime (atTag (P.IndexInput 8)) (P.IndexInput 11)),Just (P.Runtime bool callerTag),Just memberFamily]
+    (get "term" (variableType 2 [variable 1 [],variable 0 []]))))
+    "dependent family admitted a later index belonging to another tag"
+  let openIndex = P.OpenFamily 3 [bool] z
+      openMember = P.OpenFamily 4 [bool,P.FamilyApplication openIndex [localTag]] z
+  check (P.substitute [openIndex,openMember] fullyApplied == Right
+    (P.FamilyApplication openMember [P.Runtime bool callerTag,
+      P.Runtime (P.FamilyApplication openIndex [P.Runtime bool callerTag]) (P.IndexInput 11)]))
+    "family substitution captured a nested family's own index binder"
+  let indexSymbol = P.typeKey openIndex
+      memberSymbol = P.typeKey openMember
+      nativeFamily family slot domains = object ["name" .= P.typeKey family,"nativeFamily" .= (slot :: Int)
+        ,"familyDomains" .= domains,"specializationArguments" .= [P.typeValue family]]
+      domainAtTag = object ["term" .= call indexSymbol [variable 0 []] []]
+      familyInv = inv {document = object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]
+        ,declarations = M.fromList [(indexSymbol,nativeFamily openIndex 3 [named "Bool"])
+          ,(memberSymbol,nativeFamily openMember 4 [named "Bool",domainAtTag])]}
+      (familyShapes,_) = A.discover familyInv M.empty
+  shape <- maybe (fail "dependent open family was not admitted") pure (M.lookup memberSymbol familyShapes)
+  check (A.indexTypes shape == [A.Boolean,A.Fibre indexSymbol [A.Input 0]]
+    && A.familyParameters shape == [(3,indexSymbol),(4,memberSymbol)])
+    "native family lost its earlier index or the domain's family binding"
+  let rowSymbol = memberSymbol <> ".relation-row"
+  row <- maybe (fail "dependent family relation row missing") pure (M.lookup rowSymbol familyShapes)
+  check (A.relationRowOf row == Just memberSymbol && null (A.familyParameters row))
+    "relation row stored an unbound parent family extent"
   -- An index constructor omits its family argument. Recover that argument
   -- while reading a symbolic signature, before open-root instantiation.
   let wrapper familyArg = object ["term" .= call "FamilyWrapper" [get "term" familyArg] []]
@@ -2312,6 +2379,22 @@ familyParameterChecks = do
     "a free callback under a family binder leaked its caller position into the carrier identity"
   check (P.typeKey (carrier (P.IndexInput 0) 0) /= P.typeKey (P.Named "DependentPair" [bool,closure 0]))
     "a computed family refinement was merged with a direct family selection"
+  let nested = P.FamilyExpression bool 0 (P.Named "Nested"
+        [closure 0,P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)
+  case P.readType inv [Just contextual,Just nested]
+      (get "term" (variableType 1 [variable 0 []])) of
+    Right (P.Named "Nested" [inner,result]) -> do
+      check (P.typeKey inner == P.typeKey (closure 0))
+        "applying an outer family replaced a shadowed inner binder"
+      check (result == contextual) "applying an outer family lost its own argument"
+    value -> fail ("nested family application failed: " ++ show value)
+  let appliedFamily f x slot = P.Named "DependentPair" [bool,P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool
+          (P.IndexApply (P.IndexApply (P.IndexTyped (P.Callable [bool,bool] bool) f) x) (P.IndexLocal slot))])
+        (P.LevelExpr 0 M.empty)]
+  check (P.typeKey (appliedFamily (P.IndexInput 0) (P.IndexInput 1) 0)
+      == P.typeKey (appliedFamily (P.IndexInput 5) (P.IndexInput 8) 7))
+    "a callback's free applied argument was not captured under a family binder"
 
 reductionChecks :: IO ()
 reductionChecks = do

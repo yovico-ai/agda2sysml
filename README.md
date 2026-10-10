@@ -114,12 +114,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 317 native calculation functions out of 722 (43.9%)
-and 145 native equality statements, including 41 compiler-generated helpers.
-Ten functions have both representations: 452/722 function declarations (62.6%)
+The default self model has 329 native calculation functions out of 722 (45.6%)
+and 151 native equality statements, including 41 compiler-generated helpers.
+Ten functions have both representations: 470/722 function declarations (65.1%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 425 unresolved requirements. Source-only proof retention is
+There are still 421 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove
@@ -133,8 +133,12 @@ which interactive examples work and how to recognize unevaluated results.
 ```sh
 nix develop
 cabal build all
+cabal test all --test-options=--compiler-only --test-show-details=direct
 nix flake check --print-build-logs
 ```
+
+The compiler-only test command runs all eight Haskell suites without starting
+Pilot. The default test options and the full flake checks still include Pilot.
 
 CI checks the safe Agda aggregate, eight Haskell suites, native SysML validation,
 CLI behavior, reproducibility, the browser review, and independent comparisons

@@ -31,6 +31,7 @@ from dependent_schemas import verify_dependent_schemas
 from arithmetic_indices import verify_arithmetic_indices
 from dependent_patterns import verify_dependent_patterns
 from contextual_indices import verify_contextual_indices
+from dependent_family_parameters import verify_dependent_family_parameters
 
 
 def check(condition, message):
@@ -322,6 +323,12 @@ models:
     arithmetic_index_evidence = verify_arithmetic_indices(self_output)
     pattern_evidence = verify_dependent_patterns(self_output)
     contextual_evidence = verify_contextual_indices(self_output)
+    family_evidence = verify_dependent_family_parameters(self_output)
+    check(family_evidence['operations'] == 6
+          and family_evidence['comparisons'] >= 60
+          and family_evidence['invalidCasesRejected'] >= 17
+          and family_evidence['mutationsDetected'] == 6,
+          'dependent and partial families lack complete operations or mismatch checks')
     check(contextual_evidence['operations'] == 8
           and contextual_evidence['comparisons'] >= 50
           and contextual_evidence['invalidCasesRejected'] >= 12
