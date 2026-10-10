@@ -2044,9 +2044,32 @@ constructorFibreChecks = do
         $ operation "unpack" [] "Bool" (split 0
           [("packed",1,done 2 (variable 1 [])),("empty",0,absurd 1)])
   calc <- either (fail . show) pure (A.function inv M.empty shapes decoder)
+  let lazyToken = set "lazy" (Bool True) (split 0 [("packed",1,done 2 (variable 1 []))])
+      witnessed = set "compiled" (split 1 [("witness",1,lazyToken)]) decoder
+  witnessedCalc <- either (fail . show) pure (A.function inv M.empty shapes witnessed)
+  let pairedWitness = set "type" (piType True (named "Token")
+        (piType False (proof (variable 0 []))
+          (piType False (proof (variable 0 [])) (proof (variable 0 [])))))
+        $ set "compiled" (split 1 [("witness",1,split 2
+            [("witness",1,done 3 (constructor "witness" [variable 0 []]))])]) decoder
+  pairedCalc <- either (fail . show) pure (A.function inv M.empty shapes pairedWitness)
   forM_ [False,True] $ \b -> do
     let value = R "Token" (M.fromList [("constructor",E "Token.constructor-tag" "packed"),("packed.payload0",B b)])
     check (eval [value,N] (A.body calc) == B b) "constructor-index refinement changed a valid payload"
+    let proofValue = R "Proof" (M.fromList [("constructor",E "Proof.constructor-tag" "witness")
+          ,("Proof.index0",value),("witness.payload0",B b)])
+    check (eval [value,proofValue] (A.body witnessedCalc) == B b)
+      "lazy match ignored the constructor established by a dependent witness"
+    check (eval [value,proofValue,proofValue] (A.body pairedCalc) == proofValue)
+      "equal constructor indices did not equate corresponding witness payloads"
+  check (isLeft (A.function inv M.empty shapes (set "compiled" lazyToken decoder)))
+    "lazy match guessed a constructor without a preceding witness split"
+  let unrelatedLazy = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool"))))
+        $ set "compiled" (split 2 [("witness",1,set "lazy" (Bool True)
+            (split 0 [("packed",1,done 3 (variable 2 []))]))]) decoder
+  check (isLeft (A.function inv M.empty shapes unrelatedLazy))
+    "a dependent witness refined an unrelated token input"
   let inhabited = proofShape {A.variants = [witness,A.Constructor "emptyWitness" [] [token "empty" []]]}
   check (isLeft (A.function inv M.empty (M.insert "Proof" inhabited shapes) decoder))
     "absurd branch admitted despite an inhabitant at the selected constructor"
