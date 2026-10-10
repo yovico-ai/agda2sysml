@@ -1870,6 +1870,25 @@ expression inv stack env expected term = do
   where
     es = array (get "eliminations" term)
     infer = case string (get "tag" term) of
+      "lambda" | Just ty@(Callable domains out) <- expected -> do
+        let depth = length (filter isDynamic env)
+            positions = map IndexInput [depth..depth+length domains-1]
+            localDomains = map (applyCallback positions) domains
+            resultType = applyCallback positions out
+        (context,source) <- foldM (\(context,value) domain -> do
+          unless (get "tag" value == String "lambda")
+            (abort Representation "Native lambda requires its complete argument telescope")
+          let abstraction = get "abstraction" value
+          body <- case get "binds" abstraction of
+            Bool True -> pure (get "body" abstraction)
+            Bool False -> pure (Reduction.shift 1 (get "body" abstraction))
+            _ -> abort Syntax "Native lambda lacks checked binder information"
+          pure (Dynamic domain:context,body)) (env,term) localDomains
+        (_,value) <- expression inv stack context (Just resultType) source
+        pure (ty,object ["tag" .= ("native-lambda" :: Text)
+          ,"$occurrence" .= get "$occurrence" term
+          ,"inputs" .= [asType (depth+i) domain | (i,domain) <- zip [0..] localDomains]
+          ,"result" .= asType (depth+length domains) resultType,"body" .= value])
       "variable" -> do
         i <- liftEither (number (get "index" term))
         b <- liftEither (at i env)

@@ -2,11 +2,11 @@
 import itertools
 import json
 from pathlib import Path
-from emitted_model import CalculationValue, CallableSignature, Extent, Model, Record, same
+from emitted_model import BodyCalculation, CalculationValue, CallableSignature, Extent, Model, Record, same, sequence
 from open_parameters import target_name
 
 
-SOURCES = ('evaluate', 'evaluatePartial', 'select', 'withFallback')
+SOURCES = ('evaluate', 'evaluatePartial', 'select', 'withFallback', 'restrict', 'normalize')
 
 
 def verify_callable_fields(output):
@@ -164,6 +164,77 @@ calc def fieldWrongArity { in x : FieldInput [1]; in y : FieldInput [1]; return 
                 wanted = next((effect(e, argument) for g, e in source if predicate(g, argument)), None)
                 expect(call(roots['select'], supplied, argument), maybe(wanted))
 
+    laws = {}
+    for source in ('restrict-true', 'restrict-false', 'normalization-preserves-evaluation', 'normalization-sound'):
+        rows = [r for r in report['nativeStatements'] if r['status'] == 'translated'
+                and r['symbol'].startswith('Agda2SysML.DecisionTree.' + source + '#') and '@' not in r['symbol']]
+        assert len(rows) == 1, source
+        laws[source] = target_name(rows[0]['target'])
+
+    def evidence(law, value):
+        typ = runtime_inputs(laws[law])[-1][1]
+        return call(constructors(typ)['refl'], value)
+
+    # Keep callbacks produced by distinct invocations alive together, then
+    # invoke them after more normalizations/restrictions have run.
+    retained = [(source, call(roots['normalize'], tree(source))) for source in trees]
+    closure_comparisons = 0
+    for source, normalized in reversed(retained):
+        for argument in samples:
+            wanted = expected(source, argument)
+            expect(call(roots['select'], normalized, argument), maybe(wanted))
+            expect(call(laws['normalization-preserves-evaluation'], tree(source), argument), True)
+            expect(call(laws['normalization-sound'], tree(source), argument, wanted,
+                        evidence('normalization-sound', maybe(wanted))), True)
+            closure_comparisons += 3
+    source = [('Below', 'Wrap'), ('Above', 'Echo'), ('Always', 'Wrap')]
+    supplied = rules(source)
+    restrictions = [(guard, call(roots['restrict'], callback(guard), supplied))
+                    for guard in ('Below', 'Above', 'Always', 'Never')]
+    for guard, restricted in reversed(restrictions):
+        assert len(sequence(restricted.get('items'))) == len(source)
+        for argument in samples:
+            enabled = predicate(guard, argument)
+            wanted = next((effect(e, argument) for g, e in source if enabled and predicate(g, argument)), None)
+            expect(call(roots['select'], restricted, argument), maybe(wanted))
+            law = 'restrict-true' if enabled else 'restrict-false'
+            expect(call(laws[law], callback(guard), supplied, argument, evidence(law, enabled)), True)
+            closure_comparisons += 2
+        # Composition captures an already captured callback.
+        repeated = call(roots['restrict'], callback('Above'), restricted)
+        for argument in samples:
+            wanted = next((effect(e, argument) for g, e in source
+                           if predicate('Above', argument) and predicate(guard, argument) and predicate(g, argument)), None)
+            expect(call(roots['select'], repeated, argument), maybe(wanted))
+            closure_comparisons += 1
+
+    # Mutate parsed lambda bodies, independently of compiler terms. Both
+    # constants must change an observable selected outcome.
+    def mutate(node, replacement):
+        if not isinstance(node, (list, tuple)): return node
+        if node and node[0] == 'body': return (*node[:3], ('literal', replacement))
+        return type(node)(mutate(x, replacement) for x in node)
+    mutations_detected = 0
+    for replacement in (False, True):
+        original = model.calculations[roots['restrict']]
+        model.calculations[roots['restrict']] = (original[0], mutate(original[1], replacement), original[2])
+        try:
+            changed = call(roots['restrict'], callback('Below'), supplied)
+            assert any(not same(call(roots['select'], changed, argument),
+                                maybe(next((effect(e, argument) for g, e in source
+                                            if predicate('Below', argument) and predicate(g, argument)), None)))
+                       for argument in samples), 'captured-lambda mutation escaped behavior checks'
+            mutations_detected += 1
+        finally:
+            model.calculations[roots['restrict']] = original
+
+    for bad in (BodyCalculation((('x', 'ScalarValues::Natural'),), 'ScalarValues::Boolean', ('literal', True), {}),
+                BodyCalculation((('x', 'Base::Anything'), ('y', 'Base::Anything')), 'ScalarValues::Boolean', ('literal', True), {})):
+        refuse(lambda bad=bad: call(roots['select'], call(roots['restrict'], bad, supplied), samples[0]))
+    refuse(lambda: call(laws['restrict-true'], callback('Never'), supplied, samples[0], evidence('restrict-true', True)))
+    refuse(lambda: call(laws['normalization-sound'], tree(trees[0]), samples[0], payloads[-1],
+                        evidence('normalization-sound', maybe(payloads[-1]))))
+
     # Invalid signatures, cardinalities, domains, results and parameter bindings
     # are checked at the generated boundaries, including reconstructed trees.
     for bad in (42, callback('Wrong'), callback('WrongArity')):
@@ -185,4 +256,6 @@ calc def fieldWrongArity { in x : FieldInput [1]; in y : FieldInput [1]; return 
     refuse(lambda: call(roots['evaluate'], tree(leaves[0]), True))
     bindings = {'typeArgument0': (samples[0],), 'typeArgument1': outputs}
     refuse(lambda: call(roots['evaluate'], tree(leaves[0]), samples[-1]))
-    return {'operations': 4, 'comparisons': comparisons, 'invalidCasesRejected': rejected}
+    return {'operations': len(SOURCES), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
+            'capturedLambdaComparisons': closure_comparisons, 'nativeStatements': len(laws),
+            'lambdaMutationsDetected': mutations_detected}

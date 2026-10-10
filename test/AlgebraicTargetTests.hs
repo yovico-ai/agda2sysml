@@ -75,15 +75,18 @@ operation s ins out tree = set "compiled" tree $ set "sourceSyntax" (toJSON [obj
 
 -- An independent evaluator of the target expression algebra checks lowering
 -- over all fixture values, including constructions the Pilot cannot execute.
-data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | Fn Text | N deriving (Eq,Show)
+data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | Fn Text | Closure [Text] A.Expression [Val] (M.Map Text Val) | N deriving (Eq,Show)
 eval :: [Val] -> A.Expression -> Val
 eval = evalWith M.empty
 
 evalWith :: M.Map Text A.Calculation -> [Val] -> A.Expression -> Val
-evalWith _ env (A.Input i) = env !! i
-evalWith _ _ (A.Literal b) = B b
-evalWith _ _ (A.NumberLiteral n) = Z n
-evalWith table env (A.Numeric op x y) = case (evalWith table env x,evalWith table env y) of
+evalWith table env = evalIn table env M.empty
+
+evalIn :: M.Map Text A.Calculation -> [Val] -> M.Map Text Val -> A.Expression -> Val
+evalIn _ env _ (A.Input i) = env !! i
+evalIn _ _ _ (A.Literal b) = B b
+evalIn _ _ _ (A.NumberLiteral n) = Z n
+evalIn table env locals (A.Numeric op x y) = case (evalIn table env locals x,evalIn table env locals y) of
   (Z a,Z b) -> case op of
     "+" -> Z (a+b)
     "*" -> Z (a*b)
@@ -92,11 +95,11 @@ evalWith table env (A.Numeric op x y) = case (evalWith table env x,evalWith tabl
     "==" -> B (a==b)
     _ -> error "unknown numeric operation"
   _ -> error "non-natural numeric argument"
-evalWith table env (A.Sequence xs) = Seq (concatMap flatten (map (evalWith table env) xs))
+evalIn table env locals (A.Sequence xs) = Seq (concatMap flatten (map (evalIn table env locals) xs))
   where flatten (Seq vs) = vs
         flatten v = [v]
-evalWith table env (A.SequenceHead _ xs) = evalWith table env (A.SequenceOp "head" xs)
-evalWith table env (A.SequenceOp op xs) = case evalWith table env xs of
+evalIn table env locals (A.SequenceHead _ xs) = evalIn table env locals (A.SequenceOp "head" xs)
+evalIn table env locals (A.SequenceOp op xs) = case evalIn table env locals xs of
   Seq values -> case (op,values) of
     ("head",x:_) -> x
     ("tail",_:rest) -> Seq rest
@@ -104,22 +107,27 @@ evalWith table env (A.SequenceOp op xs) = case evalWith table env xs of
     ("size",_) -> Z (toInteger (length values))
     _ -> error "sequence operation outside admitted domain"
   _ -> error "non-sequence argument"
-evalWith _ _ (A.Enumeration t c) = E t c
-evalWith table env (A.Construct t fields) = R t (M.fromList [(f,evalWith table env x) | (f,x) <- fields])
-evalWith table env (A.Project x f) = case evalWith table env x of
+evalIn _ _ _ (A.Enumeration t c) = E t c
+evalIn table env locals (A.Construct t fields) = R t (M.fromList [(f,evalIn table env locals x) | (f,x) <- fields])
+evalIn table env locals (A.Project x f) = case evalIn table env locals x of
   R _ fields -> M.findWithDefault N f fields
   value -> error ("projection from " ++ show value)
-evalWith table env (A.Equal x y) = B (evalWith table env x == evalWith table env y)
-evalWith table env (A.Conditional p yes no) = case evalWith table env p of
-  B b -> evalWith table env (if b then yes else no)
+evalIn table env locals (A.Equal x y) = B (evalIn table env locals x == evalIn table env locals y)
+evalIn table env locals (A.Conditional p yes no) = case evalIn table env locals p of
+  B b -> evalIn table env locals (if b then yes else no)
   _ -> error "non-Boolean guard"
-evalWith _ _ A.Absent = N
-evalWith table env (A.Call s args) = case M.lookup s table of
+evalIn _ _ _ A.Absent = N
+evalIn table env locals (A.Call s args) = case M.lookup s table of
   Nothing -> error ("missing helper " ++ show s)
-  Just calc -> evalWith table (map (evalWith table env) args) (A.body calc)
-evalWith table env (A.Apply callback argument) = case evalWith table env callback of
-  Fn symbol -> evalWith table env (A.Call symbol argument)
+  Just calc -> evalWith table (map (evalIn table env locals) args) (A.body calc)
+evalIn table env locals (A.Apply callback argument) = case evalIn table env locals callback of
+  Fn symbol -> evalIn table env locals (A.Call symbol argument)
+  Closure names body captures lexical -> evalIn table captures
+    (M.union (M.fromList (zip names (map (evalIn table env locals) argument))) lexical) body
   _ -> error "native invocation needs a callable value"
+
+evalIn _ env locals (A.Lambda args _ body) = Closure (map fst args) body env locals
+evalIn _ _ locals (A.Iterator name _) = locals M.! name
 
 call :: Text -> [Value] -> [Text] -> Value
 call s args fields = object ["tag" .= ("definition" :: Text),"symbol" .= s
@@ -1124,7 +1132,16 @@ callableFieldChecks base = do
       use = operation "useCallbackBox" ["CallbackBox","Bool"] "Bool" (done 2 applied)
       rebuild = operation "rebuildCallbackBox" ["CallbackBox"] "CallbackBox"
         (done 1 (constructor "makeCallbackBox" [variable 0 ["callbackField"]]))
-      ds = [box,ctor,projection,use,rebuild]
+      lambda binds body = object ["tag" .= ("lambda" :: Text)
+        ,"abstraction" .= object ["binds" .= binds,"body" .= body]]
+      capture = operation "captureValue" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda True (variable 1 [])]))
+      unused = operation "captureUnused" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda False (variable 0 [])]))
+      nested = operation "captureNested" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda True (call "useCallbackBox"
+          [constructor "makeCallbackBox" [lambda True (variable 2 [])],variable 0 []] [])]))
+      ds = [box,ctor,projection,use,rebuild,capture,unused,nested]
       inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
         ,modelRequirements = M.singleton "callbacks" (S.fromList [(string (get "name" d),
           if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
@@ -1157,6 +1174,18 @@ callableFieldChecks base = do
   check ("return ref calc 'result'" `Text.isInfixOf` Text.unlines
       (A.renderCalculation expanded shapes id (table M.! "callbackField")))
     "projection dropped its returned callback signature"
+  forM_ ["captureValue","captureUnused","captureNested"] $ \s -> do
+    calculation <- either (fail . show) pure (results M.! s)
+    check ("{ in 'lambdaArgument" `Text.isInfixOf` Text.unlines (A.renderCalculation expanded shapes id calculation))
+      "captured lambda did not become a native body expression"
+    forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument -> do
+      let value = evalWith table [B captured] (A.body calculation)
+      check (evalWith table [value,B argument] (A.body (table M.! "useCallbackBox")) == B captured)
+        "nested or unused lambda binder changed a captured value"
+  forM_ [lambda True (constructor "red" []),lambda True (variable 9 []),lambda True (lambda True (variable 0 []))] $ \badBody -> do
+    let invalid = inv {declarations = M.insert "captureValue"
+          (set "compiled" (done 1 (constructor "makeCallbackBox" [badBody])) capture) (declarations inv)}
+    check (not (T.complete (T.generate invalid))) "ill-typed or unbound captured lambda admitted"
   forM_ [set "index" (Number 2),set "proper" (String "WrongOwner")] $ \change -> do
     let invalid = inv {declarations = M.adjust (set "projection" (change (get "projection" projection))) "callbackField" (declarations inv)}
     check (M.notMember "CallbackBox" (fst (A.discover (P.inventory (P.prepare invalid)) M.empty)))

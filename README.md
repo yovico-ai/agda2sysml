@@ -36,6 +36,11 @@ browser review and the official SysML notebook tools.
   Store these callbacks in records and constructor payloads: supplied decision
   trees and ordered rule lists can retain guards, complete outcomes, and fallback
   behavior through `evaluate`, `evaluatePartial`, `select`, and `withFallback`.
+  Supported lambdas retain their captured values and callbacks: `restrict`
+  constructs combined guards, and `normalize` converts decision trees to ordered
+  rules while preserving complete outcomes.
+  `AlgebraicValues.tabulate` also constructs complete fields from an indexed
+  callback, preserving distinct positions even when field types repeat.
   The self specification's first-order evaluator also translates table lookup,
   expression evaluation, argument lists, and evidence-producing operation members.
   Callback behavior is independently tested; the pinned Pilot validates these
@@ -106,12 +111,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 283 native calculation functions out of 722 (39.2%)
-and 128 native equality statements, including 41 compiler-generated helpers.
-Ten functions have both representations: 401/722 function declarations (55.5%)
+The default self model has 286 native calculation functions out of 722 (39.6%)
+and 132 native equality statements, including 41 compiler-generated helpers.
+Ten functions have both representations: 408/722 function declarations (56.5%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 449 unresolved requirements. Source-only proof retention is
+There are still 451 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

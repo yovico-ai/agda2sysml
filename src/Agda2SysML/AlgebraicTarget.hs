@@ -3,7 +3,7 @@
 -- | Closed, acyclic products and sums. Every payload position is retained;
 -- named types, constructor identities and projections come from checked Agda.
 module Agda2SysML.AlgebraicTarget
-  ( Carrier(..), Shape(..), pattern Shape, Constructor(..), Calculation(..), Expression(Input, Argument, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Apply, Absent)
+  ( Carrier(..), Shape(..), pattern Shape, Constructor(..), Calculation(..), Expression(Input, Argument, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Apply, Absent, Lambda, Iterator)
   , discover, function, symbols, renderShapes, renderShapesIn, renderCalculation, renderCalculationDoc, references
   , constructorCalculations, naturalCalculations, generatedNames, carrierReport, functions, calls, calculationContracts, calculationContractsIn, dependencies
   , EqualityStatement(..), equalityStatements, renderStatementDoc ) where
@@ -55,6 +55,7 @@ data Expression = Annotated D.Origin Expression
   | NIterator Text Carrier
   | NCollect Text Carrier Expression Expression
   | NCast Text Expression
+  | NLambda [(Text,Carrier)] Carrier Expression
   deriving Show
 
 unmark :: Expression -> Expression
@@ -82,6 +83,7 @@ instance Eq Expression where
   x == y | NIterator a t <- unmark x, NIterator b u <- unmark y = a == b && t == u
   x == y | NCollect a t xs v <- unmark x, NCollect b u ys w <- unmark y = (a,t,xs,v) == (b,u,ys,w)
   x == y | NCast t a <- unmark x, NCast u b <- unmark y = (t,a) == (u,b)
+  x == y | NLambda as t a <- unmark x, NLambda bs u b <- unmark y = (as,t,a) == (bs,u,b)
   _ == _ = False
 pattern Input :: Int -> Expression
 pattern Input i <- (unmark -> NInput i) where Input i = NInput i
@@ -131,7 +133,9 @@ pattern Collect :: Text -> Carrier -> Expression -> Expression -> Expression
 pattern Collect name typ values body <- (unmark -> NCollect name typ values body) where Collect name typ values body = NCollect name typ values body
 pattern Cast :: Text -> Expression -> Expression
 pattern Cast typ value <- (unmark -> NCast typ value) where Cast typ value = NCast typ value
-{-# COMPLETE Input, Argument, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Apply, Absent, Extent, Iterator, Collect, Cast #-}
+pattern Lambda :: [(Text,Carrier)] -> Carrier -> Expression -> Expression
+pattern Lambda inputs result body <- (unmark -> NLambda inputs result body) where Lambda inputs result body = NLambda inputs result body
+{-# COMPLETE Input, Argument, Literal, NumberLiteral, Numeric, Sequence, SequenceOp, SequenceHead, Enumeration, Construct, Project, Equal, Conditional, Call, Apply, Absent, Extent, Iterator, Collect, Cast, Lambda #-}
 
 annotation :: Expression -> D.Origin
 annotation (Annotated o _) = o
@@ -365,6 +369,7 @@ mapExpression replace e = retain "native.substitution" e $ case replace e of
     Iterator name typ -> Iterator name (mapCarrier go typ)
     Collect name typ xs body -> Collect name (mapCarrier go typ) (go xs) (go body)
     Cast typ value -> Cast typ (go value)
+    Lambda args out body -> Lambda [(name,mapCarrier go ty) | (name,ty) <- args] (mapCarrier go out) (go body)
     _ -> e
   where go = mapExpression replace
 
@@ -395,6 +400,7 @@ normalizeStep (Call s args) = Call s (map normalize args)
 normalizeStep (Apply f x) = Apply (normalize f) (map normalize x)
 normalizeStep (Collect name typ xs body) = Collect name typ (normalize xs) (normalize body)
 normalizeStep (Cast typ value) = Cast typ (normalize value)
+normalizeStep (Lambda args out body) = Lambda args out (normalize body)
 normalizeStep (Equal x y) = Equal (normalize x) (normalize y)
 normalizeStep (Numeric op x y) = case (op,normalize x,normalize y) of
   ("+",a,b) -> naturalSum a b
@@ -940,6 +946,7 @@ calls (SequenceOp _ xs) = calls xs
 calls (SequenceHead _ xs) = calls xs
 calls (Collect _ _ xs value) = calls xs `S.union` calls value
 calls (Cast _ value) = calls value
+calls (Lambda _ _ body) = calls body
 calls (Conditional p yes no) = S.unions (map calls [p,yes,no])
 calls _ = S.empty
 
@@ -1230,6 +1237,19 @@ functionWith inv finite helpers shapes signatures d = do
       let es = array (get "eliminations" term)
           eliminate = eliminateIn equationsInScope env
       case string (get "tag" term) of
+        "native-lambda" -> do
+          let types = array (get "inputs" term)
+          unless (not (null types) && null es) (refuse Syntax "Malformed native lambda telescope")
+          (locals,context) <- foldM (\(locals,context) ty -> do
+            domain <- carrierIn inv finite helpers shapes (schemaContext equationsInScope context) ty
+            let name = "lambdaArgument" <> T.pack (show (length env + length locals))
+            pure (locals ++ [(name,domain)],(domain,Iterator name domain):context)) ([],env) types
+          out <- carrierIn inv finite helpers shapes (schemaContext equationsInScope context) (get "result" term)
+          value <- expressionExpected (Just out) equationsInScope context (get "body" term) >>= requireType equationsInScope out
+          let rebase = mapCarrier (mapExpression (\e -> case e of
+                Iterator name _ -> Argument <$> lookup name (zip (map fst locals) [0..])
+                _ -> Nothing))
+          pure (Callable (map (rebase . snd) locals) (rebase out),Lambda locals out value)
         "native-schema-build" -> buildSchema inv finite helpers shapes (schemaContext equationsInScope env) term
         "native-schema-inject" -> do
           concrete <- carrierIn inv finite helpers shapes (schemaContext equationsInScope env) (get "memberType" term)
@@ -1429,6 +1449,9 @@ renderParameterizedDoc label input owner calcParameters shapeParameters paramete
       Iterator name typ -> "(" <> D.text (quote name) <> " as " <> D.text (renderCarrier label typ) <> ")"
       Collect name _ xs value -> "(" <> go xs <> ")->collect { in " <> D.text (quote name) <> "; " <> go value <> " }"
       Cast typ value -> "(" <> go value <> " as " <> D.text (quote (label typ)) <> ")"
+      Lambda args out value -> "{ "
+        <> D.joinDoc " " [D.text ("in " <> quote name <> " : " <> renderCarrier label typ <> " [1];") | (name,typ) <- args]
+        <> D.text (" return 'result' : " <> renderCarrier label out <> " [1]; ") <> go value <> " }"
       Argument i -> D.text (quote (argumentName i))
       Literal b -> if b then "true" else "false"
       NumberLiteral n -> D.text (naturalText n)
@@ -1459,6 +1482,7 @@ renderParameterizedDoc label input owner calcParameters shapeParameters paramete
     evidence e = annotation e
     role Call{} = "call"
     role Apply{} = "callback-invocation"
+    role Lambda{} = "callback-construction"
     role Project{} = "projection"
     role Construct{} = "construction"
     role Conditional{} = "conditional"
