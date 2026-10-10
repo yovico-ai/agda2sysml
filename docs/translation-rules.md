@@ -1121,6 +1121,31 @@ decomposition requires the same carrier and ordered fields. It does not infer
 injectivity of arbitrary helpers or permit an ambiguous lazy split. Facts remain
 local to their branch and the particular values they describe.
 
+Specialization carries these constructor equations through nested case splits,
+including equations inside the domains of dependent indices. When the checked
+telescope introduces duplicate implicit indices, their aliases are transported
+in both types and source terms. Inferring a static type argument retains its
+existing runtime captures; it does not create a new nominal carrier for each
+branch. A closed constructor whose domain depends on a caller input remains a
+contextual capture, while genuinely closed fibres keep their distinct identities.
+
+The target checker composes equations sharing a constructor field, as in the two
+endpoints of `refl`. It compares a known constructor with its full reconstruction,
+checking every active payload, and applies the same index comparison inside
+callback types. Singleton and longer list fibres can be distinguished by their
+known lengths, without assigning a length to an unknown tail. Head/tail
+reconstruction is canonicalized for comparison only: computation retains the
+constructor information needed to reduce recursive index helpers.
+
+Together these generic rules admit `Coverage.Inventory.classify`, `strict`, and
+`strict-accepts-complete`, the `strict-refuses-textual` statement constraint, and
+`Mapping.Validation.validate`, `accepted-symbol-fits`,
+`validate-accepts-compatible`, and `acceptance-excludes-refusal`. Parsed-model
+tests exercise complete witnesses, repeated opaque identities, all mapping roles,
+missing and ambiguous candidates, and incompatible evidence. Invalid inputs and
+constant-result mutations must be detected. No project-specific compiler cases,
+Agda changes, or mapping annotations are required for these operations.
+
 These rules admit the unchanged `RelationBindings.lookup`, `position`,
 `boundValues`, `embed`, `evaluate`, and `lower`, together with `Sharing.expand`
 and `Derivations.Trace.Readiness.combine-ready`. They also make six existing

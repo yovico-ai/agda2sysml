@@ -147,6 +147,9 @@ main :: IO ()
 main = do
   familyParameterChecks
   constructorScopeChecks
+  earlierIndexChecks
+  nestedSequencePatternChecks
+  sharedIndexChecks
   reductionChecks
   naturalChecks
   constructorFibreChecks
@@ -2269,6 +2272,15 @@ constructorFibreChecks = do
         $ set "compiled" (split 1 [("witness",1,split 2
             [("witness",1,done 3 (constructor "witness" [variable 0 []]))])]) decoder
   pairedCalc <- either (fail . show) pure (A.function inv M.empty shapes pairedWitness)
+  let reconstruct = set "type" (signature [named "Token",proof (variable 0 [])] (proof (variable 1 []))) $
+        set "compiled" (split 0 [("packed",1,done 2 (constructor "witness" [variable 1 []]))
+          ,("empty",0,absurd 1)]) decoder
+  _ <- either (fail . show) pure (A.function inv M.empty shapes reconstruct)
+  let changed = set "type" (signature [named "Token",named "Bool",proof (variable 1 [])] (proof (variable 2 []))) $
+        set "compiled" (split 0 [("packed",1,done 3 (constructor "witness" [variable 1 []]))
+          ,("empty",0,absurd 2)]) reconstruct
+  check (isLeft (A.function inv M.empty shapes changed))
+    "constructor reconstruction ignored a changed payload"
   forM_ [False,True] $ \b -> do
     let value = R "Token" (M.fromList [("constructor",E "Token.constructor-tag" "packed"),("packed.payload0",B b)])
     check (eval [value,N] (A.body calc) == B b) "constructor-index refinement changed a valid payload"
@@ -2405,6 +2417,123 @@ constructorScopeChecks = do
     "constructor substitution captured an index belonging to its caller's static argument"
   check (isLeft (P.readType inv [Just (P.Runtime (P.Named "Wrapped" [P.Runtime bool (P.IndexInput 1)]) (P.IndexInput 5)),Just contextual] holderTerm))
     "constructor substitution admitted a payload at a different caller index"
+
+-- A constructor fixes an earlier index, including occurrences nested inside a
+-- generic result. Keep a second, unrelated index distinct in the negative case.
+sharedIndexChecks :: IO ()
+sharedIndexChecks = do
+  let ty s xs = object ["term" .= call s xs []]
+      v i = variable i []
+      sameFlag = A.Shape "SameFlag" False
+        [A.Constructor "sameFlag" [("same.value",A.Boolean)] [A.Input 0,A.Input 0]] [A.Boolean,A.Boolean]
+      payload = A.Shape "FlagPayload" False
+        [A.Constructor "flagPayload" [("flag",A.Boolean),("value",A.Boolean)] [A.Input 0]] [A.Boolean]
+      shapes = M.fromList [(A.shapeSymbol s,s) | s <- [sameFlag,payload]]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+      transport = set "type" (signature [named "Bool",named "Bool",ty "SameFlag" [v 1,v 0],ty "FlagPayload" [v 2]]
+        (ty "FlagPayload" [v 2])) $ operation "transport" [] "Bool"
+        (split 2 [("sameFlag",1,done 4 (v 0))])
+  _ <- either (fail . show) pure (A.function inv M.empty shapes transport)
+  check (isLeft (A.function inv M.empty shapes (set "compiled" (done 4 (v 0)) transport)))
+    "an unsplit equality witness supplied a branch-local index equation"
+  let unrelated = set "type" (signature [named "Bool",named "Bool",ty "SameFlag" [v 0,v 0],ty "FlagPayload" [v 2]]
+        (ty "FlagPayload" [v 2])) transport
+  check (isLeft (A.function inv M.empty shapes unrelated))
+    "shared constructor fields equated unrelated inputs"
+
+nestedSequencePatternChecks :: IO ()
+nestedSequencePatternChecks = do
+  let list xs = A.Construct "List" [("items",A.Sequence xs)]
+      listShape = (A.Shape "List" False [A.Constructor "nil" [] [],A.Constructor "cons"
+        [("head",A.Boolean),("tail",A.Named "List")] []] []) {A.sequenceElement = Just A.Boolean}
+      classification = A.Shape "ListClass" False
+        [A.Constructor "emptyClass" [] [list []]
+        ,A.Constructor "oneClass" [("one.head",A.Boolean)] [list [A.Input 0]]
+        ,A.Constructor "manyClass" [("many.head",A.Boolean),("many.second",A.Boolean),("many.tail",A.Named "List")]
+          [list [A.Input 0,A.Input 1,A.Project (A.Input 2) "items"]]] [A.Named "List"]
+      shapes = M.fromList [(A.shapeSymbol s,s) | s <- [listShape,classification]]
+      ty = signature [named "List"] (object ["term" .= call "ListClass" [variable 0 []] []])
+      body = split 0 [("nil",0,done 0 (constructor "emptyClass" [])),("cons",2,split 1
+        [("nil",0,done 1 (constructor "oneClass" [variable 0 []]))
+        ,("cons",2,done 3 (constructor "manyClass" [variable 2 [],variable 1 [],variable 0 []]))])]
+      op = set "type" ty $ operation "classifyList" [] "Bool" body
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+  calc <- either (fail . show) pure (A.function inv M.empty shapes op)
+  forM_ [[],[False],[True],[True,False],[False,True,False]] $ \xs -> do
+    let actual = eval [R "List" (M.singleton "items" (Seq (map B xs)))] (A.body calc)
+        tag = if null xs then "emptyClass" else if length xs == 1 then "oneClass" else "manyClass"
+    case actual of
+      R "ListClass" fields -> check (M.lookup "constructor" fields == Just (E "ListClass.constructor-tag" tag))
+        "nested list pattern selected the wrong classification"
+      _ -> fail "nested list pattern did not return its complete witness"
+  let wrong = set "compiled" (split 0 [("nil",0,done 0 (constructor "emptyClass" []))
+        ,("cons",2,done 2 (constructor "oneClass" [variable 1 []]))]) op
+  check (isLeft (A.function inv M.empty shapes wrong))
+    "list tail was assumed empty without its constructor branch"
+  let singletonWitness = object ["term" .= call "ListClass"
+        [constructor "cons" [variable 0 [],constructor "nil" []]] []]
+      selectOne = set "type" (signature [named "Bool",singletonWitness] (named "Bool")) $
+        operation "selectOne" [] "Bool" (split 1 [("oneClass",1,done 2 (variable 0 []))])
+      constructorInv = inv {declarations = M.fromList
+        [("nil",set "family" (String "List") (declaration "nil" "constructor" (named "List")))
+        ,("cons",set "family" (String "List") (declaration "cons" "constructor" (signature [named "Bool",named "List"] (named "List"))))]}
+  _ <- either (fail . show) pure (A.function constructorInv M.empty shapes selectOne)
+  let unknown = set "type" (signature [named "List",object ["term" .= call "ListClass" [variable 0 []] []]] (named "Bool")) selectOne
+  check (isLeft (A.function constructorInv M.empty shapes unknown))
+    "unknown sequence length justified omitting a constructor branch"
+
+earlierIndexChecks :: IO ()
+earlierIndexChecks = do
+  let bool = P.Named "Bool" []
+      flag i = P.Runtime bool i
+      witness i = P.Named "AtFlag" [flag i]
+      box i value = P.Named "Wrapper" [P.Named "NestedWitness"
+        [flag i,P.Runtime (witness i) value]]
+      yes = P.IndexConstructor "yesFlag" [] []
+  check (P.typeKey (box (P.IndexInput 0) yes) == P.typeKey (box (P.IndexInput 0) (P.IndexInput 1)))
+    "a closed constructor with a dependent domain was frozen outside its branch context"
+  check (P.typeKey (box (P.IndexConstructor "true" [] []) yes)
+      /= P.typeKey (box (P.IndexConstructor "false" [] []) yes))
+    "distinct closed fibres were merged without runtime membership indices"
+  let u = universeAt (level 0)
+      ty s xs = object ["term" .= call s xs []]
+      v i = variable i []
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True)
+        . set "sourceModule" (String "Checked")
+      atFlag b = ty "AtFlag" [b]
+      wrap t = ty "Wrapper" [get "term" t]
+      flag = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" u
+      witness = set "constructors" (toJSON (["yesFlag","noFlag"] :: [Text])) $
+        declaration "AtFlag" "datatype" (signature [named "Bool"] u)
+      ctor s b = set "family" (String "AtFlag") $ declaration s "constructor" (atFlag (constructor b []))
+      wrapper = set "parameters" (Number 1) $ set "constructors" (toJSON (["wrapped"] :: [Text])) $
+        declaration "Wrapper" "datatype" (signature [u] u)
+      wrapped = set "parameters" (Number 1) $ set "family" (String "Wrapper") $
+        declaration "wrapped" "constructor" (signature [u,object ["term" .= v 0]] (wrap (object ["term" .= v 1])))
+      body = split 1 [("yesFlag",0,done 1 (constructor "wrapped" [constructor "yesFlag" []]))
+                    ,("noFlag",0,done 1 (constructor "wrapped" [constructor "noFlag" []]))]
+      wrapWitness = safe $ set "type" (signature [named "Bool",atFlag (v 0)] (wrap (atFlag (v 1)))) $
+        operation "wrapWitness" [] "Bool" body
+      defs = [flag,declaration "true" "constructor" (named "Bool"),declaration "false" "constructor" (named "Bool")
+             ,witness,ctor "yesFlag" "true",ctor "noFlag" "false",wrapper,wrapped,wrapWitness]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text),"false" .= ("false" :: Text)]
+        ,"checking" .= [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "fixture" (S.fromList [(string (get "name" d),
+          if get "name" d == String "wrapWitness" then "behavior" else "structure") | d <- defs]))
+      results source =
+        let ready = P.inventory (P.prepare source)
+            finite = M.mapMaybe (either (const Nothing) Just . F.domain ready) (declarations ready)
+        in A.functions ready finite (fst (A.discover ready finite))
+  check (maybe False (either (const False) (const True)) (M.lookup "wrapWitness" (results inv)))
+    ("earlier constructor index was not refined: " ++ show (P.failures (P.prepare inv),results inv))
+  let unrelated = safe $ set "type" (signature [named "Bool",named "Bool",atFlag (v 0)] (wrap (atFlag (v 2)))) $
+        operation "wrapWitness" [] "Bool" (split 2
+          [("yesFlag",0,done 2 (constructor "wrapped" [constructor "yesFlag" []]))
+          ,("noFlag",0,done 2 (constructor "wrapped" [constructor "noFlag" []]))])
+  check (not (maybe False (either (const False) (const True))
+      (M.lookup "wrapWitness" (results (inv {declarations = M.insert "wrapWitness" unrelated (declarations inv)})))))
+    "constructor branch refined an unrelated earlier index"
 
 interleavedParameterChecks :: Inventory -> IO ()
 interleavedParameterChecks base = do

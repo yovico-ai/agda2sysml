@@ -238,7 +238,10 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
           erase x = x
           localsInIndex = familyLocals (Runtime domain ix)
           remainingLocals = if bound then localsInIndex else S.delete (-1) localsInIndex
-      if closed (Runtime domain (erase ix)) || not (S.null remainingLocals)
+      -- A closed constructor can still have a caller-dependent domain. Decide
+      -- whether to capture before that domain's free indices are abstracted;
+      -- otherwise an empty indexed value is frozen at an unconstrained index.
+      if closed (Runtime ty (erase ix)) || not (S.null remainingLocals)
         then Runtime domain <$> nested bound locals ix else do
         slots <- gets id
         -- A projection's static arguments can contain alpha-equivalent family
@@ -1866,13 +1869,16 @@ runtimeBindings env = [case binding of
   | (i,binding) <- zip [0..] env]
 
 specializeTree :: Inventory -> [Text] -> [Binding] -> Type -> Value -> Build Value
-specializeTree inv stack env out tree
+specializeTree inv stack = specializeTreeIn inv stack []
+
+specializeTreeIn :: Inventory -> [Text] -> [(Type,Type)] -> [Binding] -> Type -> Value -> Build Value
+specializeTreeIn inv stack equations env out tree
   | get "tag" tree == String "case",get "copattern" tree /= Bool True
   ,Right i <- number (get "value" (get "argument" tree))
   ,Right (Dynamic stored) <- at i env
   ,Just (concrete,premises) <- resolveStoredFamily inv (reverse env) stored = do
       ensureType inv stack concrete
-      rewritten <- specializeTree inv stack (take i env ++ [Dynamic concrete] ++ drop (i+1) env) out tree
+      rewritten <- specializeTreeIn inv stack equations (take i env ++ [Dynamic concrete] ++ drop (i+1) env) out tree
       pure (object ["tag" .= ("native-schema-case" :: Text)
         ,"$occurrence" .= get "$occurrence" tree
         ,"position" .= length (filter isDynamic (take i env))
@@ -1912,7 +1918,7 @@ specializeTree inv stack env out tree
       fd <- definition inv f
       sig <- liftEither (signature inv fd)
       result <- liftEither (substitute args (output sig))
-      body <- specializeTree inv stack env result (get "tree" b)
+      body <- specializeTreeIn inv stack equations env result (get "tree" b)
       pure $ set "symbol" (String (instanceKey f args)) $ set "branch" (set "tree" body b) branch
     pure $ set "argument" (set "value" (toJSON (length (filter isDynamic env))) (get "argument" tree))
       $ set "constructors" (toJSON rewritten) tree
@@ -1957,11 +1963,26 @@ specializeTree inv stack env out tree
           unless (arity == length fields) (abort Syntax "Specialized case payload arity mismatch")
           let branchEnv = map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env)
           constructorResult <- liftEither (substitute (map reindex args) (replaceInputs bindings (output sig)))
-          let (facts,premises) = branchIndexBindings inv (reverse branchEnv) position count constructorResult (reindex ty)
+          let branchEquations = (constructorResult,reindex ty) : [(reindex a,reindex b) | (a,b) <- equations]
+              (facts,premises) = branchIndexBindings inv (reverse branchEnv) position count branchEquations
               refine (Dynamic domain) = Dynamic (replaceKnownInputs facts domain)
               refine binding = binding
-          result <- specializeTree inv stack (map refine branchEnv)
-            (replaceKnownInputs facts (reindex out)) (get "tree" b)
+              -- Repeated implicit indices in a checked case telescope may
+              -- name the same value. Transport those aliases in source terms
+              -- as well as in their domains, retaining every runtime binder.
+              sourcePositions = [length branchEnv-j-1 | (j,binding) <- zip [0..] branchEnv,isDynamic binding]
+              sourceBindings = [case binding of
+                  Dynamic _ | Just (IndexInput target) <- M.lookup (length (filter isDynamic (take j branchEnv))) facts
+                    ,target >= 0,target < length sourcePositions -> Reduction.variable (sourcePositions !! target)
+                  _ -> Reduction.variable (length branchEnv-j-1)
+                | (j,binding) <- zip [0..] branchEnv]
+              refinedEquations = [(replaceKnownInputs facts a,replaceKnownInputs facts b) | (a,b) <- branchEquations]
+          child <- if sourceBindings == map Reduction.variable (reverse [0..length branchEnv-1])
+            then pure (get "tree" b)
+            else maybe (abort Syntax "Cannot transport checked branch index aliases") pure
+              (Reduction.rewriteTree inv (length branchEnv) sourceBindings (get "tree" b))
+          result <- specializeTreeIn inv stack refinedEquations (map refine branchEnv)
+            (replaceKnownInputs facts (reindex out)) child
           let priorEvidence = case get "reductionEvidence" result of
                 evidence@Object{} -> evidence
                 _ -> object []
@@ -1979,7 +2000,7 @@ specializeTree inv stack env out tree
       pure $ set "constructor" (String (instanceKey c args)) $ set "branch" b
         $ set "fields" (toJSON [instanceKey (string f) args | f <- array (get "fields" eta)]) eta
     catchall <- if get "catchall" tree == Null then pure Null
-      else specializeTree inv stack env out (get "catchall" tree)
+      else specializeTreeIn inv stack equations env out (get "catchall" tree)
     -- Literal and copattern modes remain visible to the native rule gate.
     pure $ set "argument" (set "value" (toJSON (length (filter isDynamic (take i env)))) (get "argument" tree))
       $ set "constructors" (toJSON cs) $ set "eta" eta' $ set "catchall" catchall tree
@@ -2004,6 +2025,11 @@ unify known (Parameter i) actual = case M.lookup i known of
   Nothing -> Right (M.insert i actual known)
   Just t | t == actual -> Right known
   Just t@FamilyExpression{} | FamilyExpression{} <- actual -> unify known t actual
+  -- A static argument may itself contain runtime indices. Keep the chosen
+  -- argument (and its capture layout); the target checks index equality in
+  -- the actual branch context. Re-inferring it as a fixed fibre would create
+  -- a different nominal carrier at each constructor branch.
+  Just t@Named{} | Named{} <- actual -> unify known t actual
   _ -> refuse Semantics ("Inconsistent concrete type arguments: " <> T.pack (show (M.lookup i known,actual)))
 unify known (Open i l) (Open j m) | i == j && l == m = Right known
 -- Signature inference may compare a family before its open binding is known.
@@ -2132,9 +2158,10 @@ unifyIn inv bindings known expected actual = case unify known expected actual of
 -- Recover fresh constructor indices from a branch's checked result fibre.
 -- Only constructor injectivity is used; opaque computations are never inverted.
 -- Runtime fields remain present and the target still checks all branch equations.
-branchIndexBindings :: Inventory -> [Binding] -> Int -> Int -> Type -> Type -> (M.Map Int IndexExpr,[Text])
-branchIndexBindings inv bindings start count expected actual =
-  let (pairs,premises) = types expected actual
+branchIndexBindings :: Inventory -> [Binding] -> Int -> Int -> [(Type,Type)] -> (M.Map Int IndexExpr,[Text])
+branchIndexBindings inv bindings start count equations =
+  let results = map (uncurry types) equations
+      (pairs,premises) = (concatMap fst results,concatMap snd results)
       grouped = M.fromListWith S.union [(i,S.singleton value) | (i,value) <- pairs]
   in (M.mapMaybe (\values -> case S.toList values of [value] -> Just value; _ -> Nothing) grouped,premises)
   where
@@ -2147,12 +2174,14 @@ branchIndexBindings inv bindings start count expected actual =
     types (Named a xs) (Named b ys) | a == b && length xs == length ys =
       let results = zipWith types xs ys in (concatMap fst results,concatMap snd results)
     types (Runtime domain patternIndex) value@(Runtime actualDomain actualIndex) =
-      let (index,premises) = case Reduction.reduceHead inv (get "term" (sourceTypeTerm inv depth value)) of
+      let (domainPairs,domainPremises) = types domain actualDomain
+          (index,premises) = case Reduction.reduceHead inv (get "term" (sourceTypeTerm inv depth value)) of
             Just (term,ps) | Right (Runtime _ ix) <- readIndex inv context actualDomain term -> (ix,ps)
             _ -> (actualIndex,[])
-      in (indices domain patternIndex index,premises)
+      in (domainPairs ++ indices domain patternIndex index,domainPremises ++ premises)
     types _ _ = ([],[])
     indices domain (IndexInput i) value | fresh i && external domain value = [(i,value)]
+    indices domain value (IndexInput i) | fresh i && external domain value = [(i,value)]
     indices domain (IndexConstructor c _ xs) (IndexConstructor d _ ys) | c == d && length xs == length ys =
       concat (zipWith (indices domain) xs ys)
     indices domain (IndexSuccessor x) (IndexSuccessor y) = indices domain x y
