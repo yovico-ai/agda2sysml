@@ -918,7 +918,8 @@ instanceKey s [] = s
 instanceKey s ts = s <> "@" <> digest (BL.toStrict (encode (object ["symbol" .= s,"arguments" .= map typeValue (fst (captureArguments ts))])))
 typeKey :: Type -> Text
 typeKey ty@Callable{} = "$native-callable:" <> digest (BL.toStrict (encode (typeValue ty)))
-typeKey ty@SchemaValue{} = "$native-schema:" <> digest (BL.toStrict (encode (typeValue ty)))
+typeKey ty@SchemaValue{} = "$native-schema:" <> digest (BL.toStrict (encode (typeValue canonical)))
+  where canonical = case fst (captureArguments [ty]) of [value] -> value; _ -> ty
 typeKey (SelectedFamily (Runtime schema _)) = typeKey schema <> ".member"
 typeKey SelectedFamily{} = "$invalid-stored-schema"
 typeKey Unused = "$unused-module-parameter"
@@ -968,10 +969,13 @@ typeTerm depth ty@(Named _ args) = object ["tag" .= ("definition" :: Text),"symb
   ,"eliminations" .= [application (indexTerm depth i) | i <- map snd (snd (captureArguments (staticArguments args))) ++ [ix | Runtime _ ix <- args]]]
 typeTerm depth ty@(FamilyApplication _ args) = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
   ,"eliminations" .= [application (indexTerm depth i) | Runtime _ i <- familyArguments ty args]]
+typeTerm depth ty@SchemaValue{} = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty
+  ,"eliminations" .= [application (indexTerm depth i) | (_,i) <- snd (captureArguments [ty])]]
 typeTerm _ ty = object ["tag" .= ("definition" :: Text),"symbol" .= typeKey ty,"eliminations" .= ([] :: [Value])]
 
 familyArguments :: Type -> [Type] -> [Type]
-familyArguments (FamilyApplication (SelectedFamily value) _) args = value:args
+familyArguments (FamilyApplication (SelectedFamily value@(Runtime schema _)) _) args =
+  [Runtime domain index | (domain,index) <- snd (captureArguments [schema])] ++ value:args
 familyArguments _ args = args
 indexTerm :: Int -> IndexExpr -> Value
 indexTerm depth (IndexCaptured i) = indexTerm depth (IndexInput i)
@@ -1257,15 +1261,21 @@ ensureType inv stack (Callable a b) = mapM_ (ensureType inv stack) (b:a)
 ensureType inv stack (SelectedFamily (Runtime schema index)) = ensureType inv stack schema >> ensureIndex inv index
 ensureType _ _ SelectedFamily{} = abort Semantics "Stored family lacks its schema value"
 ensureType inv stack schema@(SchemaValue domains level) = do
-  unless (all closed domains && all firstOrder domains) (abort Representation "Stored schema needs independently bound first-order index domains")
-  mapM_ (ensureType inv stack) domains
-  let key = typeKey schema
+  let ([SchemaValue canonicalDomains _],captures) = captureArguments [schema]
+      captureTypes = map (materializeCaptures . fst) captures
+      contextualDomains = map materializeCaptures canonicalDomains
+      prefix = length captures
+      key = typeKey schema
+  unless (all closed canonicalDomains && all firstOrder domains && closed (Level level))
+    (abort Representation "Stored schema needs bound first-order index domains")
+  mapM_ (ensureType inv stack) (captureTypes ++ contextualDomains)
   forM_ [(key,"binding"),(key <> ".row","row"),(key <> ".member","member")] $ \(symbol,kind) -> do
     when (M.member symbol (declarations inv)) (abort Syntax "Native schema identity collides with a source declaration")
     modify' $ \st -> st {ready = M.insert symbol (object
       ["name" .= symbol,"displayName" .= (showType inv schema <> "." <> kind),"kind" .= ("native-schema-value" :: Text)
-      ,"nativeSchema" .= kind,"schemaBinding" .= key,"schemaDomains" .= map (asType 0) domains
-      ,"specializationArguments" .= [typeValue schema],"universe" .= levelValue level]) (ready st)}
+      ,"nativeSchema" .= kind,"schemaBinding" .= key,"schemaDomains" .= map (asType prefix) contextualDomains
+      ,"schemaCaptures" .= [asType i domain | (i,domain) <- zip [0..] captureTypes]
+      ,"specializationArguments" .= [typeValue (SchemaValue canonicalDomains level)],"universe" .= levelValue level]) (ready st)}
   where
     firstOrder Callable{} = False
     firstOrder Runtime{} = False
@@ -1533,7 +1543,19 @@ runtimeBindings env = [case binding of
   | (i,binding) <- zip [0..] env]
 
 specializeTree :: Inventory -> [Text] -> [Binding] -> Type -> Value -> Build Value
-specializeTree inv stack env out tree = case string (get "tag" tree) of
+specializeTree inv stack env out tree
+  | get "tag" tree == String "case",get "copattern" tree /= Bool True
+  ,Right i <- number (get "value" (get "argument" tree))
+  ,Right (Dynamic stored) <- at i env
+  ,Just (concrete,premises) <- resolveStoredFamily inv (reverse env) stored = do
+      ensureType inv stack concrete
+      rewritten <- specializeTree inv stack (take i env ++ [Dynamic concrete] ++ drop (i+1) env) out tree
+      pure (object ["tag" .= ("native-schema-case" :: Text)
+        ,"$occurrence" .= get "$occurrence" tree
+        ,"position" .= length (filter isDynamic (take i env))
+        ,"memberType" .= asType (length (filter isDynamic env)) concrete
+        ,"tree" .= rewritten,"reductionEvidence" .= object ["declarations" .= premises]])
+  | otherwise = case string (get "tag" tree) of
   "absurd" -> do
     let bs = array (get "binders" tree)
     unless (length bs == length env) (abort Syntax "Absurd leaf binder count mismatch")
@@ -1608,9 +1630,19 @@ specializeTree inv stack env out tree = case string (get "tag" tree) of
           fields <- liftEither (traverse (substitute (map reindex args) . replaceInputs bindings) fieldSchemas)
           arity <- liftEither (number (get "arity" b))
           unless (arity == length fields) (abort Syntax "Specialized case payload arity mismatch")
-          result <- specializeTree inv stack (map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env))
-            (reindex out) (get "tree" b)
-          pure (set "tree" result b)
+          let branchEnv = map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env)
+          constructorResult <- liftEither (substitute (map reindex args) (replaceInputs bindings (output sig)))
+          let (facts,premises) = branchIndexBindings inv (reverse branchEnv) position count constructorResult (reindex ty)
+              refine (Dynamic domain) = Dynamic (replaceKnownInputs facts domain)
+              refine binding = binding
+          result <- specializeTree inv stack (map refine branchEnv)
+            (replaceKnownInputs facts (reindex out)) (get "tree" b)
+          let priorEvidence = case get "reductionEvidence" result of
+                evidence@Object{} -> evidence
+                _ -> object []
+              allPremises = S.toAscList (S.fromList (premises ++ map string (array (get "declarations" priorEvidence))))
+          pure (set "tree" (if null premises then result else set "reductionEvidence"
+            (set "declarations" (toJSON allPremises) priorEvidence) result) b)
     cs <- forM (array (get "constructors" tree)) $ \b -> do
       let c = string (get "symbol" b)
       b' <- branch c (get "branch" b)
@@ -1723,8 +1755,9 @@ sourceTypeTerm inv = sourceTypeAt
       ,"symbol" .= builtin inv "suc","eliminations" .= [application (sourceIndex depth value)]]
     sourceIndex depth (IndexCall f types values) = object ["tag" .= ("definition" :: Text),"symbol" .= f
       ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ map (sourceIndex depth) values)]
-    sourceIndex depth (IndexProject f types receiver) = object ["tag" .= ("definition" :: Text),"symbol" .= f
-      ,"eliminations" .= map application (map (get "term" . sourceTypeAt depth) types ++ [sourceIndex depth receiver])]
+    sourceIndex depth (IndexProject f _ receiver) = let t = sourceIndex depth receiver in
+      set "eliminations" (toJSON (array (get "eliminations" t)
+        ++ [object ["tag" .= ("project" :: Text),"symbol" .= f]])) t
     sourceIndex depth (IndexApply f x) = let t = sourceIndex depth f in
       set "eliminations" (toJSON (array (get "eliminations" t) ++ [application (sourceIndex depth x)])) t
     sourceIndex depth index = indexTerm depth index
@@ -1754,7 +1787,77 @@ unifyIn inv bindings known expected actual = case unify known expected actual of
         Nothing -> ty
     normal t = t
 
+-- Recover fresh constructor indices from a branch's checked result fibre.
+-- Only constructor injectivity is used; opaque computations are never inverted.
+-- Runtime fields remain present and the target still checks all branch equations.
+branchIndexBindings :: Inventory -> [Binding] -> Int -> Int -> Type -> Type -> (M.Map Int IndexExpr,[Text])
+branchIndexBindings inv bindings start count expected actual =
+  let (pairs,premises) = types expected actual
+      grouped = M.fromListWith S.union [(i,S.singleton value) | (i,value) <- pairs]
+  in (M.mapMaybe (\values -> case S.toList values of [value] -> Just value; _ -> Nothing) grouped,premises)
+  where
+    dynamic = filter isDynamic bindings
+    depth = length dynamic
+    context = runtimeBindings dynamic
+    fresh i = i >= start && i < start+count
+    external domain value = all (not . fresh . (depth-1-))
+      (Reduction.freeVariables (get "term" (sourceTypeTerm inv depth (Runtime domain value))))
+    types (Named a xs) (Named b ys) | a == b && length xs == length ys =
+      let results = zipWith types xs ys in (concatMap fst results,concatMap snd results)
+    types (Runtime domain patternIndex) value@(Runtime actualDomain actualIndex) =
+      let (index,premises) = case Reduction.reduceHead inv (get "term" (sourceTypeTerm inv depth value)) of
+            Just (term,ps) | Right (Runtime _ ix) <- readIndex inv context actualDomain term -> (ix,ps)
+            _ -> (actualIndex,[])
+      in (indices domain patternIndex index,premises)
+    types _ _ = ([],[])
+    indices domain (IndexInput i) value | fresh i && external domain value = [(i,value)]
+    indices domain (IndexConstructor c _ xs) (IndexConstructor d _ ys) | c == d && length xs == length ys =
+      concat (zipWith (indices domain) xs ys)
+    indices domain (IndexSuccessor x) (IndexSuccessor y) = indices domain x y
+    indices _ _ _ = []
+
+-- A membership wrapper may be opened only when checked source reduction
+-- identifies its concrete family. Source spelling or payload shape is never
+-- sufficient evidence for this representation conversion.
+resolveStoredFamily :: Inventory -> [Binding] -> Type -> Maybe (Type,[Text])
+resolveStoredFamily inv env family@(FamilyApplication SelectedFamily{} _) = do
+  let dynamic = filter isDynamic env
+      depth = length dynamic
+      raw = runtimeBindings dynamic
+      normal ty = case ty of
+        Named s xs -> let (ys,ps) = many xs in (Named s ys,ps)
+        Callable ds out -> let (ys,ps) = many (out:ds) in case ys of
+          result:domains -> (Callable domains result,ps)
+          [] -> (ty,[])
+        SchemaValue ds l -> let (ys,ps) = many ds in (SchemaValue ys l,ps)
+        SelectedFamily value -> let (v,ps) = normal value in (SelectedFamily v,ps)
+        FamilyApplication f xs -> let (g,ps) = normal f; (ys,qs) = many xs in (FamilyApplication g ys,ps ++ qs)
+        Runtime domain ix ->
+          let (d,ps) = normal domain; value = Runtime d ix
+          in case Reduction.reduceHead inv (get "term" (sourceTypeTerm inv depth value)) of
+            Just (reduced,qs) | Right result <- readIndex inv raw d reduced -> (result,ps ++ qs)
+            _ -> (value,ps)
+        _ -> (ty,[])
+      many xs = let values = map normal xs in (map fst values,concatMap snd values)
+      normalized = [(normal ty) | Dynamic ty <- dynamic]
+      context = runtimeBindings [Dynamic ty | (ty,_) <- normalized]
+      original = get "term" (sourceTypeTerm inv depth family)
+  (reduced,premises) <- Reduction.reduceHead inv original
+  concrete@Named{} <- either (const Nothing) Just (readType inv context reduced)
+  pure (concrete,premises ++ concatMap snd normalized)
+resolveStoredFamily _ _ _ = Nothing
+
 expression :: Inventory -> [Text] -> [Binding] -> Maybe Type -> Value -> Build (Type,Value)
+expression inv stack env (Just stored) term
+  | get "tag" term == String "constructor"
+  ,Just (concrete,premises) <- resolveStoredFamily inv env stored = do
+      (_,value) <- expression inv stack env (Just concrete) term
+      ensureType inv stack stored
+      let depth = length (filter isDynamic env)
+      pure (stored,object ["tag" .= ("native-schema-inject" :: Text),"memberType" .= asType depth concrete
+        ,"$occurrence" .= get "$occurrence" term
+        ,"schemaType" .= asType depth stored,"value" .= value
+        ,"reductionEvidence" .= object ["declarations" .= premises]])
 expression inv stack env expected term = do
   result <- infer `catchError` \failure ->
     higherOrder inv stack env term `catchError` \closureFailure -> case Reduction.reduceHead inv term of
@@ -1812,6 +1915,9 @@ expression inv stack env expected term = do
               ,ix <- map snd (snd (captureArguments tyArgs)) ++ take runtimeParameters contextualIndices]
             resultTerm = set "symbol" (String (instanceKey s tyArgs)) $ set "eliminations" (toJSON (map application (captureValues ++ values))) term
         eliminate out resultTerm rest
+      "definition" | Just schema@SchemaValue{} <- expected
+        ,Just d <- M.lookup (string (get "symbol" term)) (declarations inv)
+        ,get "kind" d == String "record" -> schemaConstruction inv stack env schema d term
       "definition" -> do
         let s = string (get "symbol" term)
         d <- definition inv s
@@ -1874,7 +1980,10 @@ expression inv stack env expected term = do
           completed <- liftEither (completeKnown inv sig known')
           let concrete = substitute [M.findWithDefault (Parameter i) i completed | i <- [0..parameters sig-1]]
                 (replaceKnownInputs indices patternType)
-              index = concrete >>= \domain -> readIndex inv (runtimeBindings env) domain value
+              -- The actual domain has already passed checked comparison.
+              -- Reading against the unreduced declaration can lose an index
+              -- whose domain is definitionally equal through a projection.
+              index = concrete >>= \_ -> readIndex inv (runtimeBindings env) actual value
               recovered = recoverInputs indices patternType actual
               next = case index of
                 Right (Runtime _ ix) -> M.insert (offset+length actuals) ix recovered
@@ -1916,6 +2025,41 @@ expression inv stack env expected term = do
       eliminate out value' rest
     eliminate _ _ _ = abort Representation "Projection from unresolved type"
 
+-- Reify a named, nonrecursive record family as a collection of complete rows.
+-- The target checks that every free payload domain has a native extent; this
+-- stage retains the checked telescope and never invents a finite bound.
+schemaConstruction :: Inventory -> [Text] -> [Binding] -> Type -> Value -> Value -> Build (Type,Value)
+schemaConstruction inv stack env schema@(SchemaValue domains level) declaration source = do
+  let symbol = string (get "name" declaration)
+      depth = length (filter isDynamic env)
+      es = array (get "eliminations" source)
+  unless (nonRecursiveTemplate inv symbol) (abort Representation "Computed schema requires a nonrecursive record family")
+  (kinds,indices,universe) <- liftEither (familySignature inv declaration)
+  unless (length es >= length kinds && length es <= length kinds + length indices)
+    (abort Representation "Computed schema has an incomplete static or excess runtime telescope")
+  types <- liftEither (readStaticArguments inv (runtimeBindings env) kinds (take (length kinds) es))
+  values <- foldM (\prior (domain,e) -> do
+    contextual <- liftEither (substitute types (replaceInputs [ix | Runtime _ ix <- prior] domain))
+    value <- liftEither (app e >>= readIndex inv (runtimeBindings env) contextual)
+    pure (prior ++ [value])) [] (zip indices (drop (length kinds) es))
+  let remaining = drop (length values) indices
+      variables = [Runtime domain (IndexInput (depth+i)) | (i,domain) <- zip [0..] domains]
+      allValues = values ++ variables
+  actualDomains <- liftEither (traverse (substitute types . replaceInputs [ix | Runtime _ ix <- allValues]) remaining)
+  actualLevel <- liftEither (substituteLevel types universe)
+  unless (actualDomains == domains && actualLevel == level)
+    (abort Semantics "Computed schema does not match its stored family telescope")
+  let member = Named symbol (types ++ allValues)
+  ensureType inv stack schema
+  ensureType inv stack member
+  pure (schema,object ["tag" .= ("native-schema-build" :: Text)
+    ,"$occurrence" .= get "$occurrence" source
+    ,"schemaType" .= asType depth schema
+    ,"domains" .= [asType (depth+i) domain | (i,domain) <- zip [0..] domains]
+    ,"memberType" .= asType (depth+length domains) member
+    ,"sourceFamily" .= symbol])
+schemaConstruction _ _ _ _ _ _ = abort Semantics "Computed schema lacks a stored family type"
+
 -- Monomorphize a checked helper at concrete function arguments. Closures are
 -- compile-time terms; each free runtime value becomes an explicit input to the
 -- generated first-order calculation. Its identity excludes captured values.
@@ -1934,6 +2078,9 @@ higherOrder inv stack env term = do
   let closures = [v | (slot,v) <- slots, case slot of ValueSlot{} -> False; StaticSlot -> False; _ -> True]
   unless (not (null closures)) (abort Representation "No concrete function or aggregate argument")
   let free = S.toAscList (S.fromList (concatMap Reduction.freeVariables closures))
+  staticTypes <- liftEither (traverse (readType inv (runtimeBindings env))
+    [v | (StaticSlot,v) <- slots])
+  let lexicalTypes = [t | i <- free,Right (Static t) <- [at i env]]
   captures <- fmap concat $ forM free $ \i -> do
     binding <- liftEither (at i env)
     pure $ case binding of Dynamic t -> [(i,t)]; Static _ -> []
@@ -2004,7 +2151,10 @@ higherOrder inv stack env term = do
         $ set "higherOrderOrigin" (String source)
         $ set "closureIndexEquations" (toJSON nativeEquations)
         $ set "closureSpecialization" (object ["origin" .= source,"arguments" .= canonical
-            ,"captures" .= map typeValue (take (length captures) allTypes),"types" .= map typeValue (resultType:allTypes)]) d
+            ,"captures" .= map typeValue (take (length captures) allTypes)
+            -- Open extents used only inside a specialized body are still
+            -- inputs of its native calculation (e.g. schema construction).
+            ,"types" .= map typeValue (resultType:allTypes ++ staticTypes ++ lexicalTypes)]) d
       extended = inv {declarations = M.insert key generated (declarations inv)}
   ensureFunction extended stack key []
   modify' $ \st -> st {recorded = M.insert key (Instance source [] key) (recorded st)}

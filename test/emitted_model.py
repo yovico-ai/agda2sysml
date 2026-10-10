@@ -209,14 +209,14 @@ class Parser:
                 left = ('apply', left, arguments)
             elif self.take('->'):
                 quantifier = self.pop()
-                assert quantifier in ('forAll', 'exists'), ('unsupported native quantifier', quantifier)
+                assert quantifier in ('forAll', 'exists', 'collect'), ('unsupported native quantifier', quantifier)
                 self.expect('{')
                 self.expect('in')
                 binder = name(self.pop())
                 self.expect(';')
                 condition = self.expression()
                 self.expect('}')
-                left = ('forall' if quantifier == 'forAll' else 'exists', left, binder, condition)
+                left = ({'forAll': 'forall', 'exists': 'exists', 'collect': 'collect'}[quantifier], left, binder, condition)
             elif self.peek() in self.PRECEDENCE and self.PRECEDENCE[self.peek()] >= minimum:
                 op = self.pop()
                 right = ('reference', self.qualified()) if op in ('as', 'istype', 'hastype') else self.expression(self.PRECEDENCE[op] + 1)
@@ -316,6 +316,21 @@ class Model:
             else:
                 assert result is not None, ('missing native body', symbol)
                 self.calculations[symbol] = (inputs, result, assertions)
+
+        def check_reference(node):
+            if not isinstance(node, (tuple, list)):
+                return
+            if len(node) == 2 and node[0] == 'reference' and isinstance(node[1], str):
+                owner, separator, field = node[1].removeprefix('AgdaModel::').rpartition('::')
+                if separator and owner in self.calculations:
+                    inputs = self.calculations[owner][0]
+                    assert field == 'result' or any(name == field for name, *_ in inputs), \
+                        ('reference to undeclared calculation input', owner, field)
+            for child in node:
+                check_reference(child)
+        for _, body, assertions in self.calculations.values():
+            check_reference(body)
+            check_reference(assertions)
 
     def equal(self, left, right):
         """Data-value equality respects declared feature ordering (KerML 7.4.2).
@@ -445,6 +460,11 @@ class Model:
             values = ev(args[0])
             combine = all if op == 'forall' else any
             return combine(self.evaluate(args[2], {**env, args[1]: value}, check, depth) for value in sequence(values))
+        if op == 'collect':
+            values = ev(args[0])
+            assert not isinstance(values, Extent), 'test oracle cannot enumerate a symbolic infinite extent'
+            return tuple(element for value in sequence(values)
+                         for element in sequence(self.evaluate(args[2], {**env, args[1]: value}, check, depth)))
         if op == 'call':
             symbol, nodes = args
             values = [ev(node) for node in nodes]

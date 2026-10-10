@@ -258,6 +258,17 @@ actual equality evidence. Lists whose element type captures a runtime binding
 may use recursive constructor carriers rather than a single `items` field;
 use the emitted constructors and their capture parameters when inspecting them.
 
+`Relations.RelationRule` shows a family whose witness domain comes from an
+earlier field. Follow `emitRule` to see native collection expressions constructing
+an edge's constraint rows from the supplied state and witness extents. Each row
+retains a complete `EndpointConditions` record: both endpoint equations and the
+admission evidence. The binding and rows also retain their captured witness
+schema. `emit` preserves the order and repeated positions of the rule list.
+Follow `relation-complete` and `relation-sound` to inspect the recursive
+calculations converting complete relation evidence in both directions. Their
+behavior is independently checked with distinct evidence values and structured
+states. The callback execution limitation below also applies to these operations.
+
 Pilot 0.58.0 accepts these models but may leave callback invocations
 unevaluated, including forwarded bindings whose direct calculations evaluate
 successfully. Inspect their signatures, bodies and contracts interactively;

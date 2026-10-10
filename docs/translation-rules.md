@@ -951,6 +951,27 @@ indices. Extents are not ordered source lists and have no imposed finite-size
 constraint. Reordering rows preserves the binding's meaning. Substituting a
 different extent or changing an index or evidence payload does not.
 
+A stored family's index domains may select earlier fields of the containing
+record. Those values become explicit captures of the binding and its rows.
+Membership checks compare captures as well as indices and complete payloads;
+an empty extent still has to satisfy its capture contract.
+
+A named nonrecursive record family can also construct a stored binding.
+Native collection expressions enumerate supplied type/family extents and finite
+constructors, retain complete record values, and filter constructor index
+equations. Fixed indices recover corresponding constructor fields, including
+equality evidence. This rule does not invent finite bounds for natural numbers,
+enumerate recursive payloads or arbitrary callbacks, or replace evidence with
+Boolean flags. Available extents must cover every otherwise free payload domain.
+
+Conversion between a concrete record and a stored-family member requires
+checked definitional reduction identifying that record family. Constructor
+branch equations may resolve duplicated implicit indices, using constructor
+injectivity; computations are not assumed injective. A recursive unary list map
+can serve as a computed index only when its checked body recurses exactly on the
+tail and computes each output head solely from the corresponding input head and
+static bindings. The original recursive calculation remains in the output.
+
 Dependent callback signatures retain selections from those stored bindings.
 When a callback's result specializes another carrier at a callback-local index,
 that index becomes an explicit captured value of the specialized carrier.
