@@ -320,7 +320,7 @@ readType inv env t = case string (get "tag" t) of
           case Reduction.reduceHead inv t of
             Just (reduced,_) -> readType inv env reduced
             Nothing -> refuse Representation "Module carrier alias lacks a checked reducible equation"
-      Just d | get "kind" d == String "function" -> do
+      Just d | get "kind" d `elem` [String "function",String "primitive"] -> do
         declared <- field inv "type" d
         projection <- field inv "projection" d
         if get "proper" projection /= Null then readFunctionType d name es

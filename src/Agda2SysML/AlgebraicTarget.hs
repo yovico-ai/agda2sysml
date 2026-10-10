@@ -397,10 +397,7 @@ normalizeStep (Collect name typ xs body) = Collect name typ (normalize xs) (norm
 normalizeStep (Cast typ value) = Cast typ (normalize value)
 normalizeStep (Equal x y) = Equal (normalize x) (normalize y)
 normalizeStep (Numeric op x y) = case (op,normalize x,normalize y) of
-  ("+",NumberLiteral a,NumberLiteral b) -> NumberLiteral (a+b)
-  ("+",a,NumberLiteral 0) -> a
-  ("+",NumberLiteral 0,b) -> b
-  ("+",Numeric "+" a (NumberLiteral b),NumberLiteral c) -> Numeric "+" a (NumberLiteral (b+c))
+  ("+",a,b) -> naturalSum a b
   ("monus",Numeric "+" a (NumberLiteral b),NumberLiteral c) | b >= c -> normalizeStep (Numeric "+" a (NumberLiteral (b-c)))
   ("monus",NumberLiteral a,NumberLiteral b) -> NumberLiteral (max 0 (a-b))
   (_,a,b) -> Numeric op a b
@@ -422,6 +419,21 @@ normalizeStep (SequenceHead t xs) = case normalize xs of
   value -> SequenceHead t value
 normalizeStep (Conditional p x y) = Conditional (normalize p) (normalize x) (normalize y)
 normalizeStep e = e
+
+-- Natural addition is associative and constants commute with its operands.
+-- Preserve symbolic operand order and attach the constant to the first one:
+-- this also exposes a branch-local (predecessor n + 1) = n equation.
+-- Subtraction and residual calls remain indivisible operands.
+naturalSum :: Expression -> Expression -> Expression
+naturalSum x y = case terms of
+  [] -> NumberLiteral constant
+  first:rest -> foldl (Numeric "+")
+    (if constant == 0 then first else Numeric "+" first (NumberLiteral constant)) rest
+  where
+    (terms,constant) = collect (Numeric "+" x y)
+    collect (Numeric "+" a b) = let (as,m) = collect a; (bs,n) = collect b in (as ++ bs,m+n)
+    collect (NumberLiteral n) = ([],n)
+    collect value = ([value],0)
 
 -- Expansion uses independently checked helpers and certified finite normal
 -- forms. A recursive symbol unfolds once per path; residual calls stay opaque.
@@ -452,6 +464,7 @@ expandWith rewrite helpers = go S.empty . rewrite
     step seen (Sequence xs) = normalize (Sequence (map (go seen) xs))
     step seen (SequenceOp op xs) = normalize (SequenceOp op (go seen xs))
     step seen (SequenceHead t xs) = normalize (SequenceHead (mapCarrier (go seen) t) (go seen xs))
+    step seen (Numeric op x y) = normalize (rewrite (normalize (Numeric op (go seen x) (go seen y))))
     step seen (Equal x y) = case (go seen x,go seen y) of
       (Literal a,Literal b) -> Literal (a == b)
       (Enumeration a x',Enumeration b y') -> Literal (a == b && x' == y')

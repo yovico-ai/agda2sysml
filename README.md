@@ -26,6 +26,8 @@ browser review and the official SysML notebook tools.
 - Retain supported dependent indices, type parameters, indexed family
   parameters, concrete and symbolic static universe levels, and safe inductive
   recursive carriers. Checked recursive calculations preserve their inputs.
+  Natural-sum indices support vector concatenation, captured/runtime slot
+  injection, and shifting bounded spans with their complete order evidence.
 - Specialize supported concrete higher-order calls and perform checked
   definitional reduction at generation time.
 - Translate supported unary and multiargument callback inputs, including indexed and dependent
@@ -104,12 +106,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 276 native calculation functions out of 722 (38.2%)
-and 120 native equality statements, including 41 compiler-generated helpers.
-Ten functions have both representations: 386/722 function declarations (53.5%)
+The default self model has 283 native calculation functions out of 722 (39.2%)
+and 128 native equality statements, including 41 compiler-generated helpers.
+Ten functions have both representations: 401/722 function declarations (55.5%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 454 unresolved requirements. Source-only proof retention is
+There are still 449 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove

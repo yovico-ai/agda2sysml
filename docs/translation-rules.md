@@ -1047,6 +1047,24 @@ branches refine constructor fibres; a positive natural branch justifies the
 predecessor/successor equality only inside that branch. Inherited equations are
 rebased through subsequent splits. An absurd leaf is admitted only after the
 refined environment contains a carrier fibre with no possible constructor.
+Checked natural primitives also retain their value-argument telescope when
+used in dependent indices. Native helper expansion traverses arithmetic operands;
+addition flattens nested sums and combines constants while preserving the order
+of symbolic operands. A positive-branch predecessor/successor equation can then
+justify an index comparison without escaping that branch. Arbitrary arithmetic
+identities and injectivity of unknown calls are not inferred.
+
+This admits the unchanged `CapturedIndices.append`, `captureSlot`, and
+`runtimeSlot` calculations, their two lookup statement constraints, and
+`Derivations.shift-order` and `Trace.shift-preserves-bounds`. Complete vectors,
+ordinal values, spans and order evidence remain in the native result. The
+independent emitted-model checks cover unequal context sizes, repeated opaque
+payloads, large natural endpoints, and inconsistent indices and evidence.
+The same rules admit `RecursiveValues.left-bound` and `right-bound`, the
+`Trace.length-append` statement, and the five binary arithmetic/comparison laws
+in `NaturalValues`. These statements remain separate from their retained Agda
+proof sources.
+
 For ordinary sum carriers, a checked constructor branch also establishes its
 tag. When such a value indexes another carrier, incompatible constructor tags
 can establish an empty fibre. This fact is local to that scrutinee and branch;
