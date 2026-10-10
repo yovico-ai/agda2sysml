@@ -29,9 +29,10 @@ data Constructor = Constructor
 data Shape = ShapeData
   { shapeSymbol :: Text, isRecord :: Bool, variants :: [Constructor], indexTypes :: [Carrier]
   , sequenceElement :: Maybe Carrier, typeParameters :: [Int]
-  , familyParameters :: [(Int,Text)], relationParameter :: Maybe Int, recursivePeers :: [Text] } deriving (Eq, Show)
+  , familyParameters :: [(Int,Text)], relationParameter :: Maybe Int, recursivePeers :: [Text]
+  , schemaExtent :: Bool, storedSchema :: Maybe Text } deriving (Eq, Show)
 pattern Shape :: Text -> Bool -> [Constructor] -> [Carrier] -> Shape
-pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing []
+pattern Shape s r cs is <- ShapeData s r cs is _ _ _ _ _ _ _ where Shape s r cs is = ShapeData s r cs is Nothing [] [] Nothing [] False Nothing
 data Expression = Annotated D.Origin Expression
   | NInput Int
   | NArgument Int
@@ -211,7 +212,7 @@ indexExpression inv finite helpers shapes env expected t = do
     projections = projectionTable shapes
     canonical (Fibre family indices) = case M.lookup family shapes of
       Just sh | length indices == length (indexTypes sh) -> Fibre family [case domain of
-          Named owner | Just shape <- M.lookup owner shapes,Just _ <- sequenceElement shape ->
+          Named owner | Just shape <- M.lookup owner shapes,Just _ <- sequenceElement shape,not (schemaExtent shape) ->
             normalize (Project (expand helpers value) sequenceField)
           _ -> expand helpers value
         | (domain,value) <- zip (indexTypes sh) indices]
@@ -457,7 +458,7 @@ discover :: Inventory -> M.Map Text F.Domain -> (Shapes,M.Map Text Refusal)
 discover inv finite = go M.empty candidates
   where
     initialHelpers = finiteHelpers inv finite
-    candidates = M.filterWithKey (\s d -> get "nativeFamily" d /= Null || (S.member (s,"structure") (required inv)
+    candidates = M.filterWithKey (\s d -> get "nativeFamily" d /= Null || get "nativeSchema" d /= Null || (S.member (s,"structure") (required inv)
       && get "kind" d `elem` [String "record",String "datatype"]
       && not (get "kind" d == String "datatype" && S.member (s,"behavior") (required inv))
       && s /= builtin inv "bool" && s /= builtin inv "nat" && not (M.member s finite))) (declarations inv)
@@ -506,6 +507,19 @@ discover inv finite = go M.empty candidates
          else go (M.union accepted admitted) remaining
 
 shape :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes -> Value -> Either Refusal Shape
+shape inv finite helpers shapes d | get "nativeSchema" d /= Null = do
+  domains <- traverse (carrierIn inv finite helpers shapes []) (array (get "schemaDomains" d))
+  dataIndices domains
+  let symbol = string (get "name" d)
+      binding = string (get "schemaBinding" d)
+      row = binding <> ".row"
+      sh = case string (get "nativeSchema" d) of
+        "binding" -> (Shape symbol True [] []) {sequenceElement = Just (Named row),schemaExtent = True}
+        "row" -> Shape symbol True [Constructor (symbol <> ".row")
+          ([(indexField symbol i,t) | (i,t) <- zip [0..] domains] ++ [(familyValue symbol,AnyValue)]) []] []
+        _ -> (Shape symbol True [Constructor (symbol <> ".member") [(familyValue symbol,AnyValue)] []]
+          (Named binding:domains)) {storedSchema = Just binding}
+  pure (sh {typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d})
 shape inv finite helpers shapes d | get "nativeFamily" d /= Null = do
   slot <- integer (get "nativeFamily" d)
   domains <- traverse (carrierIn inv finite helpers shapes []) (array (get "familyDomains" d))
@@ -715,7 +729,7 @@ concatenationNormalForm :: Shapes -> Calculation -> Maybe Expression
 concatenationNormalForm shapes calc = case (inputs calc,result calc) of
   ([Named first,Named second],Named output) | first == second && second == output -> do
     sh <- M.lookup output shapes
-    element <- sequenceElement sh
+    element <- if schemaExtent sh then Nothing else sequenceElement sh
     let xs = Input 0; ys = Input 1
         items = Project xs sequenceField
         tailValue = Construct output [(sequenceField,SequenceOp "tail" items)]
@@ -823,7 +837,7 @@ functionWith inv finite helpers shapes signatures d = do
               Nothing -> mapCarrier (reduce equations) (Fibre family indices)
             canonical typ = typ
             canonicalIndex domain value = let expanded = reduce equations value in case domain of
-              Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh ->
+              Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) ->
                 normalize (Project expanded sequenceField)
               _ -> normalize expanded
             describe (Fibre s xs) = s <> "[" <> T.intercalate "," (map (renderWith id (T.pack . show)) xs) <> "]"
@@ -1118,7 +1132,7 @@ functionWith inv finite helpers shapes signatures d = do
           _ -> refuse Semantics "Inconsistent omitted index"
         bind table _ = Right table
         canonical domain value = let expanded = reduce equations (normalize value) in case domain of
-          Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh -> normalize (Project expanded sequenceField)
+          Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) -> normalize (Project expanded sequenceField)
           _ -> normalize expanded
     recover _ known _ = Right known
     argument equationsInScope env typ a = do
@@ -1318,7 +1332,7 @@ renderOperationDoc statement inv shapes label c = D.mark owner (if isStatement t
     input i = quote (label owner) <> "::" <> quote ("input" <> T.pack (show i))
     resultBody = renderParameterizedDoc label input owner calcBindings shapeBindings binding (body c)
     statementBody = case (statement,body c) of
-      (Just (Named s),Equal left right) | Just sh <- M.lookup s shapes,Just _ <- sequenceElement sh ->
+      (Just (Named s),Equal left right) | Just sh <- M.lookup s shapes,Just _ <- sequenceElement sh,not (schemaExtent sh) ->
         D.mark owner "statement-equality" (annotation (body c)) $
           "SequenceFunctions::equals(" <> expression (Project left sequenceField) <> ", "
             <> expression (Project right sequenceField) <> ")"
@@ -1533,7 +1547,7 @@ indexEquality :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> 
 indexEquality shapes label input binding domain value expected =
   let rendered = renderIndexIn shapes label input binding expected
   in case domain of
-    Named s | Just sh <- M.lookup s shapes, Just _ <- sequenceElement sh ->
+    Named s | Just sh <- M.lookup s shapes, Just _ <- sequenceElement sh, not (schemaExtent sh) ->
       "SequenceFunctions::equals(" <> value <> "." <> quote sequenceField <> ", (" <> rendered <> ")." <> quote sequenceField <> ")"
     _ -> "(" <> value <> " == " <> rendered <> ")"
 
@@ -1546,7 +1560,7 @@ renderIndexIn shapes label input binding = D.render . renderParameterizedDoc lab
 
 hasValidity :: Shape -> Bool
 hasValidity sh | Just _ <- sequenceElement sh = False
-hasValidity sh = not (null (familyParameters sh)) || not (null (typeParameters sh)) || not (isRecord sh) || any refined [t | c <- variants sh,(_,t) <- payload c]
+hasValidity sh = storedSchema sh /= Nothing || not (null (familyParameters sh)) || not (null (typeParameters sh)) || not (isRecord sh) || any refined [t | c <- variants sh,(_,t) <- payload c]
   where refined Natural = True
         refined Fibre{} = True
         refined _ = False
@@ -1569,8 +1583,9 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
       ++ ["    attribute " <> quote (familyName i) <> " : " <> quote (label (familyRow s)) <> " [0..*];" | (i,s) <- familyParameters sh]
     renderShape sh | Just element <- sequenceElement sh =
       ["  attribute def " <> quote (label (shapeSymbol sh)) <> " {"
-      ] ++ parameterFields sh ++ ["    attribute " <> quote sequenceField <> " : " <> renderCarrier label element <> " [0..*] ordered nonunique;"
-      ,"    assert constraint 'finite-sequence' { SequenceFunctions::size(" <> quote sequenceField <> ") < * }"]
+      ] ++ parameterFields sh ++ ["    attribute " <> quote sequenceField <> " : " <> renderCarrier label element
+        <> " [0..*]" <> (if schemaExtent sh then ";" else " ordered nonunique;")]
+      ++ ["    assert constraint 'finite-sequence' { SequenceFunctions::size(" <> quote sequenceField <> ") < * }" | not (schemaExtent sh)]
       ++ ["    assert constraint { " <> quote sequenceField <> "->forAll { in element; " <> condition <> " } }"
          | let value = case element of
                  Named{} -> "(element as " <> renderCarrier label element <> ")"
@@ -1689,6 +1704,16 @@ validity shapes label sh = case constraints of
         Just slot -> [fieldText (familyName slot) <> "->exists { in row; " <> T.intercalate " and "
           (["((row as " <> quote (label (familyRow (shapeSymbol sh))) <> ")." <> quote (label (indexField (familyRow (shapeSymbol sh)) i)) <> " == " <> fieldText (indexField (shapeSymbol sh) i) <> ")" | i <- [0..length (indexTypes sh)-1]]
           ++ ["((row as " <> quote (label (familyRow (shapeSymbol sh))) <> ")." <> quote (label (familyValue (familyRow (shapeSymbol sh)))) <> " == " <> fieldText (familyValue (shapeSymbol sh)) <> ")"]) <> " }"]
+      ++ case storedSchema sh of
+        Nothing -> []
+        Just binding ->
+          [fieldText (indexField (shapeSymbol sh) 0) <> "." <> quote sequenceField <> "->exists { in row; "
+            <> T.intercalate " and "
+              (["((row as " <> quote (label (binding <> ".row")) <> ")." <> quote (label (indexField (binding <> ".row") i))
+                <> " == " <> fieldText (indexField (shapeSymbol sh) (i+1)) <> ")" | i <- [0..length (indexTypes sh)-2]]
+              ++ ["((row as " <> quote (label (binding <> ".row")) <> ")." <> quote (label (familyValue (binding <> ".row")))
+                <> " == " <> fieldText (familyValue (shapeSymbol sh)) <> ")"])
+            <> " }"]
 
 -- All symbols used by the renderer, including generated domain-specific
 -- helpers, participate in the common name-collision check.
@@ -1781,10 +1806,11 @@ carrierReport label shapes = toJSON [object
     ,"target" .= (target (shapeSymbol sh) <> "::" <> quote (parameterName i))] | i <- typeParameters sh]
   ,"familyParameters" .= [object ["position" .= i,"rowType" .= target (familyRow s),"target" .= (target (shapeSymbol sh) <> "::" <> quote (familyName i))] | (i,s) <- familyParameters sh]
   ,"relationParameter" .= relationParameter sh
-  ,"kind" .= (case sequenceElement sh of Just _ -> "sequence"; Nothing -> if isRecord sh then "record" else "sum" :: Text)
+  ,"kind" .= (if schemaExtent sh then "stored-schema" else case sequenceElement sh of Just _ -> "sequence"; Nothing -> if isRecord sh then "record" else "sum" :: Text)
+  ,"storedSchema" .= fmap target (storedSchema sh)
   ,"sequence" .= (case sequenceElement sh of
-      Just element -> object ["elementType" .= renderCarrier label element,"ordered" .= True,"unique" .= False
-        ,"itemsTarget" .= (target (shapeSymbol sh) <> "::" <> quote sequenceField),"finite" .= True]
+      Just element -> object ["elementType" .= renderCarrier label element,"ordered" .= not (schemaExtent sh),"unique" .= schemaExtent sh
+        ,"itemsTarget" .= (target (shapeSymbol sh) <> "::" <> quote sequenceField),"finite" .= not (schemaExtent sh)]
       Nothing -> Null)
   ,"admissibility" .= (if hasValidity sh then String (target (validitySymbol (shapeSymbol sh))) else Null)
   ,"indices" .= [object ["position" .= i,"type" .= renderCarrier label t

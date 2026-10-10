@@ -26,6 +26,7 @@ from equality_statements import verify_equality_statements
 from symbolic_levels import verify_symbolic_levels
 from dependent_callbacks import verify_dependent_callbacks
 from multi_callbacks import verify_multi_callbacks
+from schema_records import verify_schema_records
 
 
 def check(condition, message):
@@ -312,6 +313,13 @@ models:
     level_evidence = verify_symbolic_levels(self_output)
     dependent_callback_evidence = verify_dependent_callbacks(self_output)
     multi_callback_evidence = verify_multi_callbacks(self_output)
+    schema_record_evidence = verify_schema_records(self_output)
+    check(schema_record_evidence['operations'] == 8
+          and schema_record_evidence['comparisons'] >= 214
+          and schema_record_evidence['invalidBindingsRejected'] >= 16
+          and schema_record_evidence['bodyMutationsDetected'] == 16
+          and schema_record_evidence['proofCallbackChecks'] == 24,
+          'stored schema conversions lack complete values, binding refusals, or mutation checks')
     check(multi_callback_evidence['operations'] == 7
           and multi_callback_evidence['comparisons'] >= 230
           and multi_callback_evidence['invalidBindingsRejected'] >= 11
