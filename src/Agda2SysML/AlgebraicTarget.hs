@@ -13,7 +13,7 @@ import Agda2SysML.Inventory hiding (field)
 import Agda2SysML.Diagnostic (Refusal, Category(..), refuse, refusal, context, field)
 import qualified Agda2SysML.FiniteTarget as F
 import qualified Agda2SysML.Specialize as Specialize
-import Control.Monad (unless, forM, foldM, (>=>))
+import Control.Monad (unless, forM, forM_, foldM, (>=>))
 import Data.Graph (SCC(..), stronglyConnComp)
 import Data.Aeson
 import qualified Data.Map.Strict as M
@@ -295,18 +295,29 @@ indexExpression inv finite helpers shapes env expected t = do
                 _ -> refuse Representation "Index constructor has no admitted domain"
         "definition" -> case M.lookup (string (get "symbol" term)) helpers of
           Just helper -> do
-            let (apps,rest) = splitAt (length (inputs helper)) es
-            unless (length apps == length (inputs helper)) (refuse Syntax "Computed index helper arity mismatch")
-            args <- foldM (\prior (domain,arg) -> do
-              value <- applicationValue arg >>= infer
-              unless (canonical (fst value) == canonical (mapCarrier (instantiate (map snd prior)) domain))
+            def <- maybe (refuse Syntax "Missing computed index declaration") Right
+              (M.lookup (calculationSymbol helper) (declarations inv))
+            p <- field inv "projection" def
+            dropped <- if p == Null || get "nativeFullArguments" term == Bool True then Right 0
+              else subtract 1 <$> integer (get "index" p)
+            unless (dropped >= 0 && dropped <= length (inputs helper))
+              (refuse Syntax "Invalid computed index omitted prefix")
+            let supplied = drop dropped (inputs helper)
+                (apps,rest) = splitAt (length supplied) es
+            unless (length apps == length supplied) (refuse Syntax "Computed index helper arity mismatch")
+            actuals <- traverse (\arg -> applicationValue arg >>= infer) apps
+            known <- foldM (recoverCarrierInputs shapes canonicalIndex) M.empty (zip supplied (map fst actuals))
+            prefix <- traverse (\i -> maybe (refuse Representation "Cannot recover omitted computed index") Right
+              (M.lookup i known)) [0..dropped-1]
+            let args = prefix ++ map snd actuals
+            forM_ (zip supplied actuals) $ \(domain,value) ->
+              unless (canonical (fst value) == canonical (mapCarrier (instantiate args) domain))
                 (refuse Semantics "Computed index helper argument domain mismatch")
-              pure (prior ++ [value])) [] (zip (inputs helper) apps)
             let bindings = case M.lookup (calculationSymbol helper) (declarations inv) of
                   Just def -> map parameterName (Specialize.nativeParameters def)
                     ++ map (familyName . fst) (Specialize.nativeFamilies def)
                   Nothing -> []
-            eliminate (mapCarrier (instantiate (map snd args)) (result helper),BoundCall (calculationSymbol helper) bindings (map snd args)) rest
+            eliminate (mapCarrier (instantiate args) (result helper),BoundCall (calculationSymbol helper) bindings args) rest
           Nothing -> case es of
             arg:rest -> do
               receiver <- applicationValue arg >>= infer
@@ -333,6 +344,25 @@ indexExpression inv finite helpers shapes env expected t = do
       unless (get "proper" p == String owner && get "index" p == Number 1)
         (refuse Syntax "Index expression uses invalid projection metadata")
       pure (projectedCarrier shapes actual value typ,Project value f)
+    canonicalIndex domain value = case domain of
+        Named owner | Just sh <- M.lookup owner shapes,Just _ <- sequenceElement sh,not (schemaExtent sh) ->
+          normalize (Project (expand helpers value) sequenceField)
+        _ -> normalize (expand helpers value)
+
+-- Recover only direct signature-local index variables from checked argument
+-- fibres. Repeated occurrences must agree; arbitrary computations are not inverted.
+recoverCarrierInputs :: Shapes -> (Carrier -> Expression -> Expression)
+  -> M.Map Int Expression -> (Carrier,Carrier) -> Either Refusal (M.Map Int Expression)
+recoverCarrierInputs shapes canonical known (Fibre s xs,Fibre t ys)
+  | s == t && length xs == length ys,Just sh <- M.lookup s shapes =
+    foldM bind known (zip3 (indexTypes sh) xs ys)
+    where
+      bind table (domain,Input i,y) = case M.lookup i table of
+        Nothing -> Right (M.insert i y table)
+        Just x | canonical domain x == canonical domain y -> Right table
+        _ -> refuse Semantics "Inconsistent omitted index"
+      bind table _ = Right table
+recoverCarrierInputs _ _ known _ = Right known
 
 finiteIndex :: M.Map Text F.Domain -> Carrier -> Bool
 finiteIndex _ Boolean = True
@@ -1398,18 +1428,11 @@ functionWith inv finite helpers shapes signatures d = do
             mapM_ (\(expected,value) -> () <$ requireType equationsInScope (mapCarrier (instantiate args) expected) value) supplied
             eliminate (mapCarrier (instantiate args) out,Call callee args) rest
         _ -> refuse Syntax "Term requires a rule beyond algebraic construction and projection"
-    recover equations known (Fibre s xs,Fibre t ys) | s == t && length xs == length ys
-      ,Just sh <- M.lookup s shapes = foldM bind known (zip3 (indexTypes sh) xs ys)
+    recover equations = recoverCarrierInputs shapes canonical
       where
-        bind table (domain,Input i,y) = case M.lookup i table of
-          Nothing -> Right (M.insert i y table)
-          Just x | canonical domain x == canonical domain y -> Right table
-          _ -> refuse Semantics "Inconsistent omitted index"
-        bind table _ = Right table
         canonical domain value = let expanded = reduce equations (normalize value) in case domain of
           Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) -> normalize (Project expanded sequenceField)
           _ -> normalize expanded
-    recover _ known _ = Right known
     argument equationsInScope env typ a = do
       unless (get "tag" a == String "apply") (refuse Syntax "Constructor argument is not an application")
       expressionExpected (Just typ) equationsInScope env (get "value" (get "argument" a)) >>= requireType equationsInScope typ

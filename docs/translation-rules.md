@@ -1230,3 +1230,39 @@ its late `Result` type, and `OpenParameters.Transport.Container`, its constructo
 returns the complete tag and dependent payload, and reject inconsistent index
 bindings and results outside the supplied extent. Container checks preserve
 the runtime binding, classifier, equality witness, and payload.
+
+### Omitted arguments in computed indices
+
+Agda may omit a checked prefix from a projection-like function call. When
+such a call occurs inside a dependent type or equality statement, the generator
+recovers static parameters and direct runtime indices from the supplied
+arguments' declared types. It then rechecks the complete application, including
+dependent input domains. Repeated occurrences must agree; an uninferable
+parameter, conflicting indices, a partial application, or an extra value
+argument is refused. The rule does not invert arbitrary index computations.
+
+Caller indices remain separate from signature-local input positions. Nested
+calls preserve that distinction. Specialized calls also carry the runtime
+captures of their static arguments, in the same order as the specialized
+helper's inputs. A reconstructed complete call is explicitly distinguished
+from Agda's shortened source application during target checking.
+
+The resulting equality statements are ordinary SysML constraints over complete
+values, bindings, and evidence. Their source proofs remain retained separately;
+translating a statement is not translating its proof implementation. Compiler
+checks cover recovery and refusal boundaries, while emitted-model checks execute
+the constraints and detect mutations of the operations they reference. Pilot
+validation and execution are deferred for this stage.
+
+On the unchanged self specification, this admits 17 additional statement
+constraints and `OpenParameters.Transport.resolve-parameter-preserves` as a
+calculation. The statements cover stored-family conversion, preservation of
+append/fallback/resolution, recursive tag and payload preservation, and inverse
+transport. Native declaration coverage rises from 499/722 (69.1%) to 517/722
+(71.6%), with no calculation or statement losses. The total is 341 calculation
+functions and 186 statement functions, with ten declarations in both sets.
+
+Two candidates remain textual: `SourceAlignment.Direct.unused-binder-preserves-resolution`
+and `UniverseLevels.resolution-exact`. Their types contain partially applied
+named callback references inside computed indices. Recovering an omitted checked
+prefix does not provide a representation for those partial applications.

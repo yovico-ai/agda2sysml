@@ -357,10 +357,12 @@ models:
           and dependent_schema_evidence['structuredStates']
           and dependent_schema_evidence['completeEvidencePreserved'],
           'dependent schema construction and relation conversions lack complete behavior or refusal checks')
-    check(schema_record_evidence['operations'] == 12
-          and schema_record_evidence['comparisons'] >= 262
-          and schema_record_evidence['invalidBindingsRejected'] >= 24
-          and schema_record_evidence['bodyMutationsDetected'] == 32
+    check(schema_record_evidence['operations'] == 13
+          and schema_record_evidence['statements'] == 10
+          and schema_record_evidence['statementMutationsDetected'] == 20
+          and schema_record_evidence['comparisons'] >= 342
+          and schema_record_evidence['invalidBindingsRejected'] >= 62
+          and schema_record_evidence['bodyMutationsDetected'] == 34
           and schema_record_evidence['proofCallbackChecks'] == 24,
           'stored schema conversions lack complete values, binding refusals, or mutation checks')
     check(multi_callback_evidence['operations'] == 7
@@ -378,8 +380,9 @@ models:
           and level_evidence['invalidCasesRejected'] >= 30
           and level_evidence['nativeStatementsExercised'] == 4 and level_evidence['bodyMutationDetected'],
           'symbolic universe operations lack complete behavior and refusal checks')
-    check(statement_evidence['authoredStatements'] == 28
-          and statement_evidence['executedStatements'] == 28
+    check(statement_evidence['expectedStatements'] == 33
+          and statement_evidence['executedStatements'] == 33
+          and statement_evidence['computedIndexMutationsDetected'] == 5
           and statement_evidence['conclusionMutationDetected']
           and statement_evidence['premiseMutationDetected']
           and statement_evidence['proofSourcesRetained'],

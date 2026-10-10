@@ -117,12 +117,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 340 native calculation functions out of 722 (47.1%)
-and 169 native equality statements, including 46 compiler-generated helpers.
-Ten functions have both representations: 499/722 function declarations (69.1%)
+The default self model has 341 native calculation functions out of 722 (47.2%)
+and 186 native equality statements, including 50 compiler-generated helpers.
+Ten functions have both representations: 517/722 function declarations (71.6%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 413 unresolved requirements. Source-only proof retention is
+There are still 412 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove
