@@ -18,8 +18,11 @@ EXPECTED = {
     'Derivations.Trace.marks-preserve-bytes', 'Derivations.Trace.measured-bytes',
     'Diagnostics.Accounting.After.no-silent-omissions',
     'Diagnostics.Accounting.Before.no-silent-omissions', 'NaturalIndices.length-index',
+    'DependentRecords.ProjectedInput.Input.F.decode-encode',
+    'DependentRecords.ProjectedInput.Input.F.encode-decode', 'StructuredIndices.transport-inverse',
     'NaturalValues.source-roundtrip', 'NaturalValues.successor-preserves',
     'NaturalValues.target-roundtrip', 'RecursiveValues.count-preserves',
+    'RecursiveValues.tag-preserves', 'RecursiveValues.payload-preserves',
     'RecursiveValues.forest-roundtrip', 'RecursiveValues.native-forest-roundtrip',
     'RecursiveValues.source-roundtrip', 'RecursiveValues.target-roundtrip',
     'Resolution.missing-exactly-empty', 'Resolution.resolved-exactly-one',
@@ -153,6 +156,8 @@ calc def statementIdentity { in x : Base::Anything [1]; return result : Base::An
     for tree in trees:
         law(source_law, [*binding, tree])
         law('RecursiveValues.count-preserves', [*binding, tree])
+        law('RecursiveValues.tag-preserves', [*binding, tree])
+        law('RecursiveValues.payload-preserves', [*binding, tree])
         native = call(operation('RecursiveValues.encode'), tree)
         law('RecursiveValues.target-roundtrip', [*binding, native])
     for forest in forests:
@@ -161,6 +166,83 @@ calc def statementIdentity { in x : Base::Anything [1]; return result : Base::An
         law('RecursiveValues.native-forest-roundtrip', [*binding, native])
     # Extents are unordered bindings, not source-level constructor payloads.
     law(source_law, [(True, False), opaque[::-1], trees[0]])
+    # A valid but changed decoded tree must falsify each new projection law.
+    decode = operation('RecursiveValues.decode')
+    saved = model.calculations[decode]
+    for name, wrong in [('RecursiveValues.tag-preserves', trees[3]),
+                        ('RecursiveValues.payload-preserves', trees[1])]:
+        model.calculations[decode] = (saved[0], ('literal', wrong), saved[2])
+        try:
+            refuse(lambda: law(name, [*binding, trees[0]]))
+        finally:
+            model.calculations[decode] = saved
+    for name in ('RecursiveValues.tag-preserves', 'RecursiveValues.payload-preserves'):
+        refuse(lambda: law(name, [(False,), opaque[:1], trees[-1]]))
+
+    # The static family argument captures a runtime schema. The complete
+    # binding and index must reach every nested helper call in the statement.
+    captured_mutations = 0
+    extent = (0, 7, 10**40)
+    identity = CalculationValue('statementIdentity')
+    def field(typ, suffix):
+        matches = [f for f, _, _, _ in model.carriers[typ][1] if f.endswith(suffix)]
+        assert len(matches) == 1, (typ, suffix, matches)
+        return matches[0]
+    def captured_record(typ, fields):
+        return Record(typ, tuple((f, extent if f.startswith('typeArgument') else fields[f])
+                                for f, _, _, _ in model.carriers[typ][1]))
+    for name in ('DependentRecords.ProjectedInput.Input.F.decode-encode',
+                 'StructuredIndices.transport-inverse'):
+        signature = inputs(name)
+        schema_type = signature[5][1]
+        member_type = signature[-1][1]
+        row_type = next(t for f, t, _, _ in model.carriers[schema_type][1] if f == 'items')
+        rows = tuple(captured_record(row_type, {field(row_type, '.index0'): i,
+                     field(row_type, '.value'): value}) for i in extent for value in opaque)
+        schema = captured_record(schema_type, {'items': rows})
+        other_schema = captured_record(schema_type, {'items': rows[:-1]})
+        def member(i, value):
+            return captured_record(member_type, {field(member_type, '.index0'): schema,
+                field(member_type, '.index1'): i, field(member_type, '.value'): value})
+        symbol = target_name(translated[name]['target'])
+        helper = model.calculations[symbol][1][1][1]
+        if name.endswith('decode-encode'):
+            inverse = 'DependentRecords.ProjectedInput.Input.F.encode-decode'
+            encode_helper = model.calculations[target_name(translated[inverse]['target'])][1][1][1]
+            def encoded(i, value):
+                return model.invoke(encode_helper, [extent, schema, i, member(i, value)])
+            for i, value in itertools.product(extent, opaque):
+                law(name, [extent, extent, extent, identity, identity, schema, i, member(i, value)])
+                law(inverse, [extent, extent, extent, identity, identity, schema, i, encoded(i, value)])
+            trials = [(name, helper, member(0, opaque[1]), member(0, opaque[0])),
+                      (inverse, encode_helper, encoded(0, opaque[1]), encoded(0, opaque[0]))]
+            for statement, changed_helper, wrong, argument in trials:
+                saved = model.calculations[changed_helper]
+                model.calculations[changed_helper] = (saved[0], ('literal', wrong), saved[2])
+                try:
+                    refuse(lambda: law(statement, [extent, extent, extent, identity, identity, schema, 0, argument]))
+                    captured_mutations += 1
+                finally:
+                    model.calculations[changed_helper] = saved
+            refuse(lambda: law(name, [extent, extent, extent, identity, identity, other_schema, 0, member(0, opaque[0])]))
+            refuse(lambda: law(inverse, [extent, extent, extent, identity, identity, schema, 7, encoded(0, opaque[0])]))
+        else:
+            witness_type = signature[-2][1]
+            refl = constructor(witness_type, '.refl')
+            for i, value in itertools.product(extent, opaque):
+                witness = model.invoke(refl, [extent, i])
+                law(name, [extent, extent, extent, identity, identity, schema, i, i, witness, member(i, value)])
+            witness = model.invoke(refl, [extent, 0])
+            args = [extent, extent, extent, identity, identity, schema, 0, 0, witness, member(0, opaque[0])]
+            saved = model.calculations[helper]
+            model.calculations[helper] = (saved[0], ('literal', member(0, opaque[1])), saved[2])
+            try:
+                refuse(lambda: law(name, args))
+                captured_mutations += 1
+            finally:
+                model.calculations[helper] = saved
+            refuse(lambda: law(name, args[:7] + [7] + args[8:]))
+            refuse(lambda: law(name, args[:5] + [other_schema] + args[6:]))
 
     vector_law = 'NaturalIndices.length-index'
     vector_type = inputs(vector_law)[-1][1]
@@ -287,9 +369,10 @@ calc def statementIdentity { in x : Base::Anything [1]; return result : Base::An
     model.calculations[symbol] = (saved[0], ('literal', False), saved[2])
     refuse(lambda: law('NaturalValues.source-roundtrip', [7]))
     model.calculations[symbol] = saved
-    return {'authoredStatements': len(EXPECTED), 'executedStatements': len(exercised),
+    return {'expectedStatements': len(EXPECTED), 'executedStatements': len(exercised),
             'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'conclusionMutationDetected': True, 'premiseMutationDetected': premise_mutation,
+            'computedIndexMutationsDetected': 2 + captured_mutations,
             'proofSourcesRetained': True}
 
 

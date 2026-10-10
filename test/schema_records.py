@@ -16,7 +16,8 @@ def verify_schema_records(output):
              'FamilyRelations.Transport.encodeAt', 'FamilyRelations.Transport.decodeAt',
              'FamilyRelations.Transport.select', 'FamilyRelations.Transport.reindex',
              'OpenParameters.Transport.pack', 'OpenParameters.Transport.Container.contents',
-             'OpenParameters.Transport.Container.typeArgument', 'OpenParameters.Transport.Container.sameParameter')
+             'OpenParameters.Transport.Container.typeArgument', 'OpenParameters.Transport.Container.sameParameter',
+             'OpenParameters.Transport.resolve-parameter-preserves')
     roots = {}
     for source in names:
         rows = [o for o in report['obligations'] if o['symbol'].startswith('Agda2SysML.' + source + '#')
@@ -99,6 +100,30 @@ def verify_schema_records(output):
         return model.invoke(symbol, [*[bindings[f] for f, _, _, _ in model.calculations[symbol][0]
                                       if f.startswith(('typeArgument', 'familyArgument'))], *values])
 
+    statement_names = (*( 'OpenParameters.Transport.' + name for name in
+                         ('payload-roundtrip', 'append-preserves', 'orElse-preserves', 'resolve-preserves')), *(
+        'FamilyRelations.Transport.' + name for name in (
+            'index-preserves', 'payload-roundtrip-at', 'reindex-payload-preserves',
+            'selection-preserves', 'source-roundtrip-at', 'wrapping-preserves')))
+    statements = {name: target_name(next(r['target'] for r in report['nativeStatements']
+                  if r['symbol'].startswith('Agda2SysML.' + name + '#') and r['status'] == 'translated'))
+                  for name in statement_names}
+    exercised = set()
+    statement_mutations = 0
+    def law(name, *values):
+        assert call(statements[name], *values) is True, ('false stored-schema law', name)
+        exercised.add(name)
+
+    def mutate_law(name, arguments, helper, wrong):
+        nonlocal statement_mutations
+        saved = model.calculations[helper]
+        model.calculations[helper] = (saved[0], ('literal', wrong), saved[2])
+        try:
+            refuse(lambda: law(name, *arguments))
+            statement_mutations += 1
+        finally:
+            model.calculations[helper] = saved
+
     def ctor(typ):
         matches = [target_name(c['target']) for sh in report['algebraicCarriers']
                    if target_name(sh['target']) == typ for c in sh['constructors']]
@@ -106,7 +131,8 @@ def verify_schema_records(output):
         return matches[0]
 
     encode, decode, encode_list, decode_list = [roots[source] for source in names[:4]]
-    pack, contents, classifier_of, evidence_of = [roots[source] for source in names[8:]]
+    pack, contents, classifier_of, evidence_of = [roots[source] for source in names[8:12]]
+    resolve_parameter = roots[names[12]]
     container_type = model.results[pack]
     binding_type = runtime(encode)[0][1]
     value_type = model.results[encode]
@@ -211,15 +237,56 @@ def verify_schema_records(output):
             for item in reversed(items):
                 result = call(cons, binding, item, result)
             return result
+        def variant(typ, suffix, *values):
+            symbol = next(target_name(c['target']) for sh in report['algebraicCarriers']
+                          if target_name(sh['target']) == typ for c in sh['constructors']
+                          if c['symbol'].split('#', 1)[0].endswith(suffix))
+            return call(symbol, *values)
+        def right_helper(name):
+            body = model.calculations[statements['OpenParameters.Transport.' + name]][1]
+            assert body[0] == '==' and body[2][0] == 'call', body
+            return body[2][1]
+        lists = [record(source_list, {'items': tuple(sources[i] for i in ordinals)})
+                 for ordinals in ((), (0,), (0, 0), (2, 0, 1))]
+        for xs, ys in itertools.product(lists, repeat=2):
+            law('OpenParameters.Transport.append-preserves', binding, xs, ys)
+        append_native = right_helper('append-preserves')
+        mutate_law('OpenParameters.Transport.append-preserves', (binding, lists[1], lists[1]),
+                   append_native, value_listing(values[1:2]))
+        or_else_native = right_helper('orElse-preserves')
+        source_maybe = runtime(statements['OpenParameters.Transport.orElse-preserves'])[1][1]
+        choices = [variant(source_maybe, '.nothing'),
+                   *(variant(source_maybe, '.just', source) for source in sources)]
+        for first, fallback in itertools.product(choices, repeat=2):
+            law('OpenParameters.Transport.orElse-preserves', binding, first, fallback)
+        mutate_law('OpenParameters.Transport.orElse-preserves', (binding, choices[1], choices[2]),
+                   or_else_native, variant(model.results[or_else_native], '.just', binding, values[1]))
+        resolve_native = right_helper('resolve-preserves')
+        mutate_law('OpenParameters.Transport.resolve-preserves', (binding, lists[1]), resolve_native,
+                   variant(model.results[resolve_native], '.resolved', binding, values[1]))
+        outside = record(source_list, {'items': (natives[0],)})
+        refuse(lambda: law('OpenParameters.Transport.append-preserves', binding, outside, lists[0]))
+        refuse(lambda: law('OpenParameters.Transport.resolve-preserves', binding, outside))
+        saved = model.calculations[resolve_parameter]
+        model.calculations[resolve_parameter] = (saved[0], ('literal', approximate(1-classifier)), saved[2])
+        try:
+            refuse(lambda: call(resolve_parameter, binding, lists[1]))
+            mutations += 1
+        finally:
+            model.calculations[resolve_parameter] = saved
         for source, value in zip(sources, values):
             expect(call(encode, binding, source), value)
             expect(call(decode, binding, value), source)
+            law('OpenParameters.Transport.payload-roundtrip', binding, value)
+        mutate_law('OpenParameters.Transport.payload-roundtrip', (binding, values[0]), encode, values[1])
         for size in range(4):
             for ordinals in itertools.product(range(3), repeat=size):
                 xs = record(source_list, {'items': tuple(sources[i] for i in ordinals)})
                 ys = value_listing([values[i] for i in ordinals])
                 expect(call(encode_list, binding, xs), ys)
                 expect(call(decode_list, binding, ys), xs)
+                law('OpenParameters.Transport.resolve-preserves', binding, xs)
+                expect(call(resolve_parameter, binding, xs), approximate(classifier))
         # Every supplied proof callback is executable, with complete evidence.
         for source, native, value in zip(sources, natives, values):
             for name, args in [('source-roundtrip', [source]),
@@ -323,6 +390,10 @@ def verify_schema_records(output):
             expect(call(decode_at, binding, c, values[c, i]), source_members[c, i])
             expect(call(select, binding, c, values[c, i]), native)
             expect(call(reindex, binding, c, c, equalities[c], values[c, i]), values[c, i])
+            for name in ('index-preserves', 'selection-preserves', 'source-roundtrip-at', 'wrapping-preserves'):
+                law('FamilyRelations.Transport.' + name, binding, c, source_members[c, i])
+            law('FamilyRelations.Transport.payload-roundtrip-at', binding, c, values[c, i])
+            law('FamilyRelations.Transport.reindex-payload-preserves', binding, c, c, equalities[c], values[c, i])
             for name, args in [('source-roundtrip', [c, source_members[c, i]]),
                                ('payload-roundtrip', [c, native, members[c, i]])]:
                 bound = model.evaluate(('project', ('literal', binding), slots[name][0]), {})
@@ -330,6 +401,19 @@ def verify_schema_records(output):
                 model.boundary(slots[name][1].result, 1, 1, result, 0)
                 callback_checks += 1
     for c in (0, 1):
+        for name in ('index-preserves', 'selection-preserves', 'source-roundtrip-at', 'wrapping-preserves'):
+            refuse(lambda: law('FamilyRelations.Transport.' + name, binding, c, source_members[1-c, 0]))
+        refuse(lambda: law('FamilyRelations.Transport.payload-roundtrip-at', binding, c, values[1-c, 0]))
+        refuse(lambda: law('FamilyRelations.Transport.reindex-payload-preserves', binding, c, 1-c,
+                           equalities[c], values[c, 0]))
+        for name, arguments, helper, wrong in [
+                ('index-preserves', (binding, c, source_members[c, 0]), encode_at, values[1-c, 0]),
+                ('selection-preserves', (binding, c, source_members[c, 0]), encode_at, values[c, 1]),
+                ('wrapping-preserves', (binding, c, source_members[c, 0]), encode_at, values[c, 1]),
+                ('source-roundtrip-at', (binding, c, source_members[c, 0]), decode_at, source_members[c, 1]),
+                ('payload-roundtrip-at', (binding, c, values[c, 0]), encode_at, values[c, 1]),
+                ('reindex-payload-preserves', (binding, c, c, equalities[c], values[c, 0]), reindex, values[c, 1])]:
+            mutate_law('FamilyRelations.Transport.' + name, arguments, helper, wrong)
         refuse(lambda: call(encode_at, binding, c, source_members[1-c, 0]))
         refuse(lambda: call(decode_at, binding, c, values[1-c, 0]))
         refuse(lambda: call(ctor(row_type), binding, c, natives[0], members[1-c, 0]))
@@ -346,5 +430,7 @@ def verify_schema_records(output):
                 mutations += 1
             finally:
                 model.calculations[symbol] = (inputs, body, assertions)
-    return {'operations': len(roots), 'comparisons': comparisons, 'invalidBindingsRejected': rejected,
+    assert exercised == set(statement_names), ('unexecuted schema laws', set(statement_names) - exercised)
+    return {'operations': len(roots), 'statements': len(exercised), 'statementMutationsDetected': statement_mutations,
+            'comparisons': comparisons, 'invalidBindingsRejected': rejected,
             'bodyMutationsDetected': mutations, 'proofCallbackChecks': callback_checks}

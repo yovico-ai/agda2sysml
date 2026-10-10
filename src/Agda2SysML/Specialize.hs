@@ -522,6 +522,9 @@ readType inv env t = case string (get "tag" t) of
             eliminateIndices inv env projected rest
         else do
           sig <- signature inv d
+          if dropped sig > 0 then readOmittedIndexCall inv env sig name es
+            else readCompleteIndexCall sig name es
+    readCompleteIndexCall sig name es = do
           let count = parameters sig
           let arity = count + length (inputs sig)
           unless (runtimeDropped sig == 0 && length es >= arity)
@@ -537,6 +540,55 @@ readType inv env t = case string (get "tag" t) of
               _ -> refuse Semantics "Computed index argument is not a value") [] (zip valueEs (inputs sig))
           out <- substitute args (replaceInputs values (output sig))
           eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop arity es)
+
+-- Projection-like checked calls omit a source prefix. Infer that prefix only
+-- from the supplied values' declared types, then recheck the whole application.
+-- Signature-local inputs and caller indices remain separate during inference.
+readOmittedIndexCall :: Inventory -> [Maybe Type] -> Signature -> Text -> [Value] -> Either Refusal Type
+readOmittedIndexCall inv env sig name es = do
+  let slots = drop (dropped sig) (argumentSlots sig)
+  unless (length es >= length slots) (refuse Representation "Computed index call lacks a supplied argument")
+  explicit <- fmap M.fromList $ forM [(i,e) | (TypePosition i,e) <- zip slots es] $ \(i,e) -> do
+    value <- if parameterKinds sig !! i == UnusedKind then app e >> pure Unused else app e >>= readType inv env
+    pure (i,value)
+  (known,indices,actuals) <- foldM step (explicit,M.empty,[]) [(i,e) | (ValuePosition i,e) <- zip slots es]
+  completed <- foldM complete known (zip [0..] (parameterKinds sig))
+  args <- traverse (\i -> maybe (refuse Representation "Cannot recover computed index type parameter") Right
+    (M.lookup i completed)) [0..parameters sig-1]
+  values <- traverse (\i -> maybe (refuse Representation "Cannot recover computed index value parameter") Right
+    (M.lookup i indices)) [0..length (inputs sig)-1]
+  forM_ actuals $ \(i,actual) -> do
+    expected <- substitute args (replaceInputs values (inputs sig !! i))
+    unless (expected == actual) (refuse Semantics "Recovered computed index argument domain mismatch")
+  out <- substitute args (replaceInputs values (output sig))
+  eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop (length slots) es)
+  where
+    step (known,indices,actuals) (i,e) = do
+      actual <- app e >>= readType inv env
+      case actual of
+        Runtime domain ix -> do
+          next <- unify known (inputs sig !! i) domain
+          recovered <- recover indices (inputs sig !! i) domain
+          let value = case domain of Callable{} -> typedIndex domain ix; _ -> ix
+          bound <- bind recovered i value
+          pure (next,bound,actuals ++ [(i,domain)])
+        _ -> refuse Semantics "Computed index argument is not a runtime value"
+    bind known i value = case M.lookup i known of
+      Nothing -> Right (M.insert i value known)
+      Just prior | prior == value -> Right known
+      _ -> refuse Semantics "Inconsistent recovered computed index"
+    recover known (Runtime _ (IndexInput i)) (Runtime _ value)
+      | i < runtimeDropped sig = bind known i value
+    recover known (Named s xs) (Named t ys) | s == t && length xs == length ys =
+      foldM (\table (x,y) -> recover table x y) known (zip xs ys)
+    recover known (FamilyApplication _ xs) (FamilyApplication _ ys) | length xs == length ys =
+      foldM (\table (x,y) -> recover table x y) known (zip xs ys)
+    recover known _ _ = Right known
+    complete table (i,UnusedKind) = Right (M.insert i Unused table)
+    complete table (i,TypeKind level) = case M.lookup i table of
+      Just ty | closed ty -> universeOf inv ty >>= constrainUniverse table level
+      _ -> Right table
+    complete table _ = Right table
 
 returnsUniverse :: Value -> Bool
 returnsUniverse ty | get "tag" (get "term" ty) == String "pi" = returnsUniverse (get "body" (get "codomain" (get "term" ty)))
@@ -1168,7 +1220,8 @@ indexTerm depth (IndexSuccessor i) = object ["tag" .= ("native-index-successor" 
 indexTerm depth (IndexConstructor c args values) = object ["tag" .= ("constructor" :: Text),"symbol" .= instanceKey c args
   ,"eliminations" .= map (application . indexTerm depth) values]
 indexTerm depth (IndexCall f args values) = object ["tag" .= ("definition" :: Text),"symbol" .= instanceKey f args
-  ,"eliminations" .= map (application . indexTerm depth) values]
+  ,"nativeFullArguments" .= True
+  ,"eliminations" .= map (application . indexTerm depth) (map snd (snd (captureArguments args)) ++ values)]
 indexTerm depth (IndexProject f args receiver) = let t = indexTerm depth receiver in
   set "eliminations" (toJSON (array (get "eliminations" t) ++
     [object ["tag" .= ("project" :: Text),"symbol" .= instanceKey f args]])) t

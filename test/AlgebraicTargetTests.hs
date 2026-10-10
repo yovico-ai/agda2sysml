@@ -1001,6 +1001,42 @@ composedChecks base = do
         check (not (T.complete (T.generate altered))) message
   check (M.null (P.failures prepared)) (show (P.failures prepared))
   check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  let boolType = P.Named "Bool" []
+      fibre = P.Named "GenericEvidence" [boolType,P.Runtime boolType (P.IndexInput 7)]
+      receiver = P.Runtime fibre (P.IndexInput 9)
+      readOmitted value = P.readType inv [Just receiver] value
+  check (readOmitted (call "gretain" [variable 0 []] []) == Right
+    (P.Runtime fibre (P.IndexCall "gretain" [boolType] [P.IndexInput 7,P.IndexInput 9])))
+    "computed index did not recover omitted static and runtime parameters"
+  check (readOmitted (call "gretain" [call "gretain" [variable 0 []] []] []) == Right
+    (P.Runtime fibre (P.IndexCall "gretain" [boolType]
+      [P.IndexInput 7,P.IndexCall "gretain" [boolType] [P.IndexInput 7,P.IndexInput 9]])))
+    "nested omitted index call confused caller and signature input positions"
+  check (isLeft (readOmitted (call "gretain" [] []))) "partial omitted index call was admitted"
+  check (isLeft (readOmitted (call "gretain" [variable 0 [],variable 0 []] [])))
+    "omitted index call admitted an excess value application"
+  let phantom = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)])
+        $ function "phantomIndex" (generic (piType False (named "Bool") (named "Bool"))) (done 1 (variable 0 []))
+      phantomInv = inv {declarations = M.insert "phantomIndex" phantom (declarations inv)}
+  check (isLeft (P.readType phantomInv [Just (P.Runtime boolType (P.IndexInput 0))]
+    (call "phantomIndex" [variable 0 []] []))) "uninferable static index parameter was guessed"
+  let repeated = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)])
+        $ function "repeatedIndex" (generic (piType True (named "Bool")
+          (piType True (evidence (varType 1) (variable 0 []))
+            (piType False (evidence (varType 2) (variable 1 []))
+              (evidence (varType 2) (variable 1 [])))))) (done 2 (variable 0 []))
+      repeatedInv = inv {declarations = M.insert "repeatedIndex" repeated (declarations inv)}
+      second a ix = P.Runtime (P.Named "GenericEvidence" [a,P.Runtime boolType ix]) (P.IndexInput 10)
+      repeatedCall other = P.readType repeatedInv [Just receiver,Just other]
+        (call "repeatedIndex" [variable 0 [],variable 1 []] [])
+  check (repeatedCall (second boolType (P.IndexInput 7)) == Right
+    (P.Runtime fibre (P.IndexCall "repeatedIndex" [boolType]
+      [P.IndexInput 7,P.IndexInput 9,P.IndexInput 10])))
+    "consistent repeated omitted index was not reconstructed"
+  check (isLeft (repeatedCall (second boolType (P.IndexInput 8))))
+    "conflicting evidence for an omitted runtime index was accepted"
+  check (isLeft (repeatedCall (second (P.Named "Tone" []) (P.IndexInput 7))))
+    "conflicting evidence for an omitted static parameter was accepted"
   check (length [i | i <- P.instances prepared,P.origin i == "GenericEvidence"] == 2)
     "runtime indices split static family identities"
   forM_ [False,True] $ \tag -> do
@@ -1615,8 +1651,15 @@ computedChecks base = do
       on = declaration "computedOn" "constructor" (ty "ComputedChoice" [true])
       fixedChoice = function "computedChoiceRead" (piType False (ty "ComputedChoice" [invert false]) (named "Bool"))
         (split 0 [("computedOn",0,done 0 true)])
+      omitted = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)]) $
+        function "omittedIndex" (boolPi (piType False (ty "ComputedFlag" [variable 0 []]) (named "Bool")))
+          (split 0 [("computedFlag",1,done 1 (variable 0 []))])
+      omittedTerm = call "omittedIndex" [variable 0 []] []
+      omittedCaller = function "computedFromOmitted" (boolPi
+        (piType True (ty "ComputedFlag" [variable 0 []]) (ty "ComputedFlag" [omittedTerm])))
+        (done 2 (constructor "computedFlag" [omittedTerm]))
       additions = [inversion,toneIndex,chain,flags,flagCtor,family,member,make,consume,fixed,branch,alias
-        ,choice,off,on,fixedChoice]
+        ,choice,off,on,fixedChoice,omitted,omittedCaller]
       defs = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
       added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
       inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
@@ -1643,6 +1686,8 @@ computedChecks base = do
     check (calculate "consumeComputed" [B b,f] == f) "computed branch equality was lost during reconstruction"
     check (calculate "branchComputed" [B b] == f) "finite input branch did not reduce its index helper"
     check (calculate "fixedComputed" [B b] == flagged True) "literal index calculation did not reduce"
+    check (calculate "computedFromOmitted" [B b,flagged b] == flagged b)
+      "computed helper lost its recovered runtime index or complete result"
   check (calculate "computedChoiceRead" [R "ComputedChoice" (M.fromList
     [("constructor",E "ComputedChoice.constructor-tag" "computedOn"),("ComputedChoice.index0",B True)])] == B True)
     "computed closed index did not eliminate an impossible branch"
@@ -1669,6 +1714,9 @@ computedChecks base = do
   bad (set "type" (boolPi (ty "ComputedFlag" [call "invertIndex" [] []])) branch) "partial index helper admitted"
   bad (set "type" (boolPi (ty "ComputedFlag" [invert (constructor "red" [])])) branch)
     "index helper accepted wrong argument domain"
+  bad (set "projection" Null omitted) "computed index guessed an omission without checked metadata"
+  bad (set "type" (boolPi (piType False (named "Bool") (named "Bool"))) omitted)
+    "computed index guessed an unconstrained omitted runtime parameter"
 
 -- Exercise the real rule failures and complete report assembly, rather than
 -- classifying message strings. Changing wording must never change a code.
