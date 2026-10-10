@@ -27,6 +27,7 @@ from symbolic_levels import verify_symbolic_levels
 from dependent_callbacks import verify_dependent_callbacks
 from multi_callbacks import verify_multi_callbacks
 from schema_records import verify_schema_records
+from dependent_schemas import verify_dependent_schemas
 
 
 def check(condition, message):
@@ -314,6 +315,14 @@ models:
     dependent_callback_evidence = verify_dependent_callbacks(self_output)
     multi_callback_evidence = verify_multi_callbacks(self_output)
     schema_record_evidence = verify_schema_records(self_output)
+    dependent_schema_evidence = verify_dependent_schemas(self_output)
+    check(dependent_schema_evidence['operations'] == 11
+          and dependent_schema_evidence['comparisons'] >= 102
+          and dependent_schema_evidence['invalidCasesRejected'] >= 160
+          and dependent_schema_evidence['bodyMutationsDetected'] == 24
+          and dependent_schema_evidence['structuredStates']
+          and dependent_schema_evidence['completeEvidencePreserved'],
+          'dependent schema construction and relation conversions lack complete behavior or refusal checks')
     check(schema_record_evidence['operations'] == 8
           and schema_record_evidence['comparisons'] >= 214
           and schema_record_evidence['invalidBindingsRejected'] >= 16

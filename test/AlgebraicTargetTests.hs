@@ -303,7 +303,8 @@ main = do
       ,"'Choice.payload-valid'(" ++ second ++ ")","true"
       ,"'Choice.payload-valid'(" ++ none ++ ")","true"
       ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
-      ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"]
+      ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"
+      ,"SequenceFunctions::size('SchemaRecordFixture'::'produceSchema'().'producedFamily'.items) == 4","true"]
     callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
       ,"test/TargetEvaluation.java",library </> "sysml.library",file
       ,"'nested'(" ++ p ++ ")","true"
@@ -1351,7 +1352,38 @@ schemaRecordChecks base = do
       receiptProjection = field "FamilyBox" "familyReceipt" (receipt (variable 1 ["storedFamily"]))
       rebuildFamily = operation "rebuildFamilyBox" ["FamilyBox"] "FamilyBox"
         (done 1 (constructor "familyBox" [variable 0 [f] | f <- ["storedFamily","otherFamily","familyIndex","familyPayload","familyReceipt"]]))
-      ds = [box,ctor,typ,value,rebuild,wrapper,wrapperCtor,wrapperProjection,family,familyCtor,stored,other,index,payload,receiptProjection,rebuildFamily]
+      dependentFields = ["dependentType","differentType","dependentFamily","dependentIndex","dependentEvidence"]
+      dependent = record "DependentSchemaBox" "dependentSchemaBox" dependentFields
+      dependentCtor = set "family" (String "DependentSchemaBox") $ declaration "dependentSchemaBox" "constructor"
+        (signature [universeAt (level 0),universeAt (level 0),signature [term (v 1)] (universeAt (level 0))
+          ,term (v 2),term (apply (v 1) (v 0))] (named "DependentSchemaBox"))
+      dependentType = field "DependentSchemaBox" "dependentType" (universeAt (level 0))
+      differentType = field "DependentSchemaBox" "differentType" (universeAt (level 0))
+      dependentFamily = field "DependentSchemaBox" "dependentFamily"
+        (signature [term (variable 0 ["dependentType"])] (universeAt (level 0)))
+      dependentIndex = field "DependentSchemaBox" "dependentIndex" (term (variable 0 ["dependentType"]))
+      dependentEvidence = field "DependentSchemaBox" "dependentEvidence"
+        (term (apply (variable 0 ["dependentFamily"]) (variable 0 ["dependentIndex"])))
+      rebuildDependent = operation "rebuildDependentSchemaBox" ["DependentSchemaBox"] "DependentSchemaBox"
+        (done 1 (constructor "dependentSchemaBox" [variable 0 [f] | f <- dependentFields]))
+      produced = record "ProducedSchema" "producedSchema" ["producedFamily"]
+      producedCtor = set "family" (String "ProducedSchema") $ declaration "producedSchema" "constructor"
+        (signature [familyType] (named "ProducedSchema"))
+      producedField = field "ProducedSchema" "producedFamily" familyType
+      indexedFamily = set "parameters" (Number 1)
+        $ set "type" (signature [named "Bool"] (universeAt (level 0)))
+        $ record "IndexedPayload" "indexedPayload" ["payloadFlag"]
+      indexedCtor = set "parameters" (Number 1) $ set "family" (String "IndexedPayload")
+        $ declaration "indexedPayload" "constructor"
+          (signature [named "Bool",named "Bool"] (term (call "IndexedPayload" [v 1] [])))
+      indexedField = set "projection" (object ["proper" .= ("IndexedPayload" :: Text),"index" .= (2 :: Int)])
+        $ declaration "payloadFlag" "function"
+          (signature [named "Bool",term (call "IndexedPayload" [v 0] [])] (named "Bool"))
+      produce = operation "produceSchema" [] "ProducedSchema"
+        (done 0 (constructor "producedSchema" [call "IndexedPayload" [] []]))
+      ds = [box,ctor,typ,value,rebuild,wrapper,wrapperCtor,wrapperProjection,family,familyCtor,stored,other,index,payload,receiptProjection,rebuildFamily
+        ,dependent,dependentCtor,dependentType,differentType,dependentFamily,dependentIndex,dependentEvidence,rebuildDependent
+        ,produced,producedCtor,producedField,indexedFamily,indexedCtor,indexedField,produce]
       inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
         ,modelRequirements = M.singleton "schema-fields" (S.fromList [(string (get "name" d),
           if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
@@ -1362,14 +1394,37 @@ schemaRecordChecks base = do
   sig <- either (fail . show) pure (P.signature inv ctor)
   check (P.parameters sig == 0 && length (P.inputs sig) == 2) "stored type field was mistaken for a declaration parameter"
   check (M.null (P.failures prepared)) (show (P.failures prepared))
-  check (all (`M.member` shapes) ["SchemaBox","FamilyBox"]) (show errors)
-  forM_ ["rebuildSchemaBox","rebuildFamilyBox"] $ \symbol ->
+  check (all (`M.member` shapes) ["SchemaBox","FamilyBox","DependentSchemaBox"]) (show errors)
+  forM_ ["rebuildSchemaBox","rebuildFamilyBox","rebuildDependentSchemaBox","produceSchema"] $ \symbol ->
     check (maybe False (either (const False) (const True)) (M.lookup symbol calculations)) (show (symbol,calculations))
   let bad = inv {declarations = M.adjust (set "type" (signature [named "FamilyBox"]
         (term (apply (variable 0 ["otherFamily"]) (variable 0 ["familyIndex"]))))) "familyPayload" (declarations inv)}
       wrong = P.inventory (P.prepare bad)
   check (M.notMember "FamilyBox" (fst (A.discover wrong M.empty)))
     "projection from a different stored family was accepted"
+  let swapped = inv {declarations = M.adjust (set "type" (signature [named "DependentSchemaBox"]
+        (signature [term (variable 0 ["differentType"])] (universeAt (level 0))))) "dependentFamily" (declarations inv)}
+  check (M.notMember "DependentSchemaBox" (fst (A.discover (P.inventory (P.prepare swapped)) M.empty)))
+    "stored family accepted the wrong captured type field"
+  let recursive = inv {declarations = M.adjust (set "type"
+        (signature [named "Bool",term (call "IndexedPayload" [v 0] [])]
+          (term (call "IndexedPayload" [v 1] [])))) "indexedPayload" (declarations inv)}
+  check (maybe False (Text.isInfixOf "nonrecursive record family" . Text.pack . show)
+    (M.lookup "produceSchema" (P.failures (P.prepare recursive))))
+    "computed schema attempted to enumerate a recursive record family"
+  let callback = signature [named "Bool"] (named "Bool")
+      unbounded = inv {declarations = M.adjust (set "type"
+          (signature [named "Bool",callback] (term (call "IndexedPayload" [v 1] [])))) "indexedPayload"
+        $ M.adjust (set "type" (signature [named "Bool",term (call "IndexedPayload" [v 0] [])] callback))
+          "payloadFlag" (declarations inv)}
+      unboundedPrepared = P.prepare unbounded
+      unboundedInventory = P.inventory unboundedPrepared
+      unboundedShapes = fst (A.discover unboundedInventory M.empty)
+      unboundedCalculations = A.functions unboundedInventory M.empty unboundedShapes
+  check (M.null (P.failures unboundedPrepared)) (show (P.failures unboundedPrepared))
+  check (maybe False (either (Text.isInfixOf "Computed schema" . Text.pack . show) (const False))
+    (M.lookup "produceSchema" unboundedCalculations))
+    "computed schema invented an extent of arbitrary callback values"
   let generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
   check ("->exists" `Text.isInfixOf` T.modelText generated) "stored family membership constraint missing"
@@ -2147,6 +2202,28 @@ closureChecks base = do
         ,"body" .= call "xor" [variable 2 [],variable 0 []] []]]
       lambdaCaller = safe $ operation "lambdaCaller" ["Bool","Bool"] "Bool" $ done 2
         (call "applyOnce" [get "term" (named "Bool"),lambda,variable 0 []] [])
+      bodyOnlyType = safe $ set "type" (piType True (universeAt (level 0))
+        (fn (named "Callbacks") (universeAt (level 0))))
+        $ operation "bodyOnlyType" [] "Bool"
+          (set "eta" (object ["constructor" .= ("callbacks" :: Text),"fields" .= (["callback"] :: [Text])
+            ,"branch" .= object ["arity" .= (1 :: Int),"tree" .= done 2
+              (call "chooseSchema" [variable 1 [],invoke (variable 0 []) [constructor "true" []]] [])]]) (split 1 []))
+      chooseSchema = safe $ set "type" (piType True (universeAt (level 0)) (fn (named "Bool") (universeAt (level 0))))
+        $ operation "chooseSchema" [] "Bool" (split 1
+          [("true",0,done 1 (call "BodyPayload" [variable 0 []] []))
+          ,("false",0,done 1 (call "BodyPayload" [get "term" (named "Bool")] []))])
+      bodyOnlyCaller = safe $ set "type" (piType True (universeAt (level 0)) (fn (named "Bool") (universeAt (level 0))))
+        $ operation "bodyOnlyCaller" [] "Bool" (done 2
+          (call "bodyOnlyType" [variable 1 [],constructor "callbacks" [call "xor" [variable 0 []] []]] []))
+      bodyPayload = set "parameters" (Number 1) $ set "induction" (String "Nothing")
+        $ set "constructor" (String "bodyPayload") $ set "fields" (toJSON (["bodyPayloadValue"] :: [Text]))
+        $ declaration "BodyPayload" "record" (piType True (universeAt (level 0)) (universeAt (level 0)))
+      bodyPayloadCtor = set "parameters" (Number 1) $ set "family" (String "BodyPayload")
+        $ declaration "bodyPayload" "constructor" (piType True (universeAt (level 0))
+          (piType True (varType 0) (object ["term" .= call "BodyPayload" [variable 1 []] []])))
+      bodyPayloadField = set "projection" (object ["proper" .= ("BodyPayload" :: Text),"index" .= (2 :: Int)])
+        $ declaration "bodyPayloadValue" "function" (piType True (universeAt (level 0))
+          (piType True (object ["term" .= call "BodyPayload" [variable 0 []] []]) (varType 1)))
       nat = set "constructors" (toJSON (["zero","suc"] :: [Text])) (declaration "Nat" "datatype" (universeAt (level 0)))
       zeroDef = set "family" (String "Nat") (declaration "zero" "constructor" (named "Nat"))
       sucDef = set "family" (String "Nat") (declaration "suc" "constructor" (signature [named "Nat"] (named "Nat")))
@@ -2185,7 +2262,7 @@ closureChecks base = do
           ,constructor "leaf" [call "xor" [variable 1 []] []]
           ,constructor "leaf" [object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= variable 0 []]]]]
           ,variable 0 []] [])
-      additions = [applyOnce,xor,caller,lambdaCaller,nat,zeroDef,sucDef,iterateFn,iterated
+      additions = [applyOnce,xor,caller,lambdaCaller,bodyOnlyType,bodyOnlyCaller,chooseSchema,bodyPayload,bodyPayloadCtor,bodyPayloadField,nat,zeroDef,sucDef,iterateFn,iterated
         ,callbacks,callbackCtor,runCallback,recordCaller,treeType,leafCtor,branchCtor,evaluateTree,selectTree,treeCaller]
       added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
       registry = set "nat" (String "Nat") $ set "zero" (String "zero") $ set "suc" (String "suc") (get "builtins" (document base))
@@ -2204,6 +2281,25 @@ closureChecks base = do
     forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument ->
       check (evalWith table [B captured,B argument] (A.body calculation) == B (captured /= argument)) "closure specialization lost a capture or argument"
   check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 2) "closure templates were merged or specialized by runtime value"
+  let bodyOnlyInventory = inv
+        { document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture")
+            $ set "modules" (toJSON [object ["name" .= ("Checked" :: Text)
+              ,"source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= [bodyOnlyCaller]]]) (document inv)
+        , modelRequirements = modelRequirements inv }
+      bodyOnlyPrepared = P.prepare bodyOnlyInventory
+      bodyOnlyExpanded = P.inventory bodyOnlyPrepared
+      bodyOnlyInstances = [d | d <- M.elems (declarations bodyOnlyExpanded)
+        ,get "higherOrderOrigin" d == String "bodyOnlyType"]
+  check (not (null bodyOnlyInstances) && all ((== [0]) . P.nativeParameters) bodyOnlyInstances)
+    ("static body-only extent was omitted because it is absent from the closure signature: "
+      ++ show (map (\d -> (get "name" d,P.nativeParameters d,get "closureSpecialization" d)) bodyOnlyInstances,P.failures bodyOnlyPrepared))
+  let bodyOnlyShapes = fst (A.discover bodyOnlyExpanded finite)
+      bodyOnlyCalculations = A.functions bodyOnlyExpanded finite bodyOnlyShapes
+  forM_ bodyOnlyInstances $ \d -> do
+    calculation <- either (fail . show) pure (bodyOnlyCalculations M.! string (get "name" d))
+    let rendered = Text.unlines (A.renderCalculation bodyOnlyExpanded bodyOnlyShapes id calculation)
+    check ("in 'typeArgument0'" `Text.isInfixOf` rendered)
+      "schema-builder calculation failed to declare its body-only extent"
   treeCalculation <- either (fail . show) pure (calculations M.! "treeCaller")
   forM_ [False,True] $ \guardCapture -> forM_ [False,True] $ \effectCapture -> forM_ [False,True] $ \argument ->
     check (evalWith table [B guardCapture,B effectCapture,B argument] (A.body treeCalculation)
@@ -2356,6 +2452,33 @@ sequenceChecks base = do
         recoveryShapes = fst (A.discover recovery M.empty)
     check (isLeft (A.functions recovery M.empty recoveryShapes M.! "recoverJoined"))
       "concatenation result was used to recover an unjustified split of its inputs"
+
+  forM_ ["bump","incrementList"] $ \helper -> do
+    let mappedType index = object ["term" .= call "MappedList" [index] []]
+        mapped = set "constructors" (toJSON (["mappedList"] :: [Text])) $
+          declaration "MappedList" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        mappedCtor = set "family" (String "MappedList") $ declaration "mappedList" "constructor"
+          (signature [named "ListNat"] (mappedType (call helper [variable 0 []] [])))
+        one = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= (1 :: Integer)]]
+        helperDef tailArgument = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat"] "ListNat" (split 0
+            [("nil",0,done 0 (constructor "nil" [])),("cons",2,done 2 (constructor "cons"
+              [call "add" [variable 1 [],one] [],call helper [tailArgument] []]))])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [mapped,mappedCtor,helperDef (variable 0 [])]
+        admitted = fst (A.discover valid M.empty)
+    check (M.member "MappedList" admitted) "structural list map failed computed-index admission"
+    native <- traverse (either (fail . show) pure) (A.functions valid M.empty admitted)
+    forM_ [[],[0],[2,2,0],[10^(80 :: Int),3,3]] $ \values ->
+      check (evalWith native [list values] (A.body (native M.! helper)) == list (map (+1) values))
+        "computed-index list map lost values, order, or repeated positions"
+    let wrongTail = add [mapped,mappedCtor,helperDef (constructor "cons" [variable 1 [],variable 0 []])]
+        uncheckedMap = valid {document = document base}
+        missingBody = valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}
+    forM_ [wrongTail,uncheckedMap,missingBody] $ \invalid ->
+      check (M.notMember "MappedList" (fst (A.discover invalid M.empty)))
+        "unjustified recursion was admitted by the structural list-map rule"
 
 -- Default selection must cover independent definitions and must not infer proof
 -- roles from a declaration's spelling or from a local annotation.

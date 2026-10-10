@@ -41,6 +41,9 @@ browser review and the official SysML notebook tools.
 - Retain supported type and indexed-family fields in records as runtime schema
   bindings. Conversion, selection, and reindexing preserve complete domain
   values and membership evidence, with constraints linking them to their binding.
+  Index domains can depend on earlier record fields. Supported nonrecursive
+  record families construct bindings using native collection expressions and
+  the supplied domain extents, preserving witnesses and evidence.
 - Describe **state machines** using Agda state/command types and transition
   functions or supported finite relations. YAML roles connect the state,
   commands, transition, outcomes, and selected contracts in the correspondence
@@ -101,12 +104,12 @@ constraints, arbitrary higher-order values, unsupported recursive families, gene
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model has 248 native calculation functions out of 722 (34.3%)
-and 118 native equality statements, including 39 compiler-generated helpers.
-Nine functions have both representations: 357/722 function declarations (49.4%)
+The default self model has 276 native calculation functions out of 722 (38.2%)
+and 120 native equality statements, including 41 compiler-generated helpers.
+Ten functions have both representations: 386/722 function declarations (53.5%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
-There are still 504 unresolved requirements. Source-only proof retention is
+There are still 454 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
 
 SysML validation checks parsing, names, and types. It does not prove
