@@ -260,7 +260,7 @@ indexExpression inv finite helpers shapes env expected t = do
     canonical (Fibre family indices) = case M.lookup family shapes of
       Just sh | length indices == length (indexTypes sh) -> Fibre family [case domain of
           Named owner | Just shape <- M.lookup owner shapes,Just _ <- sequenceElement shape,not (schemaExtent shape) ->
-            normalize (Project (expand helpers value) sequenceField)
+            sequenceIdentity (Project (expand helpers value) sequenceField)
           _ -> expand helpers value
         | (domain,value) <- zip (indexTypes sh) indices]
       _ -> mapCarrier (expand helpers) (Fibre family indices)
@@ -381,7 +381,7 @@ indexExpression inv finite helpers shapes env expected t = do
       pure (projectedCarrier shapes actual value typ,Project value f)
     canonicalIndex domain value = case domain of
         Named owner | Just sh <- M.lookup owner shapes,Just _ <- sequenceElement sh,not (schemaExtent sh) ->
-          normalize (Project (expand helpers value) sequenceField)
+          sequenceIdentity (Project (expand helpers value) sequenceField)
         _ -> normalize (expand helpers value)
 
 -- Recover only direct signature-local index variables from checked argument
@@ -535,6 +535,17 @@ normalizeStep (SequenceHead t xs) = case normalize xs of
   value -> SequenceHead t value
 normalizeStep (Conditional p x y) = Conditional (normalize p) (normalize x) (normalize y)
 normalizeStep e = e
+
+-- Comparison may identify a sequence reconstructed from its head and tail.
+-- Keep that reconstruction during computation: a checked nonempty branch
+-- lets recursive index helpers reduce, whereas an opaque sequence does not.
+sequenceIdentity :: Expression -> Expression
+sequenceIdentity = mapExpression join . normalize
+  where
+    join (Sequence xs) = Just (normalize (Sequence (foldr rejoin [] (map sequenceIdentity xs))))
+    join _ = Nothing
+    rejoin (SequenceHead _ xs) (SequenceOp "tail" ys:rest) | xs == ys = xs:rest
+    rejoin x rest = x:rest
 
 -- Natural addition is associative and constants commute with its operands.
 -- Preserve symbolic operand order and attach the constant to the first one:
@@ -1154,18 +1165,50 @@ functionWith inv finite helpers shapes signatures d = do
     rewrite equations = foldl (\f (left,right) -> mapExpression (\x -> if x == left then Just right else Nothing) . f) id equations
     reduce equations = expandWith (rewrite equations) helpers
     schemaContext equations = map (\(typ,value) -> (mapCarrier (reduce equations) typ,reduce equations value))
-    requireType equations expected (actual,expr) = if canonical actual == canonical expected
+    requireType equations expected (actual,expr) = if sameCarrier actual expected
       then Right expr else refuse Semantics ("Expression carrier mismatch: expected " <> describe (canonical expected)
         <> "; actual " <> describe (canonical actual))
-      where canonical (Fibre family indices) = case M.lookup family shapes of
+      where sameCarrier (Callable xs y) (Callable as b) = length xs == length as
+              && and (zipWith sameCarrier xs as) && sameCarrier y b
+            sameCarrier (Fibre a xs) (Fibre b ys)
+              | a == b, Just sh <- M.lookup a shapes
+              ,length xs == length (indexTypes sh),length xs == length ys =
+                and [sameIndex S.empty (mapCarrier (instantiate (take i xs)) domain) x y
+                    | (i,(domain,(x,y))) <- zip [0..] (zip (indexTypes sh) (zip xs ys))]
+            sameCarrier a b = canonical a == canonical b
+            -- A known constructor is equal to its complete reconstruction.
+            -- Compare every active payload, using its dependent domain; no
+            -- equality of opaque calls or of unknown constructor tags follows.
+            sameIndex seen domain x y
+              | left == right = True
+              | Just owner <- ownerOf domain, S.notMember owner seen
+              ,Just sh <- M.lookup owner shapes,not (schemaExtent sh)
+              ,Just con <- knownConstructor sh left right =
+                let values = [reduce equations (Project left f) | (f,_) <- payload con]
+                in and [sameIndex (S.insert owner seen) (mapCarrier (instantiate values) typ)
+                     (Project left f) (Project right f) | (f,typ) <- payload con]
+              | otherwise = False
+              where left = canonicalIndex domain x; right = canonicalIndex domain y
+            ownerOf (Named s) = Just s
+            ownerOf (Fibre s _) = Just s
+            ownerOf _ = Nothing
+            knownConstructor sh left right
+              | isRecord sh = case variants sh of [con] -> Just con; _ -> Nothing
+              | Enumeration a x <- reduce equations (Project left tagField)
+              ,Enumeration b y <- reduce equations (Project right tagField)
+              ,a == tagType (shapeSymbol sh),a == b,x == y =
+                case filter ((== x) . constructorSymbol) (variants sh) of [con] -> Just con; _ -> Nothing
+              | otherwise = Nothing
+            canonical (Fibre family indices) = case M.lookup family shapes of
               Just sh -> Fibre family [canonicalIndex domain index | (domain,index) <- zip (indexTypes sh) indices]
               Nothing -> mapCarrier (reduce equations) (Fibre family indices)
             canonical typ = typ
             canonicalIndex domain value = let expanded = reduce equations value in case domain of
               Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) ->
-                normalize (Project expanded sequenceField)
+                sequenceIdentity (Project expanded sequenceField)
               _ -> normalize expanded
             describe (Fibre s xs) = s <> "[" <> T.intercalate "," (map (renderWith id (T.pack . show)) xs) <> "]"
+            describe (Callable xs y) = "(" <> T.intercalate ", " (map describe xs) <> ") -> " <> describe y
             describe t = T.pack (show t)
     lower inherited equationsInScope out env tree = fmap (located "native.algebraic-case" tree
       (object ["bindings" .= [renderWith id (T.pack . show) x | (_,x) <- env]
@@ -1328,8 +1371,18 @@ functionWith inv finite helpers shapes signatures d = do
     distinct (NumberLiteral 0) (Numeric "+" _ (NumberLiteral k)) = k > 0
     distinct (Numeric "+" _ (NumberLiteral k)) (NumberLiteral 0) = k > 0
     distinct (Construct s [(f,Sequence xs)]) (Construct t [(g,Sequence ys)])
-      | s == t && f == sequenceField && g == sequenceField = null xs /= null ys
+      | s == t && f == sequenceField && g == sequenceField =
+          let (lo,hi) = sequenceBounds xs; (lo',hi') = sequenceBounds ys
+          in maybe False (< lo') hi || maybe False (< lo) hi'
     distinct _ _ = False
+    -- A constructor contributes one element; a residual sequence contributes
+    -- an unknown nonnegative number. This separates singleton and at-least-two
+    -- fibres without guessing the length of an unresolved tail.
+    sequenceBounds xs = (length (filter (not . splice) xs),
+      if any splice xs then Nothing else Just (length xs))
+      where splice (Project _ field) = field == sequenceField
+            splice (SequenceOp "tail" _) = True
+            splice _ = False
     compatible equations domains xs ys = length xs == length ys && length domains == length xs
       && not (or (zipWith3 (separated S.empty) domains xs ys))
       where
@@ -1358,7 +1411,13 @@ functionWith inv finite helpers shapes signatures d = do
       -- Only replace symbolic references. Constants are never rewritten.
       let tagFact = [(Project selected tagField,Enumeration (tagType s) c)
             | not (isRecord sh),sequenceElement sh == Nothing]
-      pure (tagFact ++ concatMap orient (zip (map (reduce scope) xs) (map (reduce scope) (endpointsFor sh xs selected con))))
+      -- Shared constructor payloads relate all their occurrences. For refl,
+      -- both endpoints equal one payload: use the first equation when solving
+      -- the second, rather than recording two competing rewrites of the same
+      -- field and losing the equality between the endpoints.
+      pure (foldl (\facts (left,right) -> facts ++ orient
+        (reduce (scope ++ facts) left,reduce (scope ++ facts) right)) tagFact
+        (zip xs (endpointsFor sh xs selected con)))
       where
         orient (Numeric "+" x (NumberLiteral a),Numeric "+" y (NumberLiteral b)) | a == b = orient (x,y)
         orient (NumberLiteral a,Numeric "+" y (NumberLiteral b)) | a >= b = orient (NumberLiteral (a-b),y)
@@ -1393,7 +1452,12 @@ functionWith inv finite helpers shapes signatures d = do
     branchEquations _ (Named s) selected c | M.member s finite = Right [(selected,Enumeration s c)]
     branchEquations _ (Named s) selected c | Just sh <- M.lookup s shapes, Just element <- sequenceElement sh =
       Right $ case variants sh of
-       [nil,cons] | c == constructorSymbol nil -> [(selected,Construct s [(sequenceField,Sequence [])])]
+       [nil,cons] | c == constructorSymbol nil ->
+        -- Dependent types may already contain the normalized contents of a
+        -- list wrapper (notably a tail). Retain the same empty-branch fact in
+        -- both forms so that a nested [] pattern also refines those indices.
+        [(selected,Construct s [(sequenceField,Sequence [])])
+        ,(normalize (Project selected sequenceField),Sequence [])]
                  | c == constructorSymbol cons ->
         [(selected,Construct s [(sequenceField,Sequence [SequenceHead element (Project selected sequenceField)
           ,SequenceOp "tail" (Project selected sequenceField)])])]
@@ -1496,7 +1560,7 @@ functionWith inv finite helpers shapes signatures d = do
                         _ -> refuse Representation "Partially applied natural successor"
                     | otherwise -> case [F.domainSymbol dom | dom <- M.elems finite,c `elem` F.constructors dom] of
                         [s] -> eliminate (Named s,Enumeration s c) es
-                        _ -> refuse Representation "Constructor has no admitted carrier"
+                        _ -> refuse Representation ("Constructor has no admitted carrier: " <> c)
         "definition" -> case M.lookup (string (get "symbol" term)) projections of
           Just (owner,typ) -> case es of
             a:rest -> do
@@ -1528,7 +1592,7 @@ functionWith inv finite helpers shapes signatures d = do
     recover equations = recoverCarrierInputs shapes canonical
       where
         canonical domain value = let expanded = reduce equations (normalize value) in case domain of
-          Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) -> normalize (Project expanded sequenceField)
+          Named owner | Just sh <- M.lookup owner shapes, Just _ <- sequenceElement sh,not (schemaExtent sh) -> sequenceIdentity (Project expanded sequenceField)
           _ -> normalize expanded
     argument equationsInScope env typ a = do
       unless (get "tag" a == String "apply") (refuse Syntax "Constructor argument is not an application")

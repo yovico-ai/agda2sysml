@@ -34,6 +34,7 @@ from contextual_indices import verify_contextual_indices
 from dependent_family_parameters import verify_dependent_family_parameters
 from specialized_callbacks import verify_specialized_callbacks
 from index_closures import verify_index_closures
+from indexed_validation import verify_indexed_validation
 
 
 def check(condition, message):
@@ -328,6 +329,12 @@ models:
     family_evidence = verify_dependent_family_parameters(self_output)
     specialized_evidence = verify_specialized_callbacks(self_output)
     closure_evidence = verify_index_closures(self_output)
+    validation_evidence = verify_indexed_validation(self_output)
+    check(validation_evidence['operations'] == 7 and validation_evidence['statements'] == 1
+          and validation_evidence['comparisons'] >= 155
+          and validation_evidence['invalidCasesRejected'] >= 80
+          and validation_evidence['bodyMutationsDetected'] == 3,
+          'indexed validation lacks complete decisions, witnesses, refusal or mutation checks')
     check(closure_evidence['operations'] == 3 and closure_evidence['statements'] == 4
           and closure_evidence['comparisons'] >= 117
           and closure_evidence['invalidCasesRejected'] >= 11
