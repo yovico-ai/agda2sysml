@@ -491,7 +491,11 @@ readType inv env t = case string (get "tag" t) of
     valueCarrier Runtime{} = False
     valueCarrier Level{} = False
     valueCarrier SchemaValue{} = False
+    valueCarrier Unused = False
     valueCarrier t = firstOrder t
+    -- Proven-unused module arguments are static bookkeeping inside a carrier,
+    -- not function-valued data. They cannot themselves be callback domains.
+    firstOrder Unused = True
     firstOrder Callable{} = False
     firstOrder (SchemaValue ds _) = all firstOrder ds
     firstOrder (SelectedFamily value) = firstOrder value

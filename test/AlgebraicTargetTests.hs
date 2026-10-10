@@ -280,6 +280,7 @@ main = do
   computedChecks inv
   indexedLookupChecks inv
   unusedParameterChecks inv
+  emptyCarrierChecks inv
   callbackModel <- callableFieldChecks inv
   dependentCallbackModel <- dependentCallableChecks inv
   schemaRecordModel <- schemaRecordChecks inv
@@ -1112,6 +1113,35 @@ moduleAliasChecks base = do
     check (isLeft (calculations functions {declarations = M.adjust change "copiedIdentity" (declarations functions)} M.! "copiedIdentity"))
       "unanchored or unsupported module alias was accepted"
 
+emptyCarrierChecks :: Inventory -> IO ()
+emptyCarrierChecks base = do
+  let empty = set "induction" (String "Inductive") $ set "sourceModule" (String "CheckedEmpty") $
+        set "constructors" (toJSON ([] :: [Text])) $ declaration "NoValue" "datatype" (universeAt (level 0))
+      optional = set "constructors" (toJSON (["absentValue","impossibleValue"] :: [Text])) $
+        declaration "OptionalEmpty" "datatype" (universeAt (level 0))
+      absent = set "family" (String "OptionalEmpty") $ declaration "absentValue" "constructor" (named "OptionalEmpty")
+      impossible = set "family" (String "OptionalEmpty") $
+        declaration "impossibleValue" "constructor" (signature [named "NoValue"] (named "OptionalEmpty"))
+      additions = [empty,optional,absent,impossible]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedEmpty" :: Text),"safe" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "empty" (S.fromList [(string (get "name" d),"structure") | d <- additions])}
+      (shapes,errors) = A.discover inv M.empty
+      rendered = Text.unlines (A.renderShapes id shapes)
+  check (M.null errors && M.member "NoValue" shapes && M.member "OptionalEmpty" shapes) (show errors)
+  check (null (A.variants (shapes M.! "NoValue"))) "empty datatype acquired a constructor"
+  check ("constraint def 'NoValue.payload-valid' {\n    in 'value' : 'NoValue' [1];\n    false" `Text.isInfixOf` rendered
+    && not ("enum def 'NoValue.constructor-tag'" `Text.isInfixOf` rendered))
+    "empty datatype was emitted as an inhabited or empty-enumeration carrier"
+  check (all ((/= A.Named "NoValue") . A.result) (A.constructorCalculations inv shapes))
+    "empty datatype acquired a value constructor helper"
+  forM_ [set "constructors" Null,set "constructors" (String "[]"),set "abstract" (Bool True)
+    ,set "induction" (String "CoInductive"),set "sourceModule" (String "UncheckedEmpty")] $ \change ->
+      check (M.notMember "NoValue" (fst (A.discover inv {declarations = M.adjust change "NoValue" (declarations inv)} M.empty)))
+        "missing, opaque or unchecked constructor coverage justified an empty datatype"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+
 -- Unused higher-order module parameters are static only after dependency checks.
 unusedParameterChecks :: Inventory -> IO ()
 unusedParameterChecks base = do
@@ -1133,7 +1163,11 @@ unusedParameterChecks base = do
         operation "usedCallback" [] "Bool" (done 2 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
       transitivelyUsed = safe $ set "type" (signature [callback,named "Bool"] (named "Bool")) $
         operation "forwardUsed" [] "Bool" (done 2 (call "usedCallback" [v 1,v 0] []))
-      declarations' = [carrier,ctor,passthrough,forwarded,used,transitivelyUsed]
+      transformed = safe $ set "type" (signature
+        [callback,signature [ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1]),ty "PhantomCallback" [v 1]]
+        (ty "PhantomCallback" [v 2])) $
+        operation "transformUnused" [] "Bool" (done 3 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      declarations' = [carrier,ctor,passthrough,forwarded,used,transitivelyUsed,transformed]
       inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- declarations']) (declarations base)
         ,document = set "selectionProfile" (String "declarations") $ set "library" (String "test") $
           set "modules" (toJSON [object ["source" .= object ["library" .= ("test" :: Text)],"definitions" .= declarations']]) $
@@ -1145,7 +1179,7 @@ unusedParameterChecks base = do
       expanded = P.inventory prepared
       shapes = fst (A.discover expanded M.empty)
       calculations = A.functions expanded M.empty shapes
-  forM_ ["PhantomCallback","wrapUnused","passUnused","forwardUnused"] $ \s ->
+  forM_ ["PhantomCallback","wrapUnused","passUnused","forwardUnused","transformUnused"] $ \s ->
     check (omitted inv s == toJSON ([0] :: [Int])) ("unused forwarding not established: " ++ show s)
   forM_ ["usedCallback","forwardUsed"] $ \s -> do
     check (omitted inv s == toJSON ([] :: [Int])) "live callback was classified unused"
@@ -1176,6 +1210,8 @@ unusedParameterChecks base = do
   check (maybe True isLeft (M.lookup "usedCallback" wrongCalculations)) "ill-typed callback application admitted"
   check (isLeft (P.readType inv [] (get "term" (signature [callback] (named "Bool")))))
     "higher-order callback domain admitted by unary rule"
+  check (isLeft (P.readType inv [Just P.Unused] (get "term" (signature [object ["term" .= v 0]] (named "Bool")))))
+    "unused bookkeeping marker admitted as a runtime callback domain"
   check (P.readType inv [] (get "term" (signature [named "Bool",named "Bool"] (named "Bool"))) == Right (P.Callable [P.Named "Bool" [],P.Named "Bool" []] (P.Named "Bool" [])))
     "multiargument callback telescope was not retained"
   let dependent = object ["term" .= object ["tag" .= ("pi" :: Text)
@@ -1193,6 +1229,24 @@ unusedParameterChecks base = do
             ,(fst (head (A.payload con)),B b)])
           table = M.mapMaybe (either (const Nothing) Just) calculations
       check (evalWith table [value] (A.body calc) == value) "unused callback omission changed retained payload"
+  transformedKey <- maybe (fail (show (P.failures prepared))) pure (M.lookup "transformUnused" (P.openRoots prepared))
+  transformedCalc <- either (fail . show) pure (calculations M.! transformedKey)
+  owner <- case A.inputs transformedCalc of
+    [A.Callable [A.Named a] (A.Named b),A.Named c] | a == b && b == c -> pure a
+    other -> fail ("callback over a phantom carrier changed its signature: " ++ show other)
+  let con = head (A.variants (shapes M.! owner))
+      payloadField = fst (head (A.payload con))
+      wrapped b = R owner (M.fromList [("constructor",E (owner <> ".constructor-tag") (A.constructorSymbol con)),(payloadField,B b)])
+      identityWrapped = A.Calculation "identityWrapped" [A.Named owner] (A.Named owner) (A.Input 0) []
+      clearWrapped = A.Calculation "clearWrapped" [A.Named owner] (A.Named owner)
+        (A.Construct owner [("constructor",A.Enumeration (owner <> ".constructor-tag") (A.constructorSymbol con)),(payloadField,A.Literal False)]) []
+      callbacks = M.union (M.fromList [("identityWrapped",identityWrapped),("clearWrapped",clearWrapped)]) table
+  forM_ [False,True] $ \b -> forM_ [("identityWrapped",b),("clearWrapped",False)] $ \(fn,expected) ->
+    check (evalWith callbacks [Fn fn,wrapped b] (A.body transformedCalc) == wrapped expected)
+      "callback over a carrier with unused parameters changed its complete payload"
+  let noOmission = inv {declarations = M.adjust (set "moduleParameters" Null) "PhantomCallback" (declarations inv)}
+  check (M.member "transformUnused" (P.failures (P.prepare noOmission)))
+    "callback carrier omitted a live function parameter without checked unused evidence"
   forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null
         ,set "moduleParameters" Null] $ \change -> do
     let altered = inv {declarations = M.adjust change "passUnused" (declarations inv)}
@@ -2797,6 +2851,46 @@ sequenceChecks base = do
       broken = inv {declarations = M.adjust (set "primitive" (String "Unsupported")) "add" (declarations inv)}
   check (isLeft (A.functions unchecked M.empty shapes M.! "shift")) "recursive function flag alone admitted a call cycle"
   check (isLeft (A.functions broken M.empty shapes M.! "shift")) "recursive cycle concealed a refused external dependency"
+
+  -- A list inside a recursive data cycle uses the same finite constructor
+  -- encoding as its peer datatype. Ordinary lists keep their sequence form.
+  let inductive = set "induction" (String "Inductive") . set "sourceModule" (String "CheckedTree")
+      tree = inductive $ set "constructors" (toJSON (["leaf","branch"] :: [Text])) $
+        declaration "Tree" "datatype" (universeAt (level 0))
+      trees = inductive $ set "nativeSequence" (named "Tree") $
+        set "constructors" (toJSON (["noTrees","moreTrees"] :: [Text])) $
+        declaration "Trees" "datatype" (universeAt (level 0))
+      ctor name owner domains = set "family" (String owner) $
+        declaration name "constructor" (signature (map named domains) (named owner))
+      treeDefs = [tree,trees,ctor "leaf" "Tree" ["Nat"],ctor "branch" "Tree" ["Trees"]
+        ,ctor "noTrees" "Trees" [],ctor "moreTrees" "Trees" ["Tree","Trees"]]
+      recursive = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- treeDefs]) (declarations inv)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedTree" :: Text),"safe" .= True,"positivityCheck" .= True]]) (document inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),"structure") | d <- treeDefs]) (modelRequirements inv)}
+      (treeShapes,treeErrors) = A.discover recursive M.empty
+      constructors = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations recursive treeShapes]
+      construct name args = evalWith constructors args (A.body (constructors M.! name))
+      nodeCount (R owner fields) = fields M.! (owner <> ".node-count")
+      nodeCount _ = error "recursive constructor lost its record"
+  check (M.null treeErrors) (show treeErrors)
+  forM_ ["Tree","Trees"] $ \name -> do
+    let sh = treeShapes M.! name
+    check (A.sequenceElement sh == Nothing && S.fromList (A.recursivePeers sh) == S.fromList ["Tree","Trees"])
+      "recursive list escaped its finite constructor component"
+  check (A.sequenceElement (treeShapes M.! "ListNat") == Just A.Natural)
+    "recursive list fallback changed an ordinary list"
+  let empty = construct "noTrees" []
+      leaf = construct "leaf" [Z (10^(80 :: Int))]
+      repeated = construct "moreTrees" [leaf,construct "moreTrees" [leaf,empty]]
+      nested = construct "branch" [repeated]
+  check (map nodeCount [empty,leaf,repeated,nested] == map Z [1,1,5,6])
+    "recursive list node counts lost a repeated child or constructor"
+  forM_ [recursive {document = document base}
+    ,recursive {declarations = M.adjust (set "induction" (String "CoInductive")) "Trees" (declarations recursive)}
+    ,recursive {declarations = M.adjust (set "type" (signature [named "Nat",named "Trees"] (named "Trees"))) "moreTrees" (declarations recursive)}
+    ,recursive {declarations = M.adjust (set "type" (signature [signature [named "Trees"] (named "Tree")] (named "Tree"))) "branch" (declarations recursive)}] $ \bad ->
+      check (all (`M.notMember` fst (A.discover bad M.empty)) ["Tree","Trees"])
+        "recursive sequence fallback bypassed positivity, constructor or callable checks"
 
   -- Recognize structural equations at arbitrary identities, not a library
   -- function name. The consuming family is admitted only after its helper.
