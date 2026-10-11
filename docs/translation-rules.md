@@ -313,6 +313,16 @@ aliases can retain their source identity through a supported call to the origina
 calculation, even though they have no separate handwritten definition. Missing
 equations, unsupported callees and unanchored ordinary functions remain refused.
 
+Selected module-copy carrier roots use that same checked equation. Preparation
+reconstructs the full family application from its static arguments and typed
+runtime indices, reduces the equation, and materializes the resulting canonical
+carrier. Fixed, reordered and omitted module parameters therefore determine the
+actual specialization identity. Equivalent aliases share that carrier; distinct
+instantiations retain distinct identities. The original source declaration and
+obligation remain in the report. Missing equations, opaque copies, matching
+patterns and malformed applications remain refusals. Constructor-family checks
+are unchanged; a copied name is never accepted merely because its shape matches.
+
 These rules translate the existing `Diagnostics.Accounting.before-count`,
 `after-count`, `Before.sources` and `After.sources` operations without changing
 their Agda definitions. Parsed-model tests check mixed translated/textual reports,
@@ -1123,6 +1133,10 @@ while targeting the materialized field calculation. Its behavior requirement
 is propagated to that target; a structural field alone does not discharge a
 callable projection. A field name or compatible result type without the checked
 forwarding equation is insufficient.
+The forwarding equation may bind the receiver in the compiled `Done` telescope
+or in its equivalent explicit lambda. A copied record owner is resolved through
+its checked carrier equation before ownership comparison. This does not extend
+projection support to mismatched or additional runtime parameter telescopes.
 
 The report retains the original conservative dependency obligations. After every
 selected root and its entire prepared dependency graph pass native admission,

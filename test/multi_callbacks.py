@@ -199,6 +199,27 @@ def verify_multi_callbacks(output):
     source_schema, target_schema = [listing(schema_type, params, xs) for xs in (source_layout, target_layout)]
     signature_type = runtime(constructor(expr_type, '.call'))[-3][1]
     signature = make(signature_type, None, params, source_schema, 0)
+    # Public fields of an instantiated module must use the canonical record,
+    # while preserving the alias's source obligation and complete field value.
+    copied_fields = {}
+    for name in ('inputs', 'output'):
+        rows = [o for o in report['obligations'] if 'Agda2SysML.ComputedIndices._#' in o['symbol']
+                and '.Signature.' + name + '#' in o['symbol'] and '@' not in o['symbol']
+                and o['sourceKind'] == 'behavior']
+        assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], name
+        assert rows[0]['source']['checkedDefinition'] == rows[0]['symbol']
+        copied_fields[name] = target_name(rows[0]['target'])
+        assert runtime(copied_fields[name]) == [('input0', signature_type)]
+    projection_comparisons = 0
+    for layout in ((), (0,), (1, 0, 1), (0, 0, 1, 0)):
+        inputs = listing(schema_type, params, layout)
+        for output in (0, 1):
+            value = make(signature_type, None, params, inputs, output)
+            expect(call(copied_fields['inputs'], params, value), inputs)
+            expect(call(copied_fields['output'], params, value), output)
+            projection_comparisons += 2
+    refuse(lambda: call(copied_fields['output'], {**params, 'typeArgument0': (1,)}, signature))
+    mutate(copied_fields['output'], params, (signature,), 1, 0)
     fs = listing(signatures_type, params, (signature,))
     ref_type = runtime(constructor(expr_type, '.call'))[-2][1]
     ref = make(ref_type, '.here', params, signature, listing(signatures_type, params, ()))
@@ -272,4 +293,5 @@ def verify_multi_callbacks(output):
     expected = actuals(tuple(map(substitute, group)), target_layout)
     mutate(replace_args, params, (fs, source_schema, target_schema, indices, replacement, actuals(group, source_layout)), wrong, expected)
     return {'operations': len(roots), 'comparisons': comparisons, 'invalidBindingsRejected': rejected,
+            'copiedProjectionRoots': len(copied_fields), 'copiedProjectionComparisons': projection_comparisons,
             'bodyMutationsDetected': mutations, 'dependentArguments': True, 'completeResultsAndOriginsPreserved': True}
