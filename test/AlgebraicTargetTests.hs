@@ -146,6 +146,7 @@ universeAt l = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= obj
 main :: IO ()
 main = do
   familyParameterChecks
+  symbolicFamilyScopeChecks
   constructorScopeChecks
   earlierIndexChecks
   nestedSequencePatternChecks
@@ -3042,6 +3043,43 @@ interleavedParameterChecks base = do
         (P.IndexCall "computedContract" [outer] [P.IndexConstructor "true" [] [],P.IndexTyped domain supplied,value]))
       "interleaving a runtime binder with static parameters captured caller positions"
 
+-- Constructor inference relates template slots to symbolic caller slots. The
+-- caller's level atoms and family identity must survive that relation intact.
+symbolicFamilyScopeChecks :: IO ()
+symbolicFamilyScopeChecks = forM_ ["ScopePacket","ScopeEnvelope"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      term x = object ["term" .= x]
+      variableLevel i = object ["constant" .= (0 :: Int),"maximum" .=
+        [object ["offset" .= (0 :: Int),"term" .= variable i []]]]
+      domains = [named "Level",named "Level",universeAt (variableLevel 1)
+        ,signature [term (variable 0 [])] (universeAt (variableLevel 2))]
+      args = map (\i -> variable i []) [3,2,1,0]
+      box = term (call (name "Box") args [])
+      carrier = set "parameters" (Number 4) $ declaration (name "Box") "datatype"
+        (signature domains (universeAt (level 0)))
+      ctor = set "family" (String (name "Box")) $ declaration (name "box") "constructor"
+        (signature domains box)
+      indexed = set "parameters" (Number 4) $ declaration (name "Indexed") "datatype"
+        (signature (domains ++ [box]) (universeAt (level 0)))
+      inv = Inventory (object ["builtins" .= object ["level" .= ("Level" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- [carrier,ctor,indexed]]) M.empty M.empty
+      source = call (name "Indexed") (args ++ [constructor (name "box") []]) []
+  forM_ [(7,2,P.BoundLevel 2),(2,3,P.BoundLevel 0),(11,9,P.RigidLevel 3)] $ \(typeSlot,familySlot,atom) -> do
+    let levelA = P.LevelExpr 0 (M.singleton (P.BoundLevel 1) 0)
+        levelB = P.LevelExpr 0 (M.singleton atom 0)
+        domain = P.Parameter typeSlot
+        family = P.FamilyParameter familySlot [domain] levelB
+        actuals = [P.Level levelA,P.Level levelB,domain,family]
+        context = map Just (reverse actuals)
+        value = P.Runtime (P.Named (name "Box") actuals) (P.IndexConstructor (name "box") actuals [])
+    check (P.readType inv context source == Right (P.Named (name "Indexed") (actuals ++ [value])))
+      "symbolic inference captured caller type, family or universe slots"
+    forM_ [P.FamilyParameter familySlot [P.Parameter (typeSlot+1)] levelB
+          ,P.FamilyParameter familySlot [domain] (P.LevelExpr 1 M.empty)
+          ,P.FamilyParameter familySlot [domain,domain] levelB] $ \wrong ->
+      check (isLeft (P.readType inv (Just wrong:tail context) source))
+        "symbolic inference accepted an incompatible family domain, universe or arity"
+
 familyParameterChecks :: IO ()
 familyParameterChecks = do
   let universe = universeAt (level 0)
@@ -3154,6 +3192,48 @@ familyParameterChecks = do
       expectedIndex = P.Runtime (P.Named "FamilyWrapper" [schema]) (P.IndexConstructor "familyWrap" [schema] [])
   check (P.readType symbolicInv [Just schema] indexedTerm == Right (P.Named "FamilyIndexed" [schema,expectedIndex]))
     "symbolic family equality did not recover the omitted index-constructor argument"
+  -- The constructor's family slot belongs to its own telescope, not to the
+  -- caller. Different slot numbers must still infer the same supplied family.
+  forM_ [2,7] $ \slot -> do
+    let caller = P.FamilyParameter slot [bool] z
+        value = P.Runtime (P.Named "FamilyWrapper" [caller]) (P.IndexConstructor "familyWrap" [caller] [])
+    check (P.readType symbolicInv [Just caller] indexedTerm == Right (P.Named "FamilyIndexed" [caller,value]))
+      "constructor inference confused callee and caller family slots"
+  let twins f = object ["term" .= call "FamilyTwins" [get "term" f] []]
+      twinsType = set "parameters" (Number 1) $ declaration "FamilyTwins" "datatype"
+        (signature [familyDomain] universe)
+      twinsConstructor = set "family" (String "FamilyTwins") $ declaration "familyTwins" "constructor"
+        (signature [familyDomain,wrapper (variableType 0 []),wrapper (variableType 1 [])]
+          (twins (variableType 2 [])))
+      twinsInv = symbolicInv {declarations = M.union (M.fromList
+        [("FamilyTwins",twinsType),("familyTwins",twinsConstructor)]) (declarations symbolicInv)}
+      caller = P.FamilyParameter 7 [bool] z
+      twinsTerm = constructor "familyTwins" [variable 1 [],variable 0 []]
+      twinsContext other = [Just (P.Runtime (P.Named "FamilyWrapper" [other]) (P.IndexInput 6))
+        ,Just (P.Runtime (P.Named "FamilyWrapper" [caller]) (P.IndexInput 4))]
+  check (P.readType twinsInv (twinsContext caller) twinsTerm == Right
+    (P.Runtime (P.Named "FamilyTwins" [caller]) (P.IndexConstructor "familyTwins" [caller] [P.IndexInput 4,P.IndexInput 6])))
+    "repeated symbolic family inference lost the caller's identity or payloads"
+  check (isLeft (P.readType twinsInv (twinsContext (P.FamilyParameter 9 [bool] z)) twinsTerm))
+    "repeated symbolic family inference merged distinct caller families"
+  let atBit x = object ["term" .= call "AtBit" [x] []]
+      bitType = declaration "AtBit" "datatype" (signature [named "Bool"] universe)
+      dependentDomain = signature [named "Bool",named "Bool",atBit (variable 1 [])] universe
+      dependentWrapper = set "type" (signature [dependentDomain] universe) wrapperType
+      dependentWrap = set "type" (signature [dependentDomain] (wrapper (variableType 0 []))) wrapperConstructor
+      dependentIndexed = set "type" (signature [dependentDomain,wrapper (variableType 0 [])] universe) indexedType
+      domainInv = symbolicInv {declarations = M.fromList [(string (get "name" d),d)
+        | d <- [bitType,dependentWrapper,dependentWrap,dependentIndexed]]}
+      atArgument i = P.Named "AtBit" [P.Runtime bool (P.IndexFamilyArgument i)]
+      dependentCaller i = P.FamilyParameter 7 [bool,bool,atArgument i] z
+      correctFamily = dependentCaller 0
+      correctValue = P.Runtime (P.Named "FamilyWrapper" [correctFamily])
+        (P.IndexConstructor "familyWrap" [correctFamily] [])
+  check (P.readType domainInv [Just correctFamily] indexedTerm == Right
+    (P.Named "FamilyIndexed" [correctFamily,correctValue]))
+    "symbolic inference lost a dependent family telescope index"
+  check (isLeft (P.readType domainInv [Just (dependentCaller 1)] indexedTerm))
+    "symbolic inference equated families depending on different bound indices"
   forM_ [P.FamilyParameter 0 [P.Named "Other" []] (P.LevelExpr 0 M.empty),
          P.FamilyParameter 0 [bool] (P.LevelExpr 1 M.empty)] $ \incompatible ->
     check (isLeft (P.readType symbolicInv [Just incompatible] indexedTerm))
