@@ -147,6 +147,7 @@ main :: IO ()
 main = do
   familyParameterChecks
   symbolicFamilyScopeChecks
+  recordIndexNormalizationChecks
   constructorScopeChecks
   earlierIndexChecks
   nestedSequencePatternChecks
@@ -836,6 +837,24 @@ indexedChecks base = do
       generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
   check (A.indexTypes (shapes M.! "Evidence") == [A.Boolean]) "finite family lost its index domain"
+  let project :: Value -> [Text] -> Value
+      project term names = set "eliminations" (toJSON (array (get "eliminations" term)
+        ++ [object ["tag" .= ("project" :: Text),"symbol" .= name] | name <- names])) term
+      made = constructor "bundle" [false,constructor "off" [variable 0 []],true,constructor "flagValue" [true]]
+      indexedProjection term = function "constructedIndexProjection"
+        (signature [named "Bool",family "Flags" [term]] (named "Bool")) (done 2 (variable 1 []))
+  forM_ [(project made ["switch"],False),(project made ["selectedFlag"],True)
+        ,(project (constructor "envelope" [made]) ["inner","switch"],False)] $ \(term,expected) -> do
+    calculation <- either (fail . show) pure (A.function inv finite shapes (indexedProjection term))
+    case A.inputs calculation of
+      [A.Boolean,A.Fibre "Flags" [index]] -> forM_ [False,True] $ \b ->
+        check (eval [B b] index == B expected) "constructed index projection selected the wrong field"
+      _ -> fail "constructed projection lost the indexed input contract"
+  forM_ [project made ["inner"],project (constructor "bundle" [false]) ["switch"]
+        ,project (constructor "bundle" [false,constructor "off" [false],true,constructor "flagValue" [true],false]) ["switch"]
+        ,project made ["witness"]] $ \term ->
+    check (isLeft (A.function inv finite shapes (indexedProjection term)))
+      "constructed index projection admitted the wrong owner, payload arity or field type"
   forM_ [False,True] $ \b -> do
     let off = value "off" (B b)
     check (calculate "readEvidence" [B False,off] == B b) "indexed dispatch lost Boolean payload"
@@ -3042,6 +3061,74 @@ interleavedParameterChecks base = do
         (P.IndexApply (P.IndexTyped domain supplied) value)])
         (P.IndexCall "computedContract" [outer] [P.IndexConstructor "true" [] [],P.IndexTyped domain supplied,value]))
       "interleaving a runtime binder with static parameters captured caller positions"
+
+recordIndexNormalizationChecks :: IO ()
+recordIndexNormalizationChecks = forM_ ["IndexPacket","IndexEnvelope"] $ \owner -> do
+  let universe = universeAt (level 0)
+      ty name args = object ["term" .= call name args []]
+      v i = variable i []
+      variableType i = object ["term" .= v i]
+      ctor = owner <> ".make"
+      first = owner <> ".key"
+      second = owner <> ".evidence"
+      witness a x = ty "IndexWitness" [a,x]
+      witnessDecl = set "parameters" (Number 1) $ declaration "IndexWitness" "datatype"
+        (signature [universe,variableType 0] universe)
+      accept = set "parameters" (Number 1) $ declaration "IndexAccept" "datatype"
+        (signature [universe,variableType 0,witness (v 1) (v 0)] universe)
+      record = set "parameters" (Number 2) $ set "constructor" (String ctor)
+        $ set "fields" (toJSON [first,second]) $ declaration owner "record"
+          (signature [universe,named "Bool"] universe)
+      constructorDecl = set "parameters" (Number 2) $ set "family" (String owner)
+        $ declaration ctor "constructor" (signature
+          [universe,named "Bool",variableType 1,witness (v 2) (v 0)] (ty owner [v 3,v 2]))
+      projection name out = set "projection" (object ["proper" .= owner,"index" .= (3 :: Int)])
+        $ declaration name "function" (signature [universe,named "Bool",ty owner [v 1,v 0]] out)
+      keyDecl = projection first (variableType 2)
+      evidenceDecl = projection second (witness (v 2) (variable 0 [first]))
+      inv = Inventory (object []) (M.fromList [(string (get "name" d),d)
+        | d <- [witnessDecl,accept,record,constructorDecl,keyDecl,evidenceDecl]]) M.empty M.empty
+      checkIndices inventory domain left right =
+        let evidence = P.Named "IndexWitness" [domain,P.Runtime domain right]
+            inputs = [Just (P.Runtime evidence (P.IndexInput 99)),Just (P.Runtime domain left),Just domain]
+        in P.readType inventory inputs (call "IndexAccept" [v 2,v 1,v 0] [])
+      key = P.IndexInput 4
+      proof = P.IndexInput 5
+  forM_ [P.Named "Bool" [],P.Parameter 7] $ \domain -> do
+    let args = [domain]
+        value = P.IndexConstructor ctor args [P.IndexInput 9,key,proof]
+        keyIndex = P.IndexProject first args value
+        proofIndex = P.IndexProject second args value
+        proofDomain = P.Named "IndexWitness" [domain,P.Runtime domain key]
+        nested = P.IndexProject first args (P.IndexConstructor ctor args [P.IndexInput 8,keyIndex,proof])
+        admitted ty left right = case checkIndices inv ty left right of
+          Right (P.Named "IndexAccept" [actual,P.Runtime _ retained,_]) -> actual == ty && retained == left
+          _ -> False
+    check (admitted domain keyIndex key && admitted domain key keyIndex && admitted domain nested key)
+      "checked constructor projection was not normalized at an index boundary"
+    check (admitted proofDomain proofIndex proof)
+      "dependent field projection failed to preserve its complete evidence"
+    forM_ [P.IndexInput 9,proof] $ \wrong ->
+      check (isLeft (checkIndices inv domain keyIndex wrong)) "record index normalization selected the wrong payload"
+    forM_ [(owner,set "constructor" (String "unrelated") record)
+          ,(owner,set "fields" (toJSON [first,first]) record)
+          ,(owner,set "fields" Null record)
+          ,(owner,set "kind" (String "datatype") record)
+          ,(owner,set "abstract" (Bool True) record)
+          ,(ctor,set "family" (String "unrelated") constructorDecl)
+          ,(ctor,set "abstract" (Bool True) constructorDecl)
+          ,(ctor,set "parameters" (Number 1) constructorDecl)
+          ,(first,set "projection" (object ["proper" .= ("unrelated" :: Text),"index" .= (3 :: Int)]) keyDecl)
+          ,(first,set "projection" (object ["proper" .= owner,"index" .= (2 :: Int)]) keyDecl)
+          ,(first,set "abstract" (Bool True) keyDecl)
+          ,(first,set "opaque" (Bool True) keyDecl)] $ \(name,broken) ->
+      check (isLeft (checkIndices inv {declarations = M.insert name broken (declarations inv)} domain keyIndex key))
+        "record index normalization trusted incompatible declaration metadata"
+    forM_ [P.IndexProject first [] value
+          ,P.IndexProject first args (P.IndexConstructor ctor args [key,proof])
+          ,P.IndexProject first args (P.IndexCall "unknown" args [key,proof])
+          ,P.IndexProject second args value] $ \invalid ->
+      check (isLeft (checkIndices inv domain invalid key)) "record index normalization guessed a field or helper result"
 
 -- Constructor inference relates template slots to symbolic caller slots. The
 -- caller's level atoms and family identity must survive that relation intact.
