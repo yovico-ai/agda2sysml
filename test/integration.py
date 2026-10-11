@@ -690,15 +690,35 @@ models:
     check(register_manifest["complete"] and register_manifest["targetValidation"] == "accepted",
           "record/payload contract is incomplete")
     carriers = register_report["algebraicCarriers"]
-    check(sorted(c["kind"] for c in carriers) == ["record", "sum"], "record/sum correspondence missing")
-    record_carrier = next(c for c in carriers if c["kind"] == "record")
+    carrier_summary = [(c["symbol"], c["kind"]) for c in carriers]
+    required_carriers = {}
+    for name, kind in (("Register.State", "record"), ("Register.Command", "sum")):
+        matches = [c for c in carriers if c["symbol"].split("#", 1)[0] == name]
+        check(len(matches) == 1 and matches[0]["kind"] == kind,
+              f"required {name} {kind} carrier missing or duplicated: {carrier_summary}")
+        required_carriers[name] = matches[0]
+    check(all(any(o["symbol"] == c["symbol"] and o["kind"] == "structure"
+                  and o["status"] == "discharged" and o["target"] == c["target"]
+                  for o in register_report["obligations"]) for c in carriers),
+          f"carrier lacks discharged structural correspondence: {carrier_summary}")
+    record_carrier = required_carriers["Register.State"]
     check([p["position"] for p in record_carrier["constructors"][0]["payload"]] == [0, 1],
           "record payload positions lost")
     check(all(x["status"] == "discharged" for x in register_report["obligations"]), "unresolved record obligation")
     check(any(x["kind"] == "statement" and "Equality._≡_#" in x["symbol"]
               for x in register_report["obligations"]), "theorem dependency was not retained")
-    check(not any(x["kind"] in ("behavior", "structure") and "Equality._≡_#" in x["symbol"]
-                  for x in register_report["obligations"]), "retained theorem created an executable equality obligation")
+    # Native theorem statements can require structured equality witnesses;
+    # retaining those values does not translate the proof implementation.
+    equality_obligations = [x for x in register_report["obligations"] if "Equality._≡_#" in x["symbol"]]
+    equality_roles = [(x["kind"], x["rule"], x["target"]) for x in equality_obligations]
+    check(not any(x["kind"] == "behavior" for x in equality_obligations),
+          f"retained theorem created executable equality behavior: {equality_roles}")
+    check(any(x["kind"] == "proof-source" and x["rule"] == "source.proof"
+              and x["target"] is None for x in equality_obligations),
+          f"equality proof source was not retained: {equality_roles}")
+    check(all(x["rule"] == "source.proof" and x["target"] is None
+              for x in register_report["obligations"] if x["kind"] == "proof-source"),
+          "retained proof implementation was claimed as a native target")
     record_expressions = []
     for value in ("false", "true"):
         for enabled in ("false", "true"):
