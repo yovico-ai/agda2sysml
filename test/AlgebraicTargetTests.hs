@@ -149,6 +149,8 @@ main = do
   symbolicFamilyScopeChecks
   recordIndexNormalizationChecks
   constructorScopeChecks
+  constructorCaptureChecks
+  constructorContextChecks
   earlierIndexChecks
   nestedSequencePatternChecks
   sharedIndexChecks
@@ -3861,3 +3863,128 @@ automaticSelectionChecks = do
   annotated <- either (fail . Text.unpack) pure (prepare overlay inputAnnotated)
   check (needs `S.isSubsetOf` required annotated && S.member ("step-preserves","behavior") (required annotated))
     "a local theorem annotation removed a default computational requirement"
+
+-- Static carrier arguments can capture runtime values. The constructor used
+-- inside another index must carry those values as well as all source fields.
+constructorCaptureChecks :: IO ()
+constructorCaptureChecks = forM_ ["CapturePacket","CaptureEnvelope"] $ \owner -> do
+  let universe = universeAt (level 0)
+      v i = variable i []
+      ty name args = object ["term" .= call name args []]
+      bool = named "Bool"
+      boolean = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" universe
+      bit c = set "family" (String "Bool") $ declaration c "constructor" bool
+      item = set "parameters" (Number 1) $ set "constructors" (toJSON (["item"] :: [Text]))
+        $ declaration "Item" "datatype" (signature [bool] universe)
+      itemCtor = set "parameters" (Number 1) $ set "family" (String "Item") $ declaration "item" "constructor"
+        (signature [bool,bool] (ty "Item" [v 1]))
+      make = owner <> ".make"
+      fieldName = owner <> ".value"
+      box = set "induction" (String "Nothing") $ set "parameters" (Number 1) $ set "constructor" (String make)
+        $ set "fields" (toJSON [fieldName]) $ declaration owner "record" (signature [universe] universe)
+      boxCtor = set "parameters" (Number 1) $ set "family" (String owner) $ declaration make "constructor"
+        (signature [universe,object ["term" .= v 0]] (ty owner [v 1]))
+      fieldDecl = set "projection" (object ["proper" .= owner,"index" .= (2 :: Int)])
+        $ declaration fieldName "function" (signature [universe,ty owner [v 0]] (object ["term" .= v 1]))
+      indexed = set "parameters" (Number 1) $ set "constructors" (toJSON (["atBox"] :: [Text]))
+        $ declaration "AtBox" "datatype" (signature [universe,ty owner [v 0]] universe)
+      indexedCtor = set "parameters" (Number 1) $ set "family" (String "AtBox") $ declaration "atBox" "constructor"
+        (signature [universe,ty owner [v 0]] (ty "AtBox" [v 1,v 0]))
+      inspect = set "type" (signature [bool,ty "Item" [v 0],
+          ty "AtBox" [call "Item" [v 1] [],constructor make [v 0]]] bool)
+        $ operation "inspectCapture" [] "Bool" (done 3 (v 2))
+      defs = [boolean,bit "true",bit "false",item,itemCtor,box,boxCtor,fieldDecl,indexed,indexedCtor,inspect]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "constructor-captures" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- defs]))
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  calc <- either (\r -> fail (show (r,errors,M.keys shapes))) pure (maybe (Left (D.refusal D.Syntax (Text.pack (show errors)))) id
+    (M.lookup "inspectCapture" results))
+  case A.inputs calc of
+    [A.Boolean,A.Fibre _ _,A.Fibre _ indices] -> case reverse indices of
+      expression:_ -> forM_ [False,True] $ \flag -> do
+        let payload = R "OpaquePayload" (M.fromList [("tag",B (not flag)),("evidence",Z (10^(40 :: Int)))])
+        case eval [B flag,payload] expression of
+          R typ fields -> case A.variants (shapes M.! typ) of
+            [con] -> check (fields == M.fromList
+              ((typ <> ".index0",B flag):zip (map fst (A.payload con)) [B flag,payload]))
+                "indexed constructor lost its capture or complete payload"
+            _ -> fail "capture record has no unique checked constructor"
+          value -> fail ("expected a constructed record index: " ++ show value)
+      _ -> fail "constructor index disappeared"
+    inputs -> fail ("constructor capture inputs changed: " ++ show inputs)
+  let changeCaptures replace (Object fields) =
+        let walked = Object (fmap (changeCaptures replace) fields)
+            captures = array (get "nativeIndexCaptures" walked)
+        in if null captures then walked else set "nativeIndexCaptures" (toJSON (replace captures)) walked
+      changeCaptures replace (Array values) = Array (fmap (changeCaptures replace) values)
+      changeCaptures _ value = value
+      natural = object ["tag" .= ("literal" :: Text),"literal" .= object
+        ["tag" .= ("natural" :: Text),"value" .= (0 :: Int)]]
+  forM_ [const [],\xs -> xs ++ xs,const [natural]] $ \change ->
+    check (isLeft (A.function expanded M.empty shapes
+      (changeCaptures change (declarations expanded M.! "inspectCapture"))))
+      "constructed index admitted missing, duplicated or ill-typed captures"
+
+-- The expected domain of a constructor passed to an index helper is the
+-- helper's instantiated input, even when the enclosing index is a Boolean.
+constructorContextChecks :: IO ()
+constructorContextChecks = forM_ ["ContextPacket","ContextEnvelope"] $ \owner -> do
+  let v i = variable i []
+      ty name args = object ["term" .= call name args []]
+      ctor = owner <> ".make"
+      helper = owner <> ".observe"
+      bool = named "Bool"
+      constructorDecl = set "runtimeParameters" (Number 1) $ declaration ctor "constructor"
+        (signature [bool,bool] (ty owner [v 1]))
+      observe = set "type" (signature [bool,ty owner [v 0]] bool)
+        $ operation helper [] "Bool" (done 2 (v 1))
+      inspect term = set "type" (signature [bool,ty "FlagIndex" [call helper [v 0,term] []]] bool)
+        $ operation "inspectContext" [] "Bool" (done 2 (v 1))
+      sh = A.Shape owner False [A.Constructor ctor [("parameter",A.Boolean),("payload",A.Boolean)] [A.Input 0]] [A.Boolean]
+      flag = A.Shape "FlagIndex" False [] [A.Boolean]
+      shapes = M.fromList [(owner,sh),("FlagIndex",flag)]
+      defs = [constructorDecl,observe]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "context" (S.singleton (helper,"behavior")))
+  let table = M.mapMaybe (either (const Nothing) Just) (A.functions inv M.empty shapes)
+  calculation <- either (fail . show) pure (A.function inv M.empty shapes (inspect (constructor ctor [v 0])))
+  case A.inputs calculation of
+    [A.Boolean,A.Fibre "FlagIndex" [index]] -> forM_ [False,True] $ \b ->
+      check (evalWith table [B b] index == B b) "index helper lost its argument's contextual constructor parameter"
+    _ -> fail "contextual constructor changed helper index type"
+  forM_ [constructor ctor [],constructor ctor [v 0,v 0],constructor ctor [call "unknown" [] []]] $ \bad ->
+    check (isLeft (A.function inv M.empty shapes (inspect bad)))
+      "contextual constructor recovery admitted malformed payloads"
+
+  -- A datatype may have both explicit captures and an omitted source value
+  -- parameter. Recover only the latter, at its original telescope position.
+  let capturedShape = A.Shape owner False [A.Constructor ctor
+        [("capture",A.Boolean),("parameter",A.Boolean),("payload",A.Boolean)] [A.Input 0,A.Input 1]] [A.Boolean,A.Boolean]
+      capturedDecl = set "runtimeParameters" (Number 2) $ set "type"
+        (signature [bool,bool,bool] (ty owner [v 2,v 1])) constructorDecl
+      capturedHelper = set "type" (signature [bool,bool,ty owner [v 1,v 0]] bool)
+        $ set "compiled" (done 3 (v 1)) observe
+      capturedInventory = inv {declarations = M.fromList [(ctor,capturedDecl),(helper,capturedHelper)]}
+      capturedShapes = M.insert owner capturedShape shapes
+      captures = [v 1]
+      supplied = set "nativeIndexCaptures" (toJSON captures) (constructor ctor [v 0])
+      capturedOperation term = set "type" (signature [bool,bool,
+        ty "FlagIndex" [call helper [v 1,v 0,term] []]] bool)
+        $ operation "inspectCapturedContext" [] "Bool" (done 3 (v 1))
+      capturedTable = M.mapMaybe (either (const Nothing) Just) (A.functions capturedInventory M.empty capturedShapes)
+  captured <- either (fail . show) pure (A.function capturedInventory M.empty capturedShapes (capturedOperation supplied))
+  case A.inputs captured of
+    [A.Boolean,A.Boolean,A.Fibre "FlagIndex" [index]] -> forM_ [False,True] $ \first -> forM_ [False,True] $ \second ->
+      check (evalWith capturedTable [B first,B second] index == B second)
+        "explicit capture displaced an omitted datatype parameter"
+    _ -> fail "captured datatype changed the helper input telescope"
+  check (isLeft (A.function capturedInventory M.empty capturedShapes
+      (capturedOperation (set "nativeIndexCaptures" (toJSON [v 0]) supplied))))
+    "datatype capture recovery equated unrelated caller inputs"

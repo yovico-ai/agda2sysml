@@ -380,6 +380,23 @@ carrier arguments and emitted expressions. Native index lowering validates the
 constructor payload before applying trailing projections through the existing
 checked record-projection path; projections are not counted as payload arguments.
 
+Constructors inside indices retain runtime values captured by their static
+carrier arguments. These explicit captures precede the source payload. For
+records, supplied runtime parameters remain ahead of the declared fields; for
+datatypes, omitted value parameters are recovered from the expected fibre after
+any explicit captures. Every supplied value is checked against the instantiated
+constructor telescope, including dependent evidence fields. Missing, duplicated,
+ill-typed and inconsistent captures remain refusals.
+
+A fully supplied index helper checks its arguments in telescope order, using
+previous arguments to instantiate each input domain. This gives nested
+constructors their own expected fibre instead of the enclosing expression's
+result type. Helpers with omitted inputs retain the existing inference rule.
+The rules apply to arbitrary checked constructors and helpers, without source
+name tests or changes to native carrier layouts. They admit the dependent-record
+roundtrip and operation-preservation constraints, indexed-constructor contract
+conversions, and the binding-position constraint in the self specification.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known

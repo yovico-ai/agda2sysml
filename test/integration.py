@@ -360,16 +360,17 @@ models:
           and family_evidence['invalidCasesRejected'] >= 19
           and family_evidence['mutationsDetected'] == 7,
           'dependent and partial families lack complete operations or mismatch checks')
-    check(contextual_evidence['operations'] == 8
+    check(contextual_evidence['operations'] == 11
+          and contextual_evidence['nativeStatements'] == 2
           and contextual_evidence['comparisons'] >= 50
-          and contextual_evidence['invalidCasesRejected'] >= 12
-          and contextual_evidence['mutationsDetected'] == 9,
+          and contextual_evidence['invalidCasesRejected'] >= 16
+          and contextual_evidence['mutationsDetected'] == 13,
           'computed dependent membership lacks complete operations or mismatch checks')
     check(pattern_evidence['operations'] == 8
-          and pattern_evidence['statements'] == 6
+          and pattern_evidence['statements'] == 7
           and pattern_evidence['comparisons'] >= 1000
           and pattern_evidence['invalidCasesRejected'] >= 18
-          and pattern_evidence['bodyMutationsDetected'] == 14
+          and pattern_evidence['bodyMutationsDetected'] == 15
           and pattern_evidence['differentContextSizes'] > 0
           and pattern_evidence['completeEvidencePreserved'],
           'dependent pattern matches lack complete operations, evidence preservation, or refusal checks')
@@ -455,8 +456,8 @@ models:
     check(callback_evidence == {'comparisons': 220, 'invalidCasesRejected': 6, 'operations': 5},
           "callback consumers lack complete outcomes and binding/schema refusals")
     record_path_evidence = verify_dependent_record_path(self_output)
-    check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 16, 'operations': 5,
-                                  'nativeStatements': 3, 'statementComparisons': 90, 'bodyMutationsDetected': 8},
+    check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 20, 'operations': 5,
+                                  'nativeStatements': 6, 'statementComparisons': 210, 'bodyMutationsDetected': 14},
           "dependent-record path lacks complete members and projected index refusals")
     family_scope_evidence = verify_family_scope(self_output)
     check(family_scope_evidence == {'nativeStatements': 2, 'comparisons': 30,

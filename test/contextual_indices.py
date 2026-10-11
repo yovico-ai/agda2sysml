@@ -1,7 +1,7 @@
 """Check computed dependent membership in emitted SysML, with runtime callbacks."""
 import json
 from pathlib import Path
-from emitted_model import CalculationValue, Model, Record, same
+from emitted_model import BodyCalculation, CalculationValue, Model, Record, same
 from open_parameters import target_name
 
 
@@ -12,7 +12,9 @@ def verify_contextual_indices(output):
     model = Model(text)
     roots = {}
     names = {'DependentRecords.Record': ('encode', 'decode', 'native', 'forgetInput', 'admitInput'),
-             'IndexedValues.Family': ('encode', 'decode', 'admit-result')}
+             'IndexedValues.Family': ('encode', 'decode', 'admit-result',
+                                     'constructor-result-contract', 'constructor-result-reflects',
+                                     'constructor-result-refuses-mismatch')}
     for module, operations in names.items():
         for operation in operations:
             name = module + '.' + operation
@@ -20,6 +22,11 @@ def verify_contextual_indices(output):
                     and '@' not in o['symbol'] and o['sourceKind'] == 'behavior']
             assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], name
             roots[name] = target_name(rows[0]['target'])
+    laws = {}
+    for name in ('constructor-index', 'constructor-result-reflects'):
+        rows = [s for s in report['nativeStatements'] if s['symbol'].startswith('Agda2SysML.IndexedValues.Family.' + name + '#')]
+        assert len(rows) == 1 and rows[0]['status'] == 'translated', name
+        laws[name] = target_name(rows[0]['target'])
     def root(module, operation):
         return roots[module + '.' + operation]
     def quote(s):
@@ -159,7 +166,7 @@ def verify_contextual_indices(output):
         model.calculations[forget] = inputs, body, assertions
 
     module = 'IndexedValues.Family'
-    encode, decode, admit = [root(module, op) for op in names[module]]
+    encode, decode, admit = [root(module, op) for op in ('encode', 'decode', 'admit-result')]
     index_sig, _, source_type = [t for _, t in runtime(encode)]
     fibre_type = model.results[encode]
     carrier_type = field_type(fibre_type, '.fst')
@@ -192,6 +199,10 @@ def verify_contextual_indices(output):
             expect(call(encode, identity, selected, source), expected)
             expect(call(decode, identity, selected, expected), source)
             expect(call(admit, identity, selected, carrier, proof), expected)
+            for operation in ('constructor-result-contract', 'constructor-result-reflects'):
+                expect(call(root(module, operation), identity, t, m, selected, proof), proof)
+            expect(call(laws['constructor-index'], identity, t, m), True)
+            expect(call(laws['constructor-result-reflects'], identity, t, m, selected, proof), True)
             samples[t, i] = source, expected, carrier, proof
     source, expected, carrier, proof = samples[False, 0]
     expect(call(encode, equivalent, 0, source), expected)
@@ -201,6 +212,27 @@ def verify_contextual_indices(output):
     refuse(lambda: call(admit, wrong, 0, carrier, proof))
     refuse(lambda: call(encode, identity, 7, source))
     refuse(lambda: call(admit, identity, 0, carrier, samples[False, 7][3]))
+    m = record(member_type, {field(member_type, '.index0'): False, member_value: payloads[0]})
+    for operation in ('constructor-result-contract', 'constructor-result-reflects'):
+        refuse(lambda operation=operation: call(root(module, operation), identity, False, m, 7, proof))
+    refuses = root(module, 'constructor-result-refuses-mismatch')
+    signature = runtime(refuses)[-2][1]
+    impossible = BodyCalculation((('proof', signature.arguments[0]),), signature.result,
+                                 ('literal', Record(signature.result, ())), {})
+    # A mismatching proof fails the input contract. Even with a valid proof,
+    # a callback cannot fabricate a member of the empty result carrier.
+    refuse(lambda: call(refuses, identity, False, m, 7, impossible, proof))
+    refuse(lambda: call(refuses, identity, False, m, 0, impossible, proof))
+    for name, values in (('constructor-index', [identity, False, m]),
+                         ('constructor-result-reflects', [identity, False, m, 0, proof])):
+        symbol = laws[name]
+        saved = model.calculations[symbol]
+        model.calculations[symbol] = saved[0], ('literal', False), saved[2]
+        try:
+            assert call(symbol, *values) is False, 'false indexed law was not observed'
+            mutations += 1
+        finally:
+            model.calculations[symbol] = saved
     for symbol, cases in mutation_samples.items():
         arguments, expected = cases[0]
         altered = next(value for _, value in cases if not same(value, expected))
@@ -216,5 +248,5 @@ def verify_contextual_indices(output):
                 mutations += 1
         finally:
             model.calculations[symbol] = inputs, body, assertions
-    return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
+    return {'operations': len(roots), 'nativeStatements': len(laws), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'mutationsDetected': mutations}
