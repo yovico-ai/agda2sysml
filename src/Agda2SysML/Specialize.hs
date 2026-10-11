@@ -717,7 +717,7 @@ readIndex inv env expected term
   | get "tag" term == String "constructor" = do
       actual <- readConstructorIndex inv env (Just expected) term
       case actual of
-        Runtime domain _ | indexNormalForm domain == indexNormalForm expected -> Right actual
+        Runtime domain _ | checkedIndexNormalForm inv domain == checkedIndexNormalForm inv expected -> Right actual
         _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
       actual <- case readTypeWithExpected inv env (Just expected) term of
@@ -729,7 +729,7 @@ readIndex inv env expected term
             FamilyApplication (SelectedFamily bound) [] -> bound
             _ -> actual
       case value of
-        Runtime domain _ | indexNormalForm domain == indexNormalForm expected -> Right value
+        Runtime domain _ | checkedIndexNormalForm inv domain == checkedIndexNormalForm inv expected -> Right value
         _ -> refuse Semantics ("Index expression has the wrong declared domain: expected "
           <> T.pack (show expected) <> "; actual " <> T.pack (show actual))
 
@@ -737,13 +737,19 @@ readIndex inv env expected term
 -- the same index. Keep all carrier arguments and runtime indices; no opaque
 -- function is inverted or equated merely because its result type matches.
 indexNormalForm :: Type -> Type
-indexNormalForm = normal . canonicalFamilies
+indexNormalForm = indexNormalFormWith IndexProject
+
+checkedIndexNormalForm :: Inventory -> Type -> Type
+checkedIndexNormalForm inv = indexNormalFormWith (constructorProjection inv)
+
+indexNormalFormWith :: (Text -> [Type] -> IndexExpr -> IndexExpr) -> Type -> Type
+indexNormalFormWith project = normal . canonicalFamilies
   where
     normal = mapIndices index
     index (IndexTyped ty x) = typedIndex (normal ty) (index x)
     index (IndexLambda slots ty x) = IndexLambda slots (normal ty) (index x)
     index (IndexApply f x) = beta (IndexApply (index f) (index x))
-    index (IndexProject f ts x) = IndexProject f (map normal ts) (index x)
+    index (IndexProject f ts x) = project f (map normal ts) (index x)
     index (IndexCall f ts xs) = IndexCall f (map normal ts) (map index xs)
     index (IndexConstructor f ts xs) = IndexConstructor f (map normal ts) (map index xs)
     index (IndexSuccessor x) = IndexSuccessor (index x)
@@ -755,6 +761,43 @@ indexNormalForm = normal . canonicalFamilies
       (IndexLambda slots _ body,args) | length args >= length slots ->
         index (foldl IndexApply (bindIndexLocals (zip slots args) body) (drop (length slots) args))
       _ -> expression
+
+-- Comparison only, on an already typed index. Checked record metadata fixes
+-- the constructor and field order; contextual value parameters precede fields
+-- in an IndexConstructor. Unknown or incompatible metadata leaves the original
+-- expression intact. This never unfolds a helper or equates arbitrary evidence.
+constructorProjection :: Inventory -> Text -> [Type] -> IndexExpr -> IndexExpr
+constructorProjection inv name args receiver@(IndexConstructor constructorName constructorArgs values) =
+  either (const original) id $ do
+    constructor <- lookupDefinition constructorName
+    owner <- field inv "family" constructor
+    record <- lookupDefinition (string owner)
+    projection <- lookupDefinition name
+    metadata <- field inv "projection" projection
+    count <- field inv "parameters" record >>= number
+    constructorCount <- field inv "parameters" constructor >>= number
+    declared <- field inv "constructor" record
+    fields <- map string . array <$> field inv "fields" record
+    let prefix = count - length constructorArgs
+    unless (get "kind" constructor == String "constructor" && get "kind" record == String "record"
+      && get "kind" projection == String "function"
+      && all ((== Bool False) . get "abstract") [constructor,record,projection]
+      && get "opaque" projection /= Bool True
+      && declared == String constructorName && get "proper" metadata == owner
+      && count >= 0 && constructorCount == count && get "index" metadata == toJSON (count+1)
+      && map indexNormalForm args == map indexNormalForm constructorArgs
+      && prefix >= 0 && length values == prefix + length fields
+      && S.size (S.fromList fields) == length fields)
+      (refuse Semantics "Record index projection lacks matching checked metadata")
+    position <- case [i | (i,f) <- zip [0..] fields,f == name] of
+      [i] -> Right i
+      _ -> refuse Syntax "Record index projection is not a unique declared field"
+    at (prefix+position) values
+  where
+    original = IndexProject name args receiver
+    lookupDefinition symbol = maybe (refuse Syntax "Unknown record index declaration") Right
+      (M.lookup symbol (declarations inv))
+constructorProjection _ name args receiver = IndexProject name args receiver
 
 -- Check a value closure against its complete callback contract. Eta expansion
 -- only supplies the missing value binders; the checked helper signature still

@@ -315,12 +315,13 @@ indexExpression inv finite helpers shapes env expected t = do
                 Fibre owner indices | owner == shapeSymbol sh && length indices >= parameterCount -> pure (take parameterCount indices)
                 _ -> refuse Representation "Structured index constructor needs its contextual value parameters"
               let supplied = drop parameterCount (payload con)
-              unless (length es == length supplied) (refuse Syntax "Structured index constructor arity mismatch")
+                  (arguments,rest) = span ((== String "apply") . get "tag") es
+              unless (length arguments == length supplied) (refuse Syntax "Structured index constructor arity mismatch")
               values <- foldM (\prior ((_,typ),arg) -> do
                 value <- applicationValue arg >>= indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) typ)
-                pure (prior ++ [value])) prefix (zip supplied es)
-              pure (familyCarrier sh (map (instantiate values) (resultIndices con)),
-                Construct (shapeSymbol sh) (construction (Just term) sh con values))
+                pure (prior ++ [value])) prefix (zip supplied arguments)
+              eliminate (familyCarrier sh (map (instantiate values) (resultIndices con)),
+                Construct (shapeSymbol sh) (construction (Just term) sh con values)) rest
             Nothing -> do
               unless (null es) (refuse Representation "Unadmitted index constructor has arguments")
               if c == builtin inv "true" then Right (Boolean,Literal True)

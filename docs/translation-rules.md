@@ -368,6 +368,18 @@ opaque values and an unbounded natural domain, reject members at the wrong
 index, and detect false constraint bodies. Independent compiler fixtures vary
 family slots, type slots, symbolic universes and dependent domain indices.
 
+Index-domain comparison also reduces a proper projection of a known record
+constructor to its declared field. The rule checks transparent declarations,
+the record's constructor and unique field layout, projection ownership and
+parameter count, matching static arguments, and the complete payload arity.
+Runtime record parameters precede the fields and are accounted for separately.
+Nested projections normalize recursively; dependent evidence remains the
+original field value. Unknown helpers, abstract declarations and incompatible
+metadata do not justify reduction. This comparison rule preserves the original
+carrier arguments and emitted expressions. Native index lowering validates the
+constructor payload before applying trailing projections through the existing
+checked record-projection path; projections are not counted as payload arguments.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known
