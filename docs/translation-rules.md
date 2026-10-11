@@ -341,6 +341,19 @@ already supplied with stored schemas keep their ordinary calculation path.
 Opaque helpers, mismatched family telescopes and blocked reductions remain
 refused. This rule does not reify arbitrary static families as runtime schemas.
 
+When reduction exposes a constructor, the expected result carrier supplies its
+omitted type and family parameters. Every payload is checked against that
+instantiated dependent telescope. Once all static parameters are established,
+payload checking retains their caller-side identities instead of inferring them
+again as constructor parameters. Without a result context, one member does not
+determine an arbitrary family; such inference remains refused. Members belonging
+to a different family or index also remain refused.
+
+This admits the existing `DependentRecords.KnownProjection.Bound.encode-decode`
+and `input-contract-sufficient` laws as native constraints. Parsed-model checks
+exercise complete records and equality evidence over Boolean and natural index
+domains, reject mismatched inputs, and detect mutations of the constraint bodies.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known

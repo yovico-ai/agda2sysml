@@ -432,7 +432,13 @@ readLevelTerm inv env t = case string (get "tag" t) of
 
 -- NoAbs codomains retain the previous context; Abs codomains extend it.
 readType :: Inventory -> [Maybe Type] -> Value -> Either Refusal Type
-readType inv env t = case string (get "tag" t) of
+readType inv env = readTypeWithExpected inv env Nothing
+
+-- A checked reduction may expose a constructor with omitted parameters. Keep
+-- the caller's expected carrier so those parameters come from the complete
+-- dependent result, rather than guessing a family from a single member.
+readTypeWithExpected :: Inventory -> [Maybe Type] -> Maybe Type -> Value -> Either Refusal Type
+readTypeWithExpected inv env expected t = case string (get "tag" t) of
   "native-schema-value" -> SchemaValue <$> traverse (readType inv env) (array (get "domains" t)) <*> readLevelValue (get "universe" t)
   "sort" | isUniverse (object ["term" .= t]) -> SchemaValue [] <$> readLevel inv env (get "level" (get "sort" t))
   "pi" -> do
@@ -461,7 +467,7 @@ readType inv env t = case string (get "tag" t) of
     if c `elem` [builtin inv "zero",builtin inv "suc"] && not (T.null c)
       then readIndex inv env (Named (builtin inv "nat") []) t
       else do
-        readConstructorIndex inv env Nothing t
+        readConstructorIndex inv env expected t
   "literal" | get "tag" (get "literal" t) == String "natural" ->
     Runtime (Named (builtin inv "nat") []) . IndexNatural <$> natural (get "value" (get "literal" t))
   "definition" | string (get "symbol" t) `S.member` S.fromList (filter (not . T.null) [builtin inv k | k <- ["levelZero","levelSuc","levelMax"]]) ->
@@ -588,7 +594,7 @@ readType inv env t = case string (get "tag" t) of
                       , Right (actualDomains,actualLevel) <- familyTelescope family
                       , indexNormalForm (SchemaValue actualDomains actualLevel)
                           == indexNormalForm (SchemaValue domains level)
-                      , Just (reduced,_) <- Reduction.reduceHead inv t -> readType inv env reduced
+                      , Just (reduced,_) <- Reduction.reduceHead inv t -> readTypeWithExpected inv env expected reduced
                     _ -> Left failure
           values [] (zip valueEs (inputs sig))
 
@@ -714,7 +720,7 @@ readIndex inv env expected term
         Runtime domain _ | indexNormalForm domain == indexNormalForm expected -> Right actual
         _ -> refuse Semantics "Index constructor has the wrong declared domain"
   | otherwise = do
-      actual <- case readType inv env term of
+      actual <- case readTypeWithExpected inv env (Just expected) term of
         Left failure | callable@Callable{} <- expected ->
           either (const (Left failure)) Right (readIndexClosure inv env callable term)
         result -> result
@@ -816,10 +822,15 @@ readConstructorIndex inv env expected term = do
       -- Instantiate both namespaces without rewriting inserted arguments.
       concrete <- instantiate args (M.fromList (zip [0..] prior)) domain
       let contextualConstructor = get "tag" value == String "constructor" && case concrete of Named{} -> True; _ -> False
-      actual <- if hasParameter concrete && not contextualConstructor then readType inv env value else readIndex inv env concrete value
+          determined = all (`M.member` completed) [0..parameters sig-1]
+      actual <- if not determined && hasParameter concrete && not contextualConstructor
+        then readType inv env value else readIndex inv env concrete value
       case actual of
         Runtime actualDomain ix -> do
-          next <- unify completed domain actualDomain
+          -- A checked payload needs no further inference once every static
+          -- argument is known. Its contextual carrier contains caller symbols;
+          -- interpreting them again as constructor metavariables captures scope.
+          next <- if determined then pure completed else unify completed domain actualDomain
           pure (next,prior ++ [ix])
         _ -> refuse Semantics "Constructor index payload is not a runtime value"
     hasParameter Parameter{} = True
