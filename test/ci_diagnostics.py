@@ -7,6 +7,7 @@ import shlex
 import sys
 
 MARKER = 'AGDA2SYSML_CI_FAILURE '
+CASE_SUMMARY_MARKER = 'AGDA2SYSML_CI_CASES '
 
 
 def command_failure(command, expected, result, output):
@@ -43,9 +44,35 @@ def summarize(directory, destination):
     for name in ('reporting', 'spec', 'generator', 'validator', 'integration'):
         exit_file = directory / (name + '.exit')
         status = exit_file.read_text().strip() if exit_file.exists() else None
-        lines.append(f'| {name} | ' + ('Passed' if status == '0' else f'Failed (exit {status})' if status else 'Not run') + ' |')
+        result = 'Passed' if status == '0' else f'Failed (exit {status})' if status else 'Not run'
+        if name == 'integration' and status is None:
+            blocked = [dependency for dependency in ('generator', 'validator')
+                       if (directory / (dependency + '.exit')).exists()
+                       and (directory / (dependency + '.exit')).read_text().strip() != '0']
+            if blocked:
+                result = 'Blocked by failed ' + ', '.join(blocked)
+        lines.append(f'| {name} | {result} |')
         if status and status != '0':
             failures.append((name, status))
+    integration_log = directory / 'integration.log'
+    if integration_log.exists():
+        summaries = []
+        for row in integration_log.read_text(errors='replace').splitlines():
+            if CASE_SUMMARY_MARKER in row:
+                try:
+                    summary = json.loads(row.split(CASE_SUMMARY_MARKER, 1)[1])
+                    if isinstance(summary.get('cases'), list):
+                        summaries.append(summary)
+                except (ValueError, AttributeError):
+                    pass
+        if summaries:
+            summary = summaries[-1]
+            (directory / 'integration-cases.json').write_text(json.dumps(summary, indent=2) + '\n')
+            lines += ['', '### Integration cases', '', '| Case | Result | Seconds |', '| --- | --- | --- |']
+            for case in summary['cases']:
+                label = html.escape(str(case.get('case', '?'))).replace('|', '&#124;')
+                result = html.escape(str(case.get('status', '?')))
+                lines.append(f"| {label} | {result} | {case.get('seconds', '')} |")
     for name, status in failures:
         command = (directory / (name + '.command')).read_text().strip()
         lines += ['', f'### {name}: exit {status}', '', '<pre>' + html.escape(command) + '</pre>']

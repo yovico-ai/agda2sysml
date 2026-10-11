@@ -177,7 +177,29 @@ the command, exit status, expected/actual CLI result, and unresolved symbols wit
 their diagnostic reasons. Download **ci-diagnostics** for complete logs and
 failure JSON (retained seven days). Large generated model and correspondence
 bundles are excluded. An assertion mismatch also reports actual verifier
-evidence and instance counts. Reporting can be checked locally without running
+evidence and instance counts. Integration runs independent named cases and reports all failures at the end.
+A failed generation blocks only cases that require its bundle; unrelated cases
+continue. Source-trace failures are recorded separately from behavior checks.
+The target evaluator also collects expression failures after loading a valid
+model, avoiding repeated library loads to discover each bad result.
+CI also continues independent specification, generator and validator checks;
+integration requires a successfully built generator and validator. The final
+job status still fails when any check fails. The job summary lists every case,
+its status and duration, with complete results in `integration-cases.json`.
+
+For a focused integration run inside `nix develop`, select case names:
+
+```sh
+AGDA2SYSML_TEST_CASES=specialized-indexed,dependent-payload,computed-index \
+  python3 -B test/integration.py "$(cabal list-bin exe:agda2sysml)" "$PWD" \
+  "$AGDA2SYSML_TEST_VALIDATOR" "$AGDA2SYSML_TEST_JAVA"
+```
+
+Unset that variable for the complete suite. Unknown case names fail rather than
+producing an empty successful run. Self-model oracle cases require
+`self-generation`; `foundation-evaluation` requires `cli-artifacts`.
+
+Reporting and failure collection can be checked locally without running
 the generator, Agda or Pilot:
 
 ```sh

@@ -526,8 +526,10 @@ parameterizedChecks base = do
   check (M.null (P.failures specialized)) (show (P.failures specialized))
   check (T.complete generated) (show (T.diagnostics generated))
   check (key "Marker" [ty "Bool"] /= key "Marker" [ty "Tone"]) "phantom arguments collapsed"
-  check (length [i | i <- P.instances specialized,P.origin i == "Box"] == 3) "nested concrete carrier missing or duplicate"
-  check (length [i | i <- P.instances specialized,P.origin i == "genericRetain"] == 3) "omitted type arguments not recovered"
+  forM_ ["Box","genericRetain"] $ \source ->
+    forM_ [ty "Bool",ty "Tone",P.Named "Box" [ty "Bool"]] $ \argument ->
+      check (length [i | i <- P.instances specialized,P.origin i == source,P.arguments i == [argument]] == 1)
+        ("required concrete instance missing or duplicate: " ++ show (source,argument))
   forM_ [False,True] $ \b -> do
     let boxed = boxValue (ty "Bool") (B b)
     check (calculate "readBoolBox" [boxed] == B b) "specialized projection-like call changed Boolean value"
@@ -656,8 +658,10 @@ universeChecks base = do
         check (not (T.complete (T.generate changed))) message
   check (M.null (P.failures prepared)) (show (P.failures prepared))
   check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
-  check (length [i | i <- P.instances prepared,P.origin i == "Phantom"] == 3)
-    "phantom levels merged or equivalent expressions duplicated"
+  forM_ [0,2,huge] $ \value ->
+    check (length [i | i <- P.instances prepared,P.origin i == "Phantom"
+      ,P.arguments i == [P.Level (P.LevelExpr value M.empty)]] == 1)
+      "required phantom level missing or equivalent expressions duplicated"
   check (any (\i -> P.origin i == "Phantom" && P.arguments i == [P.Level (P.LevelExpr huge M.empty)]) (P.instances prepared))
     "universe level overflowed a machine integer"
   check (any (\i -> P.origin i == "inferredIdentity" && P.arguments i == [two,P.Named "High" []]) (P.instances prepared))
@@ -1117,8 +1121,9 @@ composedChecks base = do
     "conflicting evidence for an omitted runtime index was accepted"
   check (isLeft (repeatedCall (second (P.Named "Tone" []) (P.IndexInput 7))))
     "conflicting evidence for an omitted static parameter was accepted"
-  check (length [i | i <- P.instances prepared,P.origin i == "GenericEvidence"] == 2)
-    "runtime indices split static family identities"
+  forM_ [P.Named "Bool" [],P.Named "Tone" []] $ \argument ->
+    check (length [i | i <- P.instances prepared,P.origin i == "GenericEvidence",P.arguments i == [argument]] == 1)
+      "runtime indices split or removed a required static family identity"
   forM_ [False,True] $ \tag -> do
     forM_ [False,True] $ \value -> do
       let packetV = packetValue "Bool" tag (B value)

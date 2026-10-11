@@ -77,7 +77,6 @@
           } ''
             cp -r ${nixpkgs.lib.cleanSource ./.} project
             chmod -R u+w project
-            (cd project/contracts && agda Contracts.agda)
             python3 project/test/integration.py ${env.package}/bin/agda2sysml \
               project ${env.validator} ${env.pkgs.jdk21_headless}/bin/java
             mkdir "$out"

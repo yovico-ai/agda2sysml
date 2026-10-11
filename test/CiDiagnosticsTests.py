@@ -9,7 +9,10 @@ import tempfile
 import unittest
 import ast
 import sys
+import runpy
 from unittest.mock import patch
+
+from test_runner import Cases, SUMMARY_MARKER
 
 from ci_diagnostics import MARKER, assertion_failure, command_failure, summarize
 
@@ -112,6 +115,16 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(json.loads((directory / 'integration-failure-1.json').read_text()), receipt)
             self.assertEqual((directory / 'summary.md').read_text(), text)
 
+    def test_skipped_integration_reports_failed_build_prerequisite(self):
+        with tempfile.TemporaryDirectory(prefix='ci-report-test-') as temporary:
+            directory = Path(temporary)
+            (directory / 'generator.exit').write_text('1\n')
+            (directory / 'generator.command').write_text('build generator\n')
+            (directory / 'generator.log').write_text('compiler failure\n')
+            destination = directory / 'job-summary.md'
+            summarize(directory, destination)
+            self.assertIn('integration | Blocked by failed generator', destination.read_text())
+
     def test_success_is_not_reported_as_failure(self):
         with tempfile.TemporaryDirectory(prefix='ci-report-test-') as temporary:
             result = subprocess.run(['bash', str(REPOSITORY / '.github/run-check.sh'), 'spec', 'true'],
@@ -119,6 +132,176 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertNotIn('::error', result.stdout)
 
+
+
+class CaseRunnerTests(unittest.TestCase):
+    def test_multiple_failures_do_not_stop_later_cases(self):
+        events = []
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            cases = Cases()
+            for name, failure in [('first', AssertionError('bad count')), ('second', ValueError('bad JSON')), ('last', None)]:
+                with cases.case(name) as enabled:
+                    if enabled:
+                        events.append(name)
+                        if failure:
+                            raise failure
+            self.assertEqual(events, ['first', 'second', 'last'])
+            with self.assertRaises(SystemExit) as stopped:
+                cases.finish()
+        self.assertEqual(stopped.exception.code, 1)
+        summary = json.loads(captured.getvalue().split(SUMMARY_MARKER)[1].splitlines()[0])
+        self.assertEqual([r['status'] for r in summary['cases']], ['failed', 'failed', 'passed'])
+        self.assertIn('bad count', summary['cases'][0]['traceback'])
+        self.assertIn('bad JSON', summary['cases'][1]['traceback'])
+
+    def test_failed_prerequisite_blocks_only_dependents(self):
+        events = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            cases = Cases()
+            with cases.case('generation') as enabled:
+                if enabled:
+                    raise AssertionError('missing bundle')
+            with cases.case('dependent', requires=('generation',)) as enabled:
+                if enabled:
+                    events.append('invalid dependent body')
+            with cases.case('unrelated') as enabled:
+                if enabled:
+                    events.append('unrelated')
+            with self.assertRaises(SystemExit):
+                cases.finish()
+        self.assertEqual(events, ['unrelated'])
+        self.assertEqual(cases.results['dependent']['status'], 'blocked')
+        self.assertEqual(cases.results['dependent']['prerequisites'], ['generation'])
+
+    def test_nested_trace_failure_keeps_behavior_case_running(self):
+        events = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            cases = Cases(selected=['operation'])
+            with cases.case('operation') as enabled:
+                if enabled:
+                    with cases.case('trace:operation') as trace:
+                        if trace:
+                            raise AssertionError('source correspondence')
+                    events.append('behavior verified')
+            with self.assertRaises(SystemExit):
+                cases.finish()
+        self.assertEqual(events, ['behavior verified'])
+        self.assertEqual(cases.results['trace:operation']['status'], 'failed')
+
+    def test_filter_and_empty_filter_do_not_produce_false_success(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cases = Cases(selected=filter(None, ['']))
+            with cases.case('default') as enabled:
+                self.assertTrue(enabled)
+            cases.finish()
+            cases = Cases(selected=['typo'])
+            with cases.case('real') as enabled:
+                self.assertFalse(enabled)
+            with self.assertRaises(SystemExit):
+                cases.finish()
+        self.assertEqual(cases.results['typo']['status'], 'failed')
+
+    def test_real_integration_runner_reaches_later_cases_after_failures(self):
+        calls = []
+        def command(arguments, **options):
+            calls.append(arguments)
+            if arguments[1] == 'inspect':
+                output = Path(arguments[arguments.index('--output') + 1])
+                output.mkdir()
+                (output / 'inventory.json').write_text(json.dumps({'resolutions': [{'validation': {'encoding': 'relation'}}]}))
+                return subprocess.CompletedProcess(arguments, 0, '', '')
+            return subprocess.CompletedProcess(arguments, 2, '', 'controlled generator failure')
+        output = io.StringIO()
+        arguments = ['integration.py', 'generator', str(REPOSITORY), 'validator', 'java']
+        with patch.dict(os.environ, {'AGDA2SYSML_TEST_CASES': 'register,workflow,relational-inspection'}), \
+             patch.object(sys, 'argv', arguments), patch.object(subprocess, 'run', side_effect=command), \
+             contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as stopped:
+                runpy.run_path(str(REPOSITORY / 'test/integration.py'), run_name='__main__')
+        self.assertEqual(stopped.exception.code, 1)
+        self.assertEqual([arguments[1] for arguments in calls], ['generate', 'generate', 'inspect'])
+        summary = json.loads(output.getvalue().split(SUMMARY_MARKER)[1].splitlines()[0])
+        statuses = {row['case']: row['status'] for row in summary['cases']}
+        self.assertEqual(statuses['register'], 'failed')
+        self.assertEqual(statuses['workflow'], 'failed')
+        self.assertEqual(statuses['relational-inspection'], 'passed')
+
+    def test_real_evidence_and_completion_checks_preserve_requirements(self):
+        tree = ast.parse((REPOSITORY / 'test/integration.py').read_text())
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name in ('check', 'check_evidence', 'check_completion')]
+        namespace = {'sys': sys, 'assertion_failure': lambda *args: None}
+        exec(compile(ast.Module(body=helpers, type_ignores=[]), 'integration-checks', 'exec'), namespace)
+        evidence = namespace['check_evidence']
+        evidence({'comparisons': 101, 'unusedRuntimeInputs': 0, 'preserved': True},
+                 {'comparisons': 100, 'unusedRuntimeInputs': 0, 'preserved': True}, 'evidence')
+        for actual in ({'comparisons': 99, 'unusedRuntimeInputs': 0, 'preserved': True},
+                       {'comparisons': 101, 'unusedRuntimeInputs': 1, 'preserved': True},
+                       {'comparisons': 101, 'unusedRuntimeInputs': 0, 'preserved': False},
+                       {'comparisons': 101, 'unusedRuntimeInputs': 0, 'preserved': 1}):
+            with self.assertRaises(AssertionError):
+                evidence(actual, {'comparisons': 100, 'unusedRuntimeInputs': 0, 'preserved': True}, 'evidence')
+        completion = namespace['check_completion']
+        for complete, status, obligation in [(True, 0, 'discharged'), (False, 2, 'textual')]:
+            completion(subprocess.CompletedProcess([], status), {'complete': complete, 'targetValidation': 'accepted'},
+                       {'complete': complete, 'obligations': [{'status': obligation}]})
+        for status, manifest, report in [
+                (0, {'complete': False, 'targetValidation': 'accepted'}, {'complete': False, 'obligations': [{'status': 'textual'}]}),
+                (0, {'complete': True, 'targetValidation': 'accepted'}, {'complete': True, 'obligations': [{'status': 'textual'}]}),
+                (0, {'complete': True, 'targetValidation': 'rejected'}, {'complete': True, 'obligations': [{'status': 'discharged'}]})]:
+            with self.assertRaises(AssertionError):
+                completion(subprocess.CompletedProcess([], status), manifest, report)
+
+    def test_selected_case_family_runs_independent_children(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cases = Cases(selected=['payload'])
+            with cases.case('payload') as enabled:
+                self.assertTrue(enabled)
+            with cases.case('payload:provenance', requires=('payload',)) as enabled:
+                if enabled:
+                    raise AssertionError('missing origins')
+            with cases.case('payload:behavior', requires=('payload',)) as enabled:
+                self.assertTrue(enabled)
+            with self.assertRaises(SystemExit):
+                cases.finish()
+        self.assertEqual(cases.results['payload:behavior']['status'], 'passed')
+
+    def test_keyboard_interrupt_is_not_swallowed(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cases = Cases()
+            with self.assertRaises(KeyboardInterrupt):
+                with cases.case('interrupt') as enabled:
+                    if enabled:
+                        raise KeyboardInterrupt()
+
+    def test_summary_preserves_every_case_and_failure_receipt(self):
+        with tempfile.TemporaryDirectory(prefix='ci-report-test-') as temporary:
+            directory = Path(temporary)
+            (directory / 'integration.exit').write_text('1\n')
+            (directory / 'integration.command').write_text('integration runner\n')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cases = Cases()
+                for name in ('<first>', 'second'):
+                    with cases.case(name) as enabled:
+                        if enabled:
+                            raise AssertionError(name)
+                with cases.case('passing') as enabled:
+                    self.assertTrue(enabled)
+                with self.assertRaises(SystemExit):
+                    cases.finish()
+            # Simulate both complete producer output and repeated Nix excerpts.
+            (directory / 'integration.log').write_text(output.getvalue() + output.getvalue())
+            destination = directory / 'job-summary.md'
+            summarize(directory, destination)
+            summary = destination.read_text()
+            self.assertIn('&lt;first&gt;', summary)
+            self.assertIn('second', summary)
+            self.assertIn('passing', summary)
+            self.assertEqual(len(list(directory.glob('integration-failure-*.json'))), 2)
+            statuses = json.loads((directory / 'integration-cases.json').read_text())['cases']
+            self.assertEqual([r['status'] for r in statuses], ['failed', 'failed', 'passed'])
 
 if __name__ == '__main__':
     unittest.main()
