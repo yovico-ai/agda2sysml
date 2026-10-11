@@ -5,3 +5,4 @@ dist-newstyle/
 *.o
 *.class
 __pycache__/
+ci-diagnostics/

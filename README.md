@@ -172,6 +172,18 @@ CLI behavior, reproducibility, the browser review, and independent comparisons
 of parsed emitted calculations. The recursive compiler core alone has 24,542
 result comparisons, ten invalid-case checks, and a constraint-removal mutation.
 
+CI reports each check separately. On failure, open the Actions job summary for
+the command, exit status, expected/actual CLI result, and unresolved symbols with
+their diagnostic reasons. Download **ci-diagnostics** for complete logs and
+failure JSON (retained seven days). Large generated model and correspondence
+bundles are excluded. An assertion mismatch also reports actual verifier
+evidence and instance counts. Reporting can be checked locally without running
+the generator, Agda or Pilot:
+
+```sh
+nix develop --command python3 -B test/CiDiagnosticsTests.py
+```
+
 - [Project specification](SPECIFICATION.md)
 - [Project mapping format](docs/project-mapping.md) and [version 2](docs/project-mapping-v2.md)
 - [CLI and artifact contract](docs/cli.md)

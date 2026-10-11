@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from ci_diagnostics import command_failure, assertion_failure
 from open_parameters import verify_open_parameters
 from dependent_evidence import verify_dependent_evidence
 from recursive_core import verify_recursive_core
@@ -41,6 +42,7 @@ from computed_lists import verify_computed_lists
 
 def check(condition, message):
     if not condition:
+        assertion_failure(message, sys._getframe(1).f_locals)
         raise AssertionError(message)
 
 
@@ -298,11 +300,13 @@ models:
 """, encoding="utf-8")
 
     def run_automatic(root, output, status, *options, library=None):
-        result = subprocess.run([generator, "generate", "--library", str(library or (work / "spec/agda2sysml-spec.agda-lib")),
-                                 "--root", root, "--output", str(output), *options],
+        command = [generator, "generate", "--library", str(library or (work / "spec/agda2sysml-spec.agda-lib")),
+                   "--root", root, "--output", str(output), *options]
+        result = subprocess.run(command,
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env={**os.environ, "AGDA2SYSML_VERIFY_ENCODING": "1"})
-        check(result.returncode == status, f"automatic generation: {result.returncode}\n{result.stdout}\n{result.stderr}")
+        if result.returncode != status:
+            raise AssertionError(command_failure(command, status, result, output))
         if (output / "manifest.json").exists():
             check_target_trace(output)
         return result
@@ -522,12 +526,12 @@ models:
     subprocess.run(["node", str(repository / "test/review.cjs"), str(default_workflow / "review.html")], check=True)
 
     def run(mode, config, output, status, *options):
-        result = subprocess.run([generator, mode, "--mapping", str(config),
-                                 "--output", str(output), *options],
+        command = [generator, mode, "--mapping", str(config), "--output", str(output), *options]
+        result = subprocess.run(command,
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env={**os.environ, "AGDA2SYSML_VERIFY_ENCODING": "1"})
-        check(result.returncode == status,
-              f"{mode}: expected {status}, got {result.returncode}\n{result.stdout}\n{result.stderr}")
+        if result.returncode != status:
+            raise AssertionError(command_failure(command, status, result, output))
         if mode == "generate" and (output / "correspondence.json").exists():
             check_target_trace(output)
 

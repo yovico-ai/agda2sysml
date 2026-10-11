@@ -16,4 +16,33 @@ jobs:
       - uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f # v31.0.0
         with:
           extra_nix_config: experimental-features = nix-command flakes
-      - run: nix flake check --print-build-logs
+      - name: Verify diagnostic reporting
+        run: bash .github/run-check.sh reporting python3 -B test/CiDiagnosticsTests.py
+      - name: Evaluate flake
+        id: evaluation
+        run: bash .github/run-check.sh evaluation nix flake check --no-build
+      - name: Check Agda specification
+        id: spec
+        run: bash .github/run-check.sh spec nix build .#checks.x86_64-linux.spec --no-link --print-build-logs
+      - name: Check Haskell generator
+        id: generator
+        run: bash .github/run-check.sh generator nix build .#checks.x86_64-linux.generator --no-link --print-build-logs
+      - name: Check validator
+        id: validator
+        run: bash .github/run-check.sh validator nix build .#checks.x86_64-linux.validator --no-link --print-build-logs
+      - name: Check CLI integration
+        id: integration
+        run: bash .github/run-check.sh integration nix build .#checks.x86_64-linux.integration --no-link --print-build-logs
+      - name: Summarize checks
+        if: always()
+        run: |
+          mkdir -p ci-diagnostics
+          python3 -B test/ci_diagnostics.py ci-diagnostics "$GITHUB_STEP_SUMMARY"
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-diagnostics
+          path: ci-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
