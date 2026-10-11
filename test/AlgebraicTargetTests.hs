@@ -1330,6 +1330,44 @@ staticSchemaBoundaryChecks base = forM_ ["Atlas","Beacon"] $ \prefix -> do
     check (P.readType inv [Just payload,Just index,Just family]
       (call (name "selectMember") [variable 1 [],variable 2 [],variable 0 []] []) == Right payload)
       "schema-boundary reduction merged families or lost a member's dependent domain"
+  -- Reduction may expose a constructor whose omitted family cannot be
+  -- inferred from one member. The expected carrier supplies that family.
+  let box f = object ["term" .= call (name "Box") [f] []]
+      boxType = set "parameters" (Number 1) $ set "constructors" (toJSON [name "box"]) $
+        declaration (name "Box") "datatype" (signature [familyType] (universeAt (level 0)))
+      boxConstructor = set "family" (String (name "Box")) $ declaration (name "box") "constructor"
+        (signature [familyType,named "Bool",member 1 0] (box (variable 2 [])))
+      wrap = safe $ set "type" (signature [named "Bool",familyType,member 0 1] (box (variable 1 []))) $
+        operation (name "wrap") [] "Bool" (done 3 (constructor (name "box") [variable 2 [],variable 0 []]))
+      indexedBox = set "parameters" (Number 1) $ declaration (name "IndexedBox") "datatype"
+        (signature [familyType,box (variable 0 [])] (universeAt (level 0)))
+      boxInv = inv {declarations = M.union (M.fromList [(string (get "name" d),d)
+        | d <- [boxType,boxConstructor,wrap,indexedBox]]) (declarations inv)}
+      identityFamily = P.FamilyParameter 0 [boolean] zero
+      lambdaFamily = P.FamilyExpression boolean 5
+        (P.FamilyApplication identityFamily [P.Runtime boolean (P.IndexLocal 5)]) zero
+  forM_ ([(f,f) | slot <- [3,9],let f = P.OpenFamily slot [boolean] zero]
+      ++ [(lambdaFamily,identityFamily)]) $ \(family,appliedFamily) -> do
+    let index = P.Runtime boolean (P.IndexInput 7)
+        payload = P.Runtime (P.FamilyApplication appliedFamily [index]) (P.IndexInput 12)
+        context = [Just payload,Just index,Just family]
+        wrapped = call (name "wrap") [variable 1 [],variable 2 [],variable 0 []] []
+        result = P.Runtime (P.Named (name "Box") [family])
+          (P.IndexConstructor (name "box") [family] [P.IndexInput 7,P.IndexInput 12])
+        actual = P.readType boxInv context (call (name "IndexedBox") [variable 2 [],wrapped] [])
+    check (actual == Right (P.Named (name "IndexedBox") [family,result]))
+      ("reduced constructor lost the expected family and its complete payload: " ++ show actual)
+    check (isLeft (P.readType boxInv context wrapped))
+      "constructor inferred an arbitrary family from one member without a result context"
+    forM_ [P.FamilyApplication appliedFamily [P.Runtime boolean (P.IndexInput 8)]
+          ,P.FamilyApplication (P.OpenFamily 11 [boolean] zero) [index]] $ \wrong ->
+      check (isLeft (P.readType boxInv [Just (P.Runtime wrong (P.IndexInput 12)),Just index,Just family]
+        (call (name "IndexedBox") [variable 2 [],wrapped] [])))
+        "contextual reduction accepted a member from a different index or family"
+    forM_ [set "opaque" (Bool True),set "abstract" (Bool True),set "terminates" (Bool False)] $ \change ->
+      check (isLeft (P.readType boxInv {declarations = M.adjust change (name "wrap") (declarations boxInv)}
+        context (call (name "IndexedBox") [variable 2 [],wrapped] [])))
+        "expected result bypassed the checked reduction gate"
   forM_ [P.FamilyParameter 3 [P.Named "Tone" []] zero
         ,P.FamilyParameter 3 [boolean] (P.LevelExpr 1 M.empty)] $ \family ->
     check (isLeft (readCall inv family)) "static/schema bridge accepted a different domain or universe"

@@ -454,8 +454,8 @@ models:
     check(callback_evidence == {'comparisons': 220, 'invalidCasesRejected': 6, 'operations': 5},
           "callback consumers lack complete outcomes and binding/schema refusals")
     record_path_evidence = verify_dependent_record_path(self_output)
-    check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 12, 'operations': 5,
-                                  'nativeStatements': 1, 'statementComparisons': 30, 'bodyMutationsDetected': 4},
+    check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 16, 'operations': 5,
+                                  'nativeStatements': 3, 'statementComparisons': 90, 'bodyMutationsDetected': 8},
           "dependent-record path lacks complete members and projected index refusals")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
