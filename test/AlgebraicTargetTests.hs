@@ -291,6 +291,7 @@ main = do
   statementModel <- equalityStatementChecks inv
   contextualModel <- contextualMembershipChecks inv
   moduleAliasChecks inv
+  moduleConstructorRootChecks inv
   interleavedParameterChecks inv
   indexClosureChecks inv
   let generated = T.generate callInventory
@@ -1132,6 +1133,85 @@ moduleAliasChecks base = do
         ,set "compiled" (done 1 (call "missing" [variable 0 []] []))] $ \change ->
     check (isLeft (calculations functions {declarations = M.adjust change "copiedIdentity" (declarations functions)} M.! "copiedIdentity"))
       "unanchored or unsupported module alias was accepted"
+  -- A copied proper projection forwards its actual record field, including
+  -- when no generic declaration otherwise activates specialization.
+  forM_ [("readFlag","flag","Bool"),("readTone","tone","Tone")] $ \(s,f,ty) -> do
+    let copiedField = set "moduleInstanceCopy" (Bool True) $ set "projection"
+          (object ["proper" .= ("Pair" :: Text),"original" .= f,"index" .= (1 :: Int)]) $
+          operation s ["Pair"] ty (done 1 (variable 0 [f]))
+        selected = base {declarations = M.insert s copiedField (declarations base)
+          ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+            set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)]
+              ,"definitions" .= [copiedField]]]) (document base)
+          ,modelRequirements = M.map (S.insert (s,"behavior")) (modelRequirements base)}
+        prepared = P.prepare selected
+        expanded = P.inventory prepared
+        finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+        table = A.functions expanded finite (fst (A.discover expanded finite))
+    check (M.lookup s (P.openRoots prepared) == Just f && M.member f (declarations expanded))
+      "copied projection root did not resolve to its materialized field"
+    check (T.complete (T.generate selected)) (show (T.diagnostics (T.generate selected)))
+    calculation <- either (fail . show) pure (table M.! f)
+    forM_ [False,True] $ \b -> forM_ ["red","blue"] $ \color ->
+      check (eval [R "Pair" (M.fromList [("flag",B b),("tone",E "Tone" color)])] (A.body calculation)
+        == if f == "flag" then B b else E "Tone" color) "copied projection read another field"
+    forM_ [set "abstract" (Bool True),set "compiled" (done 1 (variable 0 ["missing"]))
+        ,set "projection" (object ["proper" .= ("Pair" :: Text),"index" .= (1 :: Int)])
+        ,set "type" (signature [named "Pair"] (named (if ty == "Bool" then "Tone" else "Bool")))] $ \change ->
+      check (not (T.complete (T.generate selected {declarations = M.adjust change s (declarations selected)})))
+        "unproved or incompatible copied projection was admitted"
+
+-- A selected module-copy constructor must resolve to a materialized canonical
+-- constructor at the actual module arguments, not a fictional alias instance.
+moduleConstructorRootChecks :: Inventory -> IO ()
+moduleConstructorRootChecks base = forM_ ["Parcel","Envelope"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      family = name "Pair"; ctor = name "PairValue"; copy = name "Copy"
+      v i = object ["term" .= variable i []]
+      applied ts = object ["term" .= call family (map (get "term") ts) []]
+      piType a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= False,"body" .= b]]]
+      generic = signature [universeAt (level 0)]
+      pair = set "parameters" (Number 2) $ set "constructors" (toJSON [ctor]) $
+        declaration family "datatype" (generic (generic (universeAt (level 0))))
+      original = set "parameters" (Number 2) $ set "family" (String family) $
+        declaration ctor "constructor" (generic (generic (piType (v 1) (piType (v 0) (applied [v 1,v 0])))))
+      owner = set "parameters" (Number 1) $ declaration copy "datatype" (generic (universeAt (level 0)))
+      alias suffix fixed = set "parameters" (Number 1) $ set "family" (String copy)
+        $ set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String ctor)
+        $ declaration (name suffix) "constructor" (generic
+          (piType (named fixed) (piType (v 0) (applied [named fixed,v 0]))))
+      aliases = [alias "Bool" "Bool",alias "Tone" "Tone",alias "Again" "Bool"]
+      ds = pair:original:owner:aliases
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= aliases]]) (document base)
+        ,modelRequirements = M.singleton "copy" (S.fromList [(s,"structure") | s <- [family,ctor,"Tone",name "Bool",name "Tone",name "Again"]])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      open = P.Open 0 (P.LevelExpr 0 M.empty)
+      key symbol fixed = P.typeKey (P.Named symbol [P.Named fixed [],open])
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover expanded finite)
+      calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  forM_ [("Bool","Bool",B False),("Tone","Tone",E "Tone" "red"),("Again","Bool",B True)] $ \(suffix,fixed,value) -> do
+    target <- maybe (fail "selected constructor has no target") pure (M.lookup (name suffix) (P.openRoots prepared))
+    check (target == key ctor fixed && M.member target (declarations expanded))
+      "selected constructor target was not materialized at canonical module arguments"
+    calculation <- maybe (fail "materialized constructor has no native calculation") pure (M.lookup target calculations)
+    forM_ [B False,B True,R "Opaque" (M.singleton "payload" (Z (10^40)))] $ \payload ->
+      check (eval [value,payload] (A.body calculation) == R (key family fixed) (M.fromList
+        [("constructor",E (key family fixed <> ".constructor-tag") target)
+        ,(target <> ".payload0",value),(target <> ".payload1",payload)]))
+        "module constructor changed its complete ordered payload"
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  forM_ [set "canonicalConstructor" Null,set "canonicalConstructor" (String "missingConstructor")
+      ,set "abstract" (Bool True),set "moduleInstanceCopy" (Bool False)
+      ,set "type" (generic (piType (named "Tone") (piType (v 0) (applied [named "Bool",v 0]))))] $ \change -> do
+    let invalid = inv {declarations = M.adjust change (name "Bool") (declarations inv)}
+    check (not (T.complete (T.generate invalid))) "unproved or incompatible constructor alias was admitted"
 
 emptyCarrierChecks :: Inventory -> IO ()
 emptyCarrierChecks base = do

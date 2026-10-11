@@ -100,6 +100,40 @@ def verify_schema_records(output):
         return model.invoke(symbol, [*[bindings[f] for f, _, _, _ in model.calculations[symbol][0]
                                       if f.startswith(('typeArgument', 'familyArgument'))], *values])
 
+    projection_aliases = {}
+    projection_comparisons = projection_mutations = 0
+
+    def alias(module, name):
+        key = module, name
+        if key not in projection_aliases:
+            rows = [o for o in report['obligations']
+                    if o['symbol'].startswith('Agda2SysML.' + module + '.Transport._#')
+                    and o['symbol'].rsplit('.', 1)[-1].split('#', 1)[0] == name
+                    and o['sourceKind'] == 'behavior']
+            assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], key
+            assert rows[0]['source']['checkedDefinition'] == rows[0]['symbol'], 'projection alias provenance lost'
+            projection_aliases[key] = target_name(rows[0]['target'])
+        return projection_aliases[key]
+
+    def projected(module, name, binding, expected, arguments=None):
+        nonlocal projection_comparisons
+        result = call(alias(module, name), binding)
+        if arguments is not None:
+            result = model.invoke_callback_many(result, arguments, True, 0)
+        expect(result, expected)
+        projection_comparisons += 1
+
+    def mutate_projection(module, name, binding, wrong, expected):
+        nonlocal projection_mutations
+        symbol = alias(module, name)
+        saved = model.calculations[symbol]
+        model.calculations[symbol] = (saved[0], ('literal', wrong), saved[2])
+        try:
+            refuse(lambda: projected(module, name, binding, expected))
+            projection_mutations += 1
+        finally:
+            model.calculations[symbol] = saved
+
     statement_names = (*( 'OpenParameters.Transport.' + name for name in
                          ('payload-roundtrip', 'append-preserves', 'orElse-preserves', 'resolve-preserves')), *(
         'FamilyRelations.Transport.' + name for name in (
@@ -187,6 +221,18 @@ def verify_schema_records(output):
         refresh()
         binding = record(binding_type, {slots['_≈_'][0]: approximation, slots['classifier'][0]: classifier,
                                        **{slots[name][0]: value for name, value in callbacks.items()}})
+        projected('OpenParameters', '_≈_', binding, approximation)
+        projected('OpenParameters', 'classifier', binding, classifier)
+        projected('OpenParameters', 'same', binding, approximate(classifier), [classifier])
+        for i in range(3):
+            projected('OpenParameters', 'encode', binding, natives[i], [sources[i]])
+            projected('OpenParameters', 'admitted', binding, membership(classifier, i), [sources[i]])
+            projected('OpenParameters', 'decode', binding, sources[i], [natives[i], membership(classifier, i)])
+            projected('OpenParameters', 'same-members', binding, membership(classifier, i),
+                      [classifier, classifier, approximate(classifier), natives[i], membership(classifier, i)])
+        refuse(lambda: model.invoke_callback_many(call(alias('OpenParameters', 'decode'), binding),
+                                                  [natives[0], membership(1-classifier, 0)], True, 0))
+        mutate_projection('OpenParameters', 'classifier', binding, 1-classifier, classifier)
         # Payload is a type binder after the runtime binding. Exercise two
         # unrelated structured extents, preserving the complete binding,
         # classifier, equality witness, and payload through all projections.
@@ -379,6 +425,15 @@ def verify_schema_records(output):
     refresh()
     binding = record(binding_type, {slots['member'][0]: schema,
                                    **{slots[name][0]: value for name, value in callbacks.items()}})
+    projected('FamilyRelations', 'member', binding, schema)
+    for c in (0, 1):
+        for i in range(3):
+            projected('FamilyRelations', 'encode', binding, natives[i], [c, source_members[c, i]])
+            projected('FamilyRelations', 'admitted', binding, members[c, i], [c, source_members[c, i]])
+            projected('FamilyRelations', 'decode', binding, source_members[c, i], [c, natives[i], members[c, i]])
+        refuse(lambda: model.invoke_callback_many(call(alias('FamilyRelations', 'decode'), binding),
+                                                  [c, natives[0], members[1-c, 0]], True, 0))
+    mutate_projection('FamilyRelations', 'member', binding, record(schema_type, {'items': ()}), schema)
     equality_type = next(t for f, t, _, _ in model.carriers[at_type][1] if f == field(at_type, '.index-equality'))
     equalities = {c: call(ctor(equality_type), c) for c in (0, 1)}
     values = {}
@@ -431,6 +486,9 @@ def verify_schema_records(output):
             finally:
                 model.calculations[symbol] = (inputs, body, assertions)
     assert exercised == set(statement_names), ('unexecuted schema laws', set(statement_names) - exercised)
+    assert len(projection_aliases) == 11
     return {'operations': len(roots), 'statements': len(exercised), 'statementMutationsDetected': statement_mutations,
             'comparisons': comparisons, 'invalidBindingsRejected': rejected,
+            'projectionAliasRoots': len(projection_aliases), 'projectionAliasComparisons': projection_comparisons,
+            'projectionAliasMutationsDetected': projection_mutations,
             'bodyMutationsDetected': mutations, 'proofCallbackChecks': callback_checks}
