@@ -2,7 +2,7 @@
 import itertools
 import json
 from pathlib import Path
-from emitted_model import Extent, Model, Record, same
+from emitted_model import BodyCalculation, Extent, Model, Record, same
 from open_parameters import target_name
 
 
@@ -18,7 +18,8 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], ('record operation missing', operation, rows)
         roots[operation] = target_name(rows[0]['target'])
     laws = {}
-    for law in ('prefix-preserves', 'encode-decode', 'input-contract-sufficient'):
+    for law in ('prefix-preserves', 'encode-decode', 'input-contract-sufficient',
+                'decode-encode', 'input-contract-roundtrip', 'operation-preserves'):
         rows = [o for o in report['nativeStatements']
                 if o['symbol'].startswith(prefix + 'Bound.' + law + '#') and '@' not in o['symbol']]
         assert len(rows) == 1 and rows[0]['status'] == 'translated' and rows[0]['target'], ('record law missing', law, rows)
@@ -61,6 +62,9 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
         return model.invoke(symbol, [*parameters, *values])
     def replace(record, field, value):
         return Record(record.type, tuple((k, value if k == field else v) for k, v in record.fields))
+    def callback(body, environment=None):
+        return BodyCalculation((('value', source_type),), source_type, body, environment or {})
+    identity = callback(('reference', 'value'))
     rejected = comparisons = statement_comparisons = mutations = 0
     def refuse(action):
         nonlocal rejected
@@ -101,9 +105,15 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
             assert same(model.invoke(roots['Bound.input-contract-required'], [*call_bindings, expected]), proof), \
                 'required input contract changed the complete equality evidence'
             for law, values in (('prefix-preserves', [source]), ('encode-decode', [expected]),
-                                ('input-contract-sufficient', [raw, proof])):
+                                ('input-contract-sufficient', [raw, proof]), ('decode-encode', [source]),
+                                ('input-contract-roundtrip', [expected]), ('operation-preserves', [identity, source])):
                 assert model.invoke(laws[law], [*call_bindings, *values]) is True, ('record constraint failed', law)
                 statement_comparisons += 1
+            changed_prefix = construct(prefix_type, [contexts[1 - contexts.index(context)], index], bindings)
+            changed = construct(source_type, [changed_prefix, member(index, (token + 1) % 3)], bindings)
+            replacement = callback(('reference', 'changed'), {'changed': changed})
+            assert model.invoke(laws['operation-preserves'], [*call_bindings, replacement, source]) is True
+            statement_comparisons += 1
             comparisons += 5
 
         index, other = indices[:2]
@@ -124,7 +134,10 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
                 (roots['Bound.input-contract-required'], [*call_bindings, native], wrong_proof, proof),
                 (laws['prefix-preserves'], [*call_bindings, source], False, True),
                 (laws['encode-decode'], [*call_bindings, native], False, True),
-                (laws['input-contract-sufficient'], [*call_bindings, raw, proof], False, True)):
+                (laws['input-contract-sufficient'], [*call_bindings, raw, proof], False, True),
+                (laws['decode-encode'], [*call_bindings, source], False, True),
+                (laws['input-contract-roundtrip'], [*call_bindings, native], False, True),
+                (laws['operation-preserves'], [*call_bindings, identity, source], False, True)):
             saved = model.calculations[symbol]
             model.calculations[symbol] = (saved[0], ('literal', wrong), saved[2])
             try:
@@ -137,6 +150,10 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
                     mutations += 1
             finally:
                 model.calculations[symbol] = saved
+        invalid_source = replace(source, source_second, member(other, 0))
+        refuse(lambda: model.invoke(laws['decode-encode'], [*call_bindings, invalid_source]))
+        invalid_callback = callback(('reference', 'changed'), {'changed': invalid_source})
+        refuse(lambda: model.invoke(laws['operation-preserves'], [*call_bindings, invalid_callback, source]))
         refuse(lambda: model.invoke(roots['admitInput'], [*call_bindings, wrong_raw, proof]))
         refuse(lambda: model.invoke(laws['input-contract-sufficient'], [*call_bindings, wrong_raw, proof]))
         refuse(lambda: model.invoke(roots['admitInput'], [*call_bindings, construct(raw_type, [p, carrier], bindings), wrong_proof]))

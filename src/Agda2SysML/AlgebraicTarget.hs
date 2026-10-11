@@ -311,15 +311,24 @@ indexExpression inv finite helpers shapes env expected t = do
               parameterCount <- case M.lookup c (declarations inv) of
                 Just def | get "runtimeParameters" def /= Null -> integer (get "runtimeParameters" def)
                 _ -> Right 0
-              prefix <- if parameterCount == 0 then pure [] else case expected of
-                Fibre owner indices | owner == shapeSymbol sh && length indices >= parameterCount -> pure (take parameterCount indices)
+              -- Captures are explicit in specialized indices. Datatype value
+              -- parameters still omitted by Agda come from the local expected
+              -- fibre; record parameters already occur in the supplied payload.
+              let captures = array (get "nativeIndexCaptures" term)
+                  explicitParameters = if isRecord sh then 0 else length captures
+              unless (parameterCount >= explicitParameters && parameterCount <= length (payload con))
+                (refuse Syntax "Structured index constructor parameter arity mismatch")
+              prefix <- if parameterCount == explicitParameters then pure [] else case expected of
+                Fibre owner indices | owner == shapeSymbol sh && length indices >= parameterCount ->
+                  pure (take (parameterCount-explicitParameters) (drop explicitParameters indices))
                 _ -> refuse Representation "Structured index constructor needs its contextual value parameters"
-              let supplied = drop parameterCount (payload con)
-                  (arguments,rest) = span ((== String "apply") . get "tag") es
-              unless (length arguments == length supplied) (refuse Syntax "Structured index constructor arity mismatch")
+              let (arguments,rest) = span ((== String "apply") . get "tag") es
+              terms <- traverse applicationValue arguments
+              let supplied = map Right captures ++ map Left prefix ++ map Right terms
+              unless (length supplied == length (payload con)) (refuse Syntax "Structured index constructor arity mismatch")
               values <- foldM (\prior ((_,typ),arg) -> do
-                value <- applicationValue arg >>= indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) typ)
-                pure (prior ++ [value])) prefix (zip supplied arguments)
+                value <- either pure (indexExpression inv finite helpers shapes env (mapCarrier (instantiate prior) typ)) arg
+                pure (prior ++ [value])) [] (zip (payload con) supplied)
               eliminate (familyCarrier sh (map (instantiate values) (resultIndices con)),
                 Construct (shapeSymbol sh) (construction (Just term) sh con values)) rest
             Nothing -> do
@@ -341,7 +350,14 @@ indexExpression inv finite helpers shapes env expected t = do
             let supplied = drop dropped (inputs helper)
                 (apps,rest) = splitAt (length supplied) es
             unless (length apps == length supplied) (refuse Syntax "Computed index helper arity mismatch")
-            actuals <- traverse (\arg -> applicationValue arg >>= infer) apps
+            -- With a complete input telescope, check arguments in order. In
+            -- particular an omitted constructor parameter belongs to this
+            -- helper input, not to the surrounding index expression's result.
+            actuals <- if dropped == 0 then foldM (\prior (domain,arg) -> do
+                let actualDomain = mapCarrier (instantiate (map snd prior)) domain
+                value <- applicationValue arg >>= indexExpression inv finite helpers shapes env actualDomain
+                pure (prior ++ [(actualDomain,value)])) [] (zip supplied apps)
+              else traverse (\arg -> applicationValue arg >>= infer) apps
             known <- foldM (recoverCarrierInputs shapes canonicalIndex) M.empty (zip supplied (map fst actuals))
             prefix <- traverse (\i -> maybe (refuse Representation "Cannot recover omitted computed index") Right
               (M.lookup i known)) [0..dropped-1]

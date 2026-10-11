@@ -1387,6 +1387,7 @@ indexTerm depth (IndexInput i) = object ["tag" .= ("variable" :: Text),"index" .
 indexTerm _ (IndexNatural n) = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= n]]
 indexTerm depth (IndexSuccessor i) = object ["tag" .= ("native-index-successor" :: Text),"predecessor" .= indexTerm depth i]
 indexTerm depth (IndexConstructor c args values) = object ["tag" .= ("constructor" :: Text),"symbol" .= instanceKey c args
+  ,"nativeIndexCaptures" .= map (indexTerm depth . snd) (snd (captureArguments args))
   ,"eliminations" .= map (application . indexTerm depth) values]
 indexTerm depth (IndexCall f args values) = object ["tag" .= ("definition" :: Text),"symbol" .= instanceKey f args
   ,"nativeFullArguments" .= True

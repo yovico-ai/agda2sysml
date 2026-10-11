@@ -33,7 +33,7 @@ def verify_dependent_patterns(output):
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], name
         roots[name] = target_name(rows[0]['target'])
     law_names = [f'RelationBindings.{n}' for n in ('lookup-preserves', 'nonbinding-preserves-position',
-                 'endpoint-preserves', 'equation-complete', 'equation-sound')] + ['Sharing.reconstruction']
+                 'endpoint-preserves', 'equation-complete', 'equation-sound', 'new-binding-position')] + ['Sharing.reconstruction']
     laws = {}
     for name in law_names:
         rows = [s for s in report['nativeStatements'] if s['symbol'].startswith('Agda2SysML.' + name + '#')]
@@ -142,6 +142,7 @@ def verify_dependent_patterns(output):
                     lexical_env = values(lexical_types, lexical_data)
                     different_sizes += len(ts) != len(lexical_types)
                     check_operation('RelationBindings.boundValues', bindings, [runtime, lexical, layout, env], lexical_env)
+                    law('RelationBindings.new-binding-position', bindings, [runtime, lexical, types[0], layout])
 
                     def endpoint_laws(t, endpoint, datum):
                         args = [runtime, lexical, t, layout, endpoint, env]
