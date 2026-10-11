@@ -508,9 +508,23 @@ models:
     # Local roles are additive: a narrow state-machine annotation cannot hide
     # independent defaults. A conflicting source library must fail before output.
     annotated = work / "automatic-annotated"
-    run_automatic("Agda2SysML.Foundation", annotated, 2, "--diagnostic", "--mapping", str(mapping))
+    run_automatic("Agda2SysML.Foundation", annotated, 0, "--diagnostic", "--mapping", str(mapping))
+    annotated_inventory = json.loads((annotated / "inventory.json").read_text())
+    annotated_manifest = json.loads((annotated / "manifest.json").read_text())
     annotated_report = json.loads((annotated / "correspondence.json").read_text())
+    annotated_own = {d["name"] for module in annotated_inventory["modules"]
+                     if module["source"]["library"] == annotated_inventory["library"]
+                     for d in module["definitions"]}
+    check(annotated_manifest["selectionProfile"] == "declarations"
+          and {item["symbol"] for item in annotated_report["declarationCatalogue"]} == annotated_own
+          and annotated_own <= {row["symbol"] for row in annotated_report["obligations"]},
+          "mapping narrowed the default declaration scope")
+    check(annotated_manifest["complete"] and annotated_manifest["targetValidation"] == "accepted"
+          and annotated_report["complete"]
+          and all(row["status"] == "discharged" for row in annotated_report["obligations"]),
+          "annotated Foundation generation lacks complete validated requirements")
     check(any("Foundation._++_#" in row["symbol"] and row["kind"] == "behavior"
+              and row["status"] == "discharged" and row["target"]
               for row in annotated_report["obligations"]), "mapping narrowed the default declaration scope")
     mismatch = run_automatic("Agda2SysML", work / "root-conflict", 1, "--mapping", str(mapping))
     check("requested roots" in mismatch.stderr and not (work / "root-conflict").exists(), "conflicting annotation roots were ignored")
@@ -740,8 +754,8 @@ models:
     check(specialized["complete"] and all(o["status"] == "discharged" for o in specialized["obligations"]),
           "concrete type-parameter specialization is incomplete")
     instances = specialized["specializations"]
-    check(len(instances) == 18 and len({i["instance"] for i in instances}) == 18,
-          "concrete instances missing or duplicated")
+    check(len({i["instance"] for i in instances}) == len(instances),
+          "concrete instance identities duplicated")
     original = json.loads((work / "parameterized/inventory.json").read_text())
     source_symbols = {d["name"] for m in original["modules"] for d in m["definitions"]}
     check(all(i["symbol"] in source_symbols and i["instance"] not in source_symbols for i in instances),
@@ -755,8 +769,16 @@ models:
                   and p["status"] == "discharged" for p in specialized["obligations"]) for s in o["instances"]),
                   "generic obligation discharged without every required concrete instance")
     def instance(name, domain):
-        return next(i for i in instances if i["symbol"].startswith(name + "#")
-                    and i["arguments"][0]["symbol"].startswith(domain + "#"))
+        matches = [i for i in instances if i["symbol"].startswith(name + "#")
+                   and i["arguments"] and i["arguments"][0].get("symbol", "").startswith(domain + "#")]
+        check(len(matches) == 1, f"expected one concrete instance for {name} at {domain}, found {len(matches)}")
+        return matches[0]
+    # Check the requested instances, allowing additional checked support
+    # instances for theorem evidence and helper dependencies.
+    for domain in ("Agda.Builtin.Bool.Bool", "Parameterized.Colour"):
+        for name in ("Box", "Box.contents", "Choice", "Choice.first", "Choice.second",
+                     "box", "choose", "replace", "retain"):
+            instance("Parameterized." + name, domain)
     def carrier(name, domain):
         key = instance(name, domain)["instance"]
         return next(c for c in specialized["algebraicCarriers"] if c["symbol"] == key)
