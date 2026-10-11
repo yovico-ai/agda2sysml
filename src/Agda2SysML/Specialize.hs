@@ -567,14 +567,30 @@ readType inv env t = case string (get "tag" t) of
           let staticEs = [e | (TypePosition _,e) <- zip (argumentSlots sig) es]
               valueEs = [e | (ValuePosition _,e) <- zip (argumentSlots sig) es]
           args <- readStaticArguments inv env (parameterKinds sig) staticEs
-          values <- foldM (\prior (e,domain) -> do
-            contextual <- instantiate args (M.fromList (zip [0..] prior)) domain
-            value <- app e >>= readIndex inv env contextual
-            case value of
-              Runtime domain ix -> pure (prior ++ [case domain of Callable{} -> typedIndex domain ix; _ -> ix])
-              _ -> refuse Semantics "Computed index argument is not a value") [] (zip valueEs (inputs sig))
-          out <- instantiate args (M.fromList (zip [0..] values)) (output sig)
-          eliminateIndices inv env (Runtime out (IndexCall name args values)) (drop arity es)
+          let values prior [] = do
+                out <- instantiate args (M.fromList (zip [0..] prior)) (output sig)
+                eliminateIndices inv env (Runtime out (IndexCall name args prior)) (drop arity es)
+              values prior ((e,domain):rest) = do
+                contextual <- instantiate args (M.fromList (zip [0..] prior)) domain
+                term <- app e
+                case readIndex inv env contextual term of
+                  Right (Runtime actual ix) -> values
+                    (prior ++ [case actual of Callable{} -> typedIndex actual ix; _ -> ix]) rest
+                  Right _ -> refuse Semantics "Computed index argument is not a value"
+                  Left failure -> case contextual of
+                    -- A static family and a stored schema are not interchangeable
+                    -- runtime values. A checked transparent equation can instead
+                    -- eliminate the call at these actual source arguments. Retain
+                    -- the caller's scope and require the same family telescope;
+                    -- blocked reduction preserves the original refusal.
+                    SchemaValue domains level
+                      | Right family <- readType inv env term
+                      , Right (actualDomains,actualLevel) <- familyTelescope family
+                      , indexNormalForm (SchemaValue actualDomains actualLevel)
+                          == indexNormalForm (SchemaValue domains level)
+                      , Just (reduced,_) <- Reduction.reduceHead inv t -> readType inv env reduced
+                    _ -> Left failure
+          values [] (zip valueEs (inputs sig))
 
 -- Projection-like checked calls omit a source prefix. Infer that prefix only
 -- from the supplied values' declared types, then recheck the whole application.

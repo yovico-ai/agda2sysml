@@ -293,6 +293,7 @@ main = do
   moduleAliasChecks inv
   moduleConstructorRootChecks inv
   moduleCarrierRootChecks inv
+  staticSchemaBoundaryChecks inv
   interleavedParameterChecks inv
   indexClosureChecks inv
   let generated = T.generate callInventory
@@ -1276,6 +1277,76 @@ moduleCarrierRootChecks base = forM_ ["Cargo","Packet"] $ \prefix -> do
           ,"body" .= call family [get "term" (named "Bool")] []])] $ \change ->
     check (not (T.complete (T.generate inv {declarations = M.adjust change (name "Bool") (declarations inv)})))
       "unproved or ill-applied module carrier equation was admitted"
+
+-- Checked partial evaluation bridges a static-family argument at a stored
+-- schema slot without changing the helper's existing runtime signature.
+staticSchemaBoundaryChecks :: Inventory -> IO ()
+staticSchemaBoundaryChecks base = forM_ ["Atlas","Beacon"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      boolean = P.Named "Bool" []; zero = P.LevelExpr 0 M.empty
+      schema = P.SchemaValue [boolean] zero
+      v i = object ["term" .= variable i []]
+      familyType = signature [named "Bool"] (universeAt (level 0))
+      safe = set "sourceModule" (String prefix) . set "opaque" (Bool False) . set "terminates" (Bool True)
+      helper = safe $ set "type" (signature [named "Bool",familyType,named "Bool"] (named "Bool")) $
+        operation (name "select") [] "Bool" (done 3 (variable 0 []))
+      member f i = object ["term" .= set "eliminations" (toJSON [application (variable i [])]) (variable f [])]
+      memberHelper = safe $ set "type" (signature [named "Bool",familyType,member 0 1] (member 1 2)) $
+        operation (name "selectMember") [] "Bool" (done 3 (variable 0 []))
+      indexed term = object ["term" .= call (name "Ticket") [term] []]
+      ticket = set "constructors" (toJSON [name "stamp"]) $
+        declaration (name "Ticket") "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      stamp = set "family" (String (name "Ticket")) $ declaration (name "stamp") "constructor"
+        (signature [named "Bool"] (indexed (variable 0 [])))
+      use = safe $ set "type" (signature [familyType,named "Bool"
+          ,indexed (call (name "select") [variable 0 [],variable 1 [],variable 0 []] [])]
+          (indexed (variable 1 []))) $
+        operation (name "preserve") [] "Bool" (done 3 (variable 0 []))
+      ds = [helper,memberHelper,ticket,stamp,use]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= prefix,"safe" .= True,"terminationCheck" .= True]]) $
+          set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= ds]]) (document base)
+        ,modelRequirements = M.singleton "boundary" (S.fromList
+          [(name "select","behavior"),(name "selectMember","behavior"),(name "Ticket","structure")
+          ,(name "stamp","structure"),(name "preserve","behavior")])}
+      readCall source family = P.readType source
+        [Just (P.Runtime boolean (P.IndexInput 7)),Just family,Just (P.Runtime boolean (P.IndexInput 2))]
+        (call (name "select") [variable 2 [],variable 1 [],variable 0 []] [])
+      generated = T.generate inv
+  sig <- either (fail . show) pure (P.signature inv helper)
+  check (P.parameters sig == 0 && P.inputs sig == [boolean,schema,boolean])
+    "static/schema bridge changed the existing runtime signature"
+  forM_ [P.FamilyParameter 3 [boolean] zero,P.OpenFamily 5 [boolean] zero] $ \family ->
+    check (readCall inv family == Right (P.Runtime boolean (P.IndexInput 7)))
+      "checked schema-boundary reduction lost the caller's index scope"
+  check (readCall inv (P.Runtime schema (P.IndexInput 11)) == Right (P.Runtime boolean
+    (P.IndexCall (name "select") [] [P.IndexInput 2,P.IndexInput 11,P.IndexInput 7])))
+    "stored-schema call was reclassified or lost its runtime binding"
+  forM_ [3,9] $ \slot -> do
+    let family = P.FamilyParameter slot [boolean] zero
+        index = P.Runtime boolean (P.IndexInput 7)
+        payload = P.Runtime (P.FamilyApplication family [index]) (P.IndexInput 12)
+    check (P.readType inv [Just payload,Just index,Just family]
+      (call (name "selectMember") [variable 1 [],variable 2 [],variable 0 []] []) == Right payload)
+      "schema-boundary reduction merged families or lost a member's dependent domain"
+  forM_ [P.FamilyParameter 3 [P.Named "Tone" []] zero
+        ,P.FamilyParameter 3 [boolean] (P.LevelExpr 1 M.empty)] $ \family ->
+    check (isLeft (readCall inv family)) "static/schema bridge accepted a different domain or universe"
+  forM_ [set "opaque" (Bool True),set "abstract" (Bool True),set "terminates" (Bool False)
+        ,set "compiled" (split 0 [("true",0,done 2 (variable 0 [])),("false",0,done 2 (variable 0 []))])] $ \change ->
+    check (isLeft (readCall inv {declarations = M.adjust change (name "select") (declarations inv)}
+      (P.FamilyParameter 3 [boolean] zero))) "unavailable checked reduction crossed a schema boundary"
+  check (T.complete generated) (show (T.diagnostics generated))
+  let prepared = P.prepare inv; expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      table = A.functions expanded M.empty shapes
+  target <- maybe (fail "schema-boundary caller has no native root") pure (M.lookup (name "preserve") (P.openRoots prepared))
+  calculation <- either (fail . show) pure (table M.! target)
+  forM_ [False,True] $ \tag -> do
+    let value = R (name "Ticket") (M.fromList [("constructor",E (name "Ticket" <> ".constructor-tag") (name "stamp"))
+          ,(name "Ticket" <> ".index0",B tag),(name "stamp" <> ".payload0",B tag)])
+    check (eval [B tag,value] (A.body calculation) == value) "schema-boundary caller changed the complete indexed value"
 
 emptyCarrierChecks :: Inventory -> IO ()
 emptyCarrierChecks base = do
