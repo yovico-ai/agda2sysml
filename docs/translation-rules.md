@@ -375,7 +375,12 @@ parameter count, matching static arguments, and the complete payload arity.
 Runtime record parameters precede the fields and are accounted for separately.
 Nested projections normalize recursively; dependent evidence remains the
 original field value. Unknown helpers, abstract declarations and incompatible
-metadata do not justify reduction. This comparison rule preserves the original
+metadata do not justify reduction. At a checked runtime-value boundary, a type
+annotation equal to the complete normalized domain does not change membership.
+This comparison is symmetric and applies inside nested carriers and callback
+contracts. Different callback references and incompatible annotations remain
+distinct; applied callback heads retain the type evidence needed for capture
+handling. This comparison rule preserves the original
 carrier arguments and emitted expressions. Native index lowering validates the
 constructor payload before applying trailing projections through the existing
 checked record-projection path; projections are not counted as payload arguments.

@@ -148,6 +148,7 @@ main = do
   familyParameterChecks
   symbolicFamilyScopeChecks
   recordIndexNormalizationChecks
+  indexAnnotationChecks
   constructorScopeChecks
   constructorCaptureChecks
   constructorContextChecks
@@ -3988,3 +3989,38 @@ constructorContextChecks = forM_ ["ContextPacket","ContextEnvelope"] $ \owner ->
   check (isLeft (A.function capturedInventory M.empty capturedShapes
       (capturedOperation (set "nativeIndexCaptures" (toJSON [v 0]) supplied))))
     "datatype capture recovery equated unrelated caller inputs"
+
+-- A callback annotation repeats the already checked Runtime domain. It must
+-- not change dependent membership, and must never equate different callbacks.
+indexAnnotationChecks :: IO ()
+indexAnnotationChecks = forM_ ["AnnotatedPacket","AnnotatedEnvelope"] $ \owner -> do
+  let bool = P.Named "Bool" []
+      callback = P.Callable [bool] bool
+      otherCallback = P.Callable [bool,bool] bool
+      fn = P.IndexInput 7
+      typed = P.IndexTyped callback fn
+      member ix = P.Named owner [P.Runtime callback ix]
+      accept = owner <> ".accept"
+      declarationType = signature [universeAt (level 0),object ["term" .= variable 0 []]] (universeAt (level 0))
+      inv = Inventory (object []) (M.singleton accept (set "parameters" (Number 1)
+        (declaration accept "datatype" declarationType))) M.empty M.empty
+      checkMember expected actual = P.readType inv
+        [Just (P.Runtime actual (P.IndexInput 9)),Just expected]
+        (call accept [variable 1 [],variable 0 []] [])
+      wrappers = [id,\ty -> P.Named "Sequence" [ty],\ty -> P.Callable [ty] ty]
+  forM_ wrappers $ \wrap -> do
+    let bare = wrap (member fn)
+        annotated = wrap (member typed)
+    check (checkMember bare annotated == Right (P.Named accept [bare,P.Runtime annotated (P.IndexInput 9)]))
+      "redundant callback annotation changed the checked dependent domain"
+    check (checkMember annotated bare == Right (P.Named accept [annotated,P.Runtime bare (P.IndexInput 9)]))
+      "dependent-domain annotation comparison was asymmetric"
+    forM_ [P.IndexTyped callback (P.IndexInput 8),P.IndexTyped otherCallback fn] $ \wrong ->
+      check (isLeft (checkMember bare (wrap (member wrong)) ))
+        "annotation normalization equated distinct callbacks or incompatible type evidence"
+  let nested = P.Callable [member typed] (member typed)
+      bareNested = P.Callable [member fn] (member fn)
+      annotatedNested = P.Named owner [P.Runtime nested (P.IndexTyped nested (P.IndexInput 3))]
+      plainNested = P.Named owner [P.Runtime bareNested (P.IndexInput 3)]
+  check (not (isLeft (checkMember plainNested annotatedNested)))
+    "nested callback domains were not normalized before checking redundant annotations"

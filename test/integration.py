@@ -361,10 +361,10 @@ models:
           and family_evidence['mutationsDetected'] == 7,
           'dependent and partial families lack complete operations or mismatch checks')
     check(contextual_evidence['operations'] == 11
-          and contextual_evidence['nativeStatements'] == 2
-          and contextual_evidence['comparisons'] >= 50
-          and contextual_evidence['invalidCasesRejected'] >= 16
-          and contextual_evidence['mutationsDetected'] == 13,
+          and contextual_evidence['nativeStatements'] == 4
+          and contextual_evidence['comparisons'] >= 92
+          and contextual_evidence['invalidCasesRejected'] >= 19
+          and contextual_evidence['mutationsDetected'] == 15,
           'computed dependent membership lacks complete operations or mismatch checks')
     check(pattern_evidence['operations'] == 8
           and pattern_evidence['statements'] == 7
