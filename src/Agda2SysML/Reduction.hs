@@ -116,8 +116,8 @@ reduceHead inv original = do
       ,get "moduleInstanceCopy" d == Bool True, get "abstract" d == Bool False
       ,Just (String canonical) <- fld "canonicalConstructor" d
       ,canonical /= "",String canonical /= get "symbol" term = do
-        original <- definition canonical
-        guard (get "kind" original == String "constructor" && get "abstract" original == Bool False)
+        canonicalDefinition <- definition canonical
+        guard (get "kind" canonicalDefinition == String "constructor" && get "abstract" canonicalDefinition == Bool False)
         (result,steps) <- whnf (fuel-1) (set "symbol" (String canonical) term)
         pure (result,string (get "symbol" term):canonical:steps)
     whnf fuel term | get "tag" term == String "constructor" = do

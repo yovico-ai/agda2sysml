@@ -10,10 +10,11 @@ module Agda2SysML.AlgebraicTarget
 
 import qualified Agda2SysML.Derivation as D
 import Agda2SysML.Inventory hiding (field)
-import Agda2SysML.Diagnostic (Refusal, Category(..), refuse, refusal, context, field)
+import Agda2SysML.Diagnostic (Refusal, Category(..), refuse, refusal)
+import qualified Agda2SysML.Diagnostic as Diagnostic (context, field)
 import qualified Agda2SysML.FiniteTarget as F
 import qualified Agda2SysML.Specialize as Specialize
-import Control.Monad (unless, forM, forM_, foldM, (>=>))
+import Control.Monad (unless, forM, forM_, foldM)
 import Data.Graph (SCC(..), stronglyConnComp)
 import Data.Aeson
 import qualified Data.Map.Strict as M
@@ -259,7 +260,7 @@ indexExpression inv finite helpers shapes env expected t = do
     projections = projectionTable shapes
     canonical (Fibre family indices) = case M.lookup family shapes of
       Just sh | length indices == length (indexTypes sh) -> Fibre family [case domain of
-          Named owner | Just shape <- M.lookup owner shapes,Just _ <- sequenceElement shape,not (schemaExtent shape) ->
+          Named owner | Just sequenceShape <- M.lookup owner shapes,Just _ <- sequenceElement sequenceShape,not (schemaExtent sequenceShape) ->
             sequenceIdentity shapes helpers (Project (expand helpers value) sequenceField)
           _ -> expand helpers value
         | (domain,value) <- zip (indexTypes sh) indices]
@@ -342,7 +343,7 @@ indexExpression inv finite helpers shapes env expected t = do
           Just helper -> do
             def <- maybe (refuse Syntax "Missing computed index declaration") Right
               (M.lookup (calculationSymbol helper) (declarations inv))
-            p <- field inv "projection" def
+            p <- Diagnostic.field inv "projection" def
             dropped <- if p == Null || get "nativeFullArguments" term == Bool True then Right 0
               else subtract 1 <$> integer (get "index" p)
             unless (dropped >= 0 && dropped <= length (inputs helper))
@@ -366,8 +367,8 @@ indexExpression inv finite helpers shapes env expected t = do
               unless (canonical (fst value) == canonical (mapCarrier (instantiate args) domain))
                 (refuse Semantics "Computed index helper argument domain mismatch")
             let bindings = case M.lookup (calculationSymbol helper) (declarations inv) of
-                  Just def -> map parameterName (Specialize.nativeParameters def)
-                    ++ map (familyName . fst) (Specialize.nativeFamilies def)
+                  Just helperDefinition -> map parameterName (Specialize.nativeParameters helperDefinition)
+                    ++ map (familyName . fst) (Specialize.nativeFamilies helperDefinition)
                   Nothing -> []
             eliminate (mapCarrier (instantiate args) (result helper),BoundCall (calculationSymbol helper) bindings args) rest
           Nothing -> case es of
@@ -392,7 +393,7 @@ indexExpression inv finite helpers shapes env expected t = do
       (owner,typ) <- maybe (refuse Representation ("Index function is not an admitted proper projection: " <> f)) Right (M.lookup f projections)
       unless (recordOwner actual owner) (refuse Semantics "Index projection belongs to another record")
       d <- maybe (refuse Syntax "Missing index projection declaration") Right (M.lookup f (declarations inv))
-      p <- field inv "projection" d
+      p <- Diagnostic.field inv "projection" d
       unless (get "proper" p == String owner && get "index" p == Number 1)
         (refuse Syntax "Index expression uses invalid projection metadata")
       pure (projectedCarrier shapes actual value typ,Project value f)
@@ -415,11 +416,6 @@ recoverCarrierInputs shapes canonical known (Fibre s xs,Fibre t ys)
         _ -> refuse Semantics "Inconsistent omitted index"
       bind table _ = Right table
 recoverCarrierInputs _ _ known _ = Right known
-
-finiteIndex :: M.Map Text F.Domain -> Carrier -> Bool
-finiteIndex _ Boolean = True
-finiteIndex finite (Named s) = M.member s finite
-finiteIndex _ _ = False
 
 -- The context of a NoAbs codomain does not acquire the preceding input.
 typedTelescope :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes -> Value -> Either Refusal ([Carrier],[(Carrier,Expression)],Value)
@@ -476,7 +472,12 @@ applyLambda (Lambda args _ body) values | length args == length values =
   Just (go occupied (M.fromList (zip (map fst args) values)) body)
   where
     occupied = S.unions (map names (body:values)) `S.union` S.fromList (map fst args)
-    fresh used = head ["$beta" <> T.pack (show i) | i <- [0 :: Int ..],S.notMember ("$beta" <> T.pack (show i)) used]
+    fresh used = choose (0 :: Integer)
+      where
+        choose i
+          | S.member candidate used = choose (i+1)
+          | otherwise = candidate
+          where candidate = "$beta" <> T.pack (show i)
     go used bindings = mapExpression $ \e -> case e of
       Iterator name _ -> M.lookup name bindings
       Lambda inputs result value -> Just (bind used bindings inputs result value)
@@ -655,7 +656,7 @@ buildSchema inv finite helpers shapes env term = do
   unless (schemaExtent bindingShape) (refuse Semantics "Computed schema result is not a schema binding")
   row <- lookupShape (binding <> ".row")
   con <- single row
-  values <- domains 0 env [] (array (get "domains" term)) row con captures
+  values <- domains (0 :: Int) env [] (array (get "domains" term)) row con captures
   pure (schema,Construct binding ([(indexField binding i,x) | (i,x) <- zip [0..] captures] ++ [(sequenceField,values)]))
   where
     prefix = string (get "sourceFamily" term) <> ".schema"
@@ -762,7 +763,7 @@ discover inv finite = go M.empty candidates
       && s /= builtin inv "bool" && s /= builtin inv "nat" && not (M.member s finite))) (declarations inv)
     header helpers accepted d = do
       unless (get "kind" d == String "datatype" && get "parameters" d == Number 0) (refuse Representation "No provisional datatype header")
-      ty <- field inv "type" d
+      ty <- Diagnostic.field inv "type" d
       (args,_,out) <- typedTelescope inv finite helpers accepted ty
       dataIndices [t | (i,t) <- zip [0..] args,i `notElem` contextualPositions d]
       unless (get "tag" (get "term" out) == String "sort") (refuse Representation "Invalid datatype header")
@@ -836,8 +837,8 @@ shape inv finite helpers shapes d | get "nativeSchema" d /= Null = do
       sh = case string (get "nativeSchema" d) of
         "binding" -> (Shape symbol True [] captures) {sequenceElement = Just (atCaptures row),schemaExtent = True}
         "row" -> Shape symbol True [Constructor (symbol <> ".row")
-          ([(symbol <> ".capture" <> T.pack (show i),t) | (i,t) <- zip [0..] captures]
-            ++ [(indexField symbol (i+length captures),t) | (i,t) <- zip [0..] domains]
+          ([(symbol <> ".capture" <> T.pack (show i),t) | (i,t) <- zip [0 :: Int ..] captures]
+            ++ [(indexField symbol (i+length captures),t) | (i,t) <- zip [0 :: Int ..] domains]
             ++ [(familyValue symbol,AnyValue)]) indices] captures
         _ -> (Shape symbol True [Constructor (symbol <> ".member") [(familyValue symbol,AnyValue)] []]
           (captures ++ [atCaptures binding] ++ map memberDomain domains)) {storedSchema = Just binding}
@@ -857,13 +858,13 @@ shape inv finite helpers shapes d | get "nativeSequence" d /= Null = do
   case element of
     Callable{} -> refuse Representation "Sequences of callables require a separate representation rule"
     _ -> pure ()
-  cs <- map string . array <$> field inv "constructors" d
+  cs <- map string . array <$> Diagnostic.field inv "constructors" d
   let s = string (get "name" d)
       provisional = (Shape s False [] []) {sequenceElement = Just element,typeParameters = Specialize.nativeParameters d,familyParameters = Specialize.nativeFamilies d}
   unless (length cs == 2) (refuse Syntax "Sequence constructor coverage mismatch")
   constructors <- forM (zip cs [[],[element,Named s]]) $ \(c,expected) -> do
     def <- maybe (refuse Syntax "Missing sequence constructor") Right (M.lookup c (declarations inv))
-    cty <- field inv "type" def
+    cty <- Diagnostic.field inv "type" def
     (types,env,res) <- typedTelescope inv finite helpers (M.insert s provisional shapes) cty
     out <- carrierIn inv finite helpers (M.insert s provisional shapes) env res
     unless (types == expected && out == Named s) (refuse Semantics "Sequence constructor signature mismatch")
@@ -871,8 +872,8 @@ shape inv finite helpers shapes d | get "nativeSequence" d /= Null = do
   pure (provisional {variants = constructors})
 shape inv finite helpers shapes d = do
   unless (get "abstract" d == Bool False) (refuse Representation "Abstract carrier has no exposed value representation")
-  pars <- field inv "parameters" d >>= integer
-  ty <- field inv "type" d
+  pars <- Diagnostic.field inv "parameters" d >>= integer
+  ty <- Diagnostic.field inv "type" d
   (familyArgs,_,familyResult) <- typedTelescope inv finite helpers shapes ty
   let contexts = contextualPositions d
   unless (all (\i -> i >= 0 && i < length familyArgs && case familyArgs !! i of Callable{} -> True; _ -> False) contexts)
@@ -884,13 +885,13 @@ shape inv finite helpers shapes d = do
   unless (not record || null familyArgs || get "nativeRecordCaptures" d == toJSON (length familyArgs))
     (refuse Representation "Indexed record parameters require specialization")
   cs <- if record then do
-    induction <- field inv "induction" d
+    induction <- Diagnostic.field inv "induction" d
     unless (induction `elem` [String "Nothing",String "Just Inductive"]) $
       refuse Representation "Coinductive records require a separate carrier rule"
-    c <- string <$> field inv "constructor" d
+    c <- string <$> Diagnostic.field inv "constructor" d
     pure [c]
     else do
-      checked <- field inv "constructors" d
+      checked <- Diagnostic.field inv "constructors" d
       case checked of
         Array _ -> pure (map string (array checked))
         _ -> refuse Syntax "Missing checked constructor coverage"
@@ -901,7 +902,7 @@ shape inv finite helpers shapes d = do
   constructors <- forM cs $ \c -> do
     def <- maybe (refuse Syntax "Missing checked constructor declaration") Right (M.lookup c (declarations inv))
     unless (get "kind" def == String "constructor") (refuse Syntax "Carrier refers to a non-constructor declaration")
-    cty <- field inv "type" def
+    cty <- Diagnostic.field inv "type" def
     (types,env,res) <- typedTelescope inv finite helpers shapes cty
     let resultTerm = get "term" res
     unless (get "tag" resultTerm == String "definition" && get "symbol" resultTerm == String s)
@@ -914,7 +915,7 @@ shape inv finite helpers shapes d = do
     -- typedTelescope admits each payload in the preceding payload context.
     -- The same ordered dependency rule applies to records and sum variants;
     -- construction, branch expansion and guarded validity retain these links.
-    names <- if record then map string . array <$> field inv "fields" d
+    names <- if record then map string . array <$> Diagnostic.field inv "fields" d
       else pure [c <> ".payload" <> T.pack (show i) | i <- [0..length types-1]]
     unless (length names == length types && S.size (S.fromList names) == length names) $
       refuse Semantics "Record fields do not correspond one-to-one with its constructor telescope"
@@ -933,10 +934,10 @@ shape inv finite helpers shapes d = do
       let s = shapeSymbol candidate
           provisional = M.insert s candidate shapes
       d' <- maybe (refuse Syntax "Missing checked record projection") Right (M.lookup f (declarations inv))
-      projection <- field inv "projection" d'
+      projection <- Diagnostic.field inv "projection" d'
       unless (get "kind" d' == String "function" && get "proper" projection == String s
         && get "index" projection == Number 1) (refuse Semantics "Record field is not the corresponding proper projection")
-      fty <- field inv "type" d'
+      fty <- Diagnostic.field inv "type" d'
       (args,env,res) <- typedTelescope inv finite helpers provisional fty
       unless (args == [Named s]) (refuse Representation "Record projection has a dependent or parameterized input")
       actual <- carrierIn inv finite helpers provisional env res
@@ -976,7 +977,7 @@ type Signatures = M.Map Text ([Carrier],Carrier)
 
 signature :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes -> Value -> Either Refusal ([Carrier],Carrier)
 signature inv finite helpers shapes d = do
-  ty <- field inv "type" d
+  ty <- Diagnostic.field inv "type" d
   (args,env,res) <- typedTelescope inv finite helpers shapes ty
   (args,) <$> carrierIn inv finite helpers shapes env res
 
@@ -1022,7 +1023,7 @@ equalityStatement :: Inventory -> M.Map Text F.Domain -> Helpers -> Shapes
 equalityStatement inv finite helpers shapes results d = do
   unless (get "kind" d == String "native-equality-statement")
     (refuse Syntax "Statement lacks checked equality preparation")
-  ty <- field inv "type" d
+  ty <- Diagnostic.field inv "type" d
   (ins,env,out) <- typedTelescope inv finite helpers shapes ty
   resultType <- carrierIn inv finite helpers shapes env out
   (symbol,values) <- case resultType of
@@ -1152,7 +1153,7 @@ functionsWith helpers inv finite shapes = close checkedCycles
         checkDependencies (Right calc) = do
           forM (S.toAscList (dependencies calc)) (\callee -> case M.lookup callee table of
             Nothing -> refuse Semantics ("Callee is outside the checked behavioral closure: " <> callee)
-            Just (Left reason) -> Left (context ("Unsupported callee " <> callee <> ": ") reason)
+            Just (Left reason) -> Left (Diagnostic.context ("Unsupported callee " <> callee <> ": ") reason)
             Just (Right _) -> Right ()) >> Right calc
 
 dependencies :: Calculation -> S.Set Text
@@ -1196,7 +1197,7 @@ functionWith inv finite helpers shapes signatures d = do
     let operation = primitiveOperation (string (get "primitive" d))
     (op,typ) <- maybe (refuse Semantics "Primitive has no native arithmetic rule") Right operation
     unless (ins == [Natural,Natural] && out == typ) (refuse Semantics "Primitive arithmetic signature mismatch")
-    ty <- field inv "type" d
+    ty <- Diagnostic.field inv "type" d
     pure (located "native.natural-primitive" ty (get "primitive" d) (Numeric op (Input 0) (Input 1)))
     else case M.lookup s projections of
     Just (owner,typ) -> do
@@ -1205,14 +1206,14 @@ functionWith inv finite helpers shapes signatures d = do
       unless (ins == [Named owner] && out == typ) (refuse Syntax "Proper projection signature mismatch")
       pure (Project (Input 0) s)
     Nothing -> do
-      tree <- field inv "compiled" d
+      tree <- Diagnostic.field inv "compiled" d
       unless (length (array (get "sourceSyntax" d)) == 1
         || (get "withParent" d /= Null && M.member (string (get "withParent" d)) (declarations inv))
         || get "extendedLambda" d == Bool True
         || (get "moduleInstanceCopy" d == Bool True && terminationChecked inv d
           && get "tag" tree == String "done" && get "tag" (get "body" tree) == String "definition"))
         (refuse Syntax "No uniquely anchored source definition or checked generated helper")
-      p <- field inv "projection" d
+      p <- Diagnostic.field inv "projection" d
       dropped <- if p == Null then Right 0 else subtract 1 <$> integer (get "index" p)
       unless (dropped >= 0 && dropped <= length ins)
         (refuse Representation "Unsupported omitted runtime indices")
@@ -1353,7 +1354,7 @@ functionWith inv finite helpers shapes signatures d = do
          [] | Just fallbackBody <- fallback -> (c,) <$> fallbackBody
          [branch] -> do
           parameterCount <- runtimeParameters c
-          let captureCount = maybe 0 (\d -> case get "patternCaptures" d of Number n -> round n; _ -> 0) (M.lookup c (declarations inv))
+          let captureCount = maybe 0 (\constructorDefinition -> case get "patternCaptures" constructorDefinition of Number n -> round n; _ -> 0) (M.lookup c (declarations inv))
               fields = drop (parameterCount+captureCount) allFields
           let b = get "branch" branch
           arity <- integer (get "arity" b)
@@ -1481,13 +1482,13 @@ functionWith inv finite helpers shapes signatures d = do
         ownerOf (Named owner) = Just owner
         ownerOf (Fibre owner _) = Just owner
         ownerOf _ = Nothing
-    branchEquations scope (Fibre s xs) selected c = do
-      sh <- maybe (refuse Representation "Missing family") Right (M.lookup s shapes)
+    branchEquations scope (Fibre familySymbol familyIndices) selected c = do
+      sh <- maybe (refuse Representation "Missing family") Right (M.lookup familySymbol shapes)
       con <- case filter ((== c) . constructorSymbol) (variants sh) of
         [v] -> Right v
         _ -> refuse Representation "Missing family branch"
       -- Only replace symbolic references. Constants are never rewritten.
-      let tagFact = [(Project selected tagField,Enumeration (tagType s) c)
+      let tagFact = [(Project selected tagField,Enumeration (tagType familySymbol) c)
             | not (isRecord sh),sequenceElement sh == Nothing]
       -- Shared constructor payloads relate all their occurrences. For refl,
       -- both endpoints equal one payload: use the first equation when solving
@@ -1495,7 +1496,7 @@ functionWith inv finite helpers shapes signatures d = do
       -- field and losing the equality between the endpoints.
       let solved = foldl (\facts (left,right) -> facts ++ orient
             (reduce (scope ++ facts) left,reduce (scope ++ facts) right)) tagFact
-            (zip xs (endpointsFor sh xs selected con))
+            (zip familyIndices (endpointsFor sh familyIndices selected con))
       pure solved
       where
         orient (Numeric "+" x (NumberLiteral a),Numeric "+" y (NumberLiteral b)) | a == b = orient (x,y)
@@ -1573,7 +1574,6 @@ functionWith inv finite helpers shapes signatures d = do
             (Literal (any ((== c) . constructorSymbol) (take 1 (variants sh)))))
           Just sh | not (isRecord sh) -> Right (Equal (mark (Project selected tagField)) (mark (Enumeration (tagType s) c)))
           _ -> Right (Equal selected (mark (Enumeration s c)))
-    expression = expressionExpected Nothing
     expressionExpected expected equationsInScope env term = fmap (\(typ,e) -> (typ,located "native.algebraic-term" term
       (object ["bindings" .= [renderWith id (T.pack . show) x | (_,x) <- env]
         ,"equations" .= [(renderWith id (T.pack . show) a,renderWith id (T.pack . show) b) | (a,b) <- equationsInScope]]) e)) $ do
@@ -1650,7 +1650,7 @@ functionWith inv finite helpers shapes signatures d = do
             let callee = string (get "symbol" term)
             (ins,out) <- maybe (refuse Representation ("Callee has no admitted first-order signature: " <> callee)) Right (M.lookup callee signatures)
             cd <- maybe (refuse Syntax "Missing helper declaration") Right (M.lookup callee (declarations inv))
-            p <- field inv "projection" cd
+            p <- Diagnostic.field inv "projection" cd
             dropped <- if p == Null then Right 0 else subtract 1 <$> integer (get "index" p)
             unless (dropped >= 0 && dropped <= length ins)
               (refuse Representation "Unsupported omitted helper indices")
@@ -1665,7 +1665,7 @@ functionWith inv finite helpers shapes signatures d = do
             prefix <- traverse (\i -> maybe (refuse Semantics "Cannot recover omitted finite index") Right (M.lookup i known)) [0..dropped-1]
             let args = prefix ++ map snd actuals
                 supplied = zip (drop dropped ins) actuals
-            mapM_ (\(expected,value) -> () <$ requireType equationsInScope (mapCarrier (instantiate args) expected) value) supplied
+            mapM_ (\(expectedDomain,value) -> () <$ requireType equationsInScope (mapCarrier (instantiate args) expectedDomain) value) supplied
             eliminate (mapCarrier (instantiate args) out,Call callee args) rest
         _ -> refuse Syntax "Term requires a rule beyond algebraic construction and projection"
     recover equations = recoverCarrierInputs shapes canonical
@@ -1971,10 +1971,10 @@ constructorInputContracts inv shapes calc = M.fromList
       require (expectedType == Named record && fieldType == indexType
         && simpleType (Named record) earlier)
       def <- M.lookup fieldName (declarations inv)
-      projection <- either (const Nothing) Just (field inv "projection" def)
+      projection <- either (const Nothing) Just (Diagnostic.field inv "projection" def)
       require (get "kind" def == String "function" && get "proper" projection == String record
         && get "index" projection == Number 1)
-      ty <- either (const Nothing) Just (field inv "type" def)
+      ty <- either (const Nothing) Just (Diagnostic.field inv "type" def)
       let term = get "term" ty; domain = get "domain" term
           info = get "info" domain; codomain = get "codomain" term
       require (get "tag" term == String "pi" && get "hiding" info == String "explicit"
@@ -2073,9 +2073,6 @@ calculationContractsIn shapes label c = concat
     input i = quote (label (calculationSymbol c)) <> "::" <> quote ("input" <> T.pack (show i))
     returned = quote (label (calculationSymbol c)) <> "::'result'"
     binding p = quote (label (calculationSymbol c)) <> "::" <> quote p
-
-refinementText :: (Text -> Text) -> (Int -> Text) -> Text -> Carrier -> [Text]
-refinementText label input = refinementTextIn M.empty label input quote
 
 refinementTextIn :: Shapes -> (Text -> Text) -> (Int -> Text) -> (Text -> Text) -> Text -> Carrier -> [Text]
 refinementTextIn _ _ _ _ value Natural = ["(" <> value <> " < *)"]
@@ -2210,8 +2207,10 @@ renderShapesIn label shapes selectedShapes = concatMap renderShape (M.elems sele
       ++ ["    }"]
     renderField sh f ty = ["    attribute " <> quote (label f) <> " : " <> renderCarrier label ty <> multiplicity sh <> ";"]
     multiplicity sh = if isRecord sh then " [1]" else " [0..1]"
-    fieldAt sh member i = head [name | c <- variants sh,member `elem` map fst (payload c)
-      ,(j,(name,_)) <- zip [0..] (payload c),i == j]
+    fieldAt sh member i = case [name | c <- variants sh,member `elem` map fst (payload c)
+      ,(j,(name,_)) <- zip [0..] (payload c),i == j] of
+        name:_ -> name
+        [] -> error "admitted callable index has no corresponding payload field"
     renderInvoker sh f domain out =
       let scope = quote (label (callableInvoker f))
           receiver = scope <> "::'receiver'"
@@ -2363,7 +2362,7 @@ constructorSchema :: Inventory -> Shape -> Constructor -> Maybe (Value,[(Value,V
 constructorSchema inv sh c = do
   def <- M.lookup (constructorSymbol c) (declarations inv)
   if get "kind" def /= String "constructor" then Nothing else Just ()
-  ty <- either (const Nothing) Just (field inv "type" def)
+  ty <- either (const Nothing) Just (Diagnostic.field inv "type" def)
   (domains,resultType) <- telescope ty
   let resultTerm = get "term" resultType
   if length domains == length (payload c) && get "tag" resultTerm == String "definition"
@@ -2402,7 +2401,7 @@ carrierReport label shapes = toJSON [object
     ,"target" .= (target (shapeSymbol sh) <> "::" <> quote (label (indexField (shapeSymbol sh) i)))]
     | (i,t) <- zip [0 :: Int ..] (indexTypes sh),i `notElem` contextIndices sh]
   ,"constructors" .= [object ["symbol" .= constructorSymbol c,"target" .= target (constructorSymbol c)
-    ,"resultIndices" .= [renderIndexIn shapes label (\i -> quote (label (fst (payload c !! i)))) quote endpoint
+    ,"resultIndices" .= [renderIndexIn shapes label (\position -> quote (label (fst (payload c !! position)))) quote endpoint
       | (i,endpoint) <- zip [0..] (resultIndices c),i `notElem` contextIndices sh]
     ,"payload" .= [object ["position" .= i,"field" .= f
       ,"type" .= renderCarrier label typ

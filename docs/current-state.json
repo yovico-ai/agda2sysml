@@ -1837,5 +1837,50 @@
       "checkWallSeconds": 69.4
     },
     "commit": "82042361ed815d87bd7242a26ea8bd20badf55ae"
+  },
+  "warningCleanupEvidence": {
+    "basedOnCommit": "8a97e4b9e5f81903b245cbddef60d1764def1553",
+    "compiler": "GHC 9.10.3",
+    "baselineDistinctFirstPartyWarningLocations": 125,
+    "finalFirstPartyWarnings": 0,
+    "warningFlags": [
+      "-Wall",
+      "-Werror"
+    ],
+    "optimization": "disabled for follow-up compilation and tests; dependencies reused from cache",
+    "build": {
+      "exitCode": 0,
+      "command": "cabal build all --enable-tests --offline --disable-optimization -j4 --ghc-options=-Werror"
+    },
+    "tests": {
+      "exitCode": 0,
+      "command": "cabal test all --offline --disable-optimization -j4 --ghc-options=-Werror --test-options=--compiler-only --test-show-details=direct",
+      "mode": "compiler-only",
+      "passed": [
+        "algebraic-target",
+        "derivations",
+        "finite-target",
+        "mapping",
+        "merging",
+        "sharing",
+        "source-alignment",
+        "source-catalog"
+      ]
+    },
+    "logs": {
+      "warning-cleanup-baseline-all.log": "657ac01cfa7298ccfdfc13de9f4713a4d023b61fd6f8b877456abccf0730f0b5",
+      "warning-cleanup-build.log": "13f2c9911b19b7d60e3db3696218d1c907cd6953e88a90e8f8cecb15af6991a6",
+      "warning-cleanup-tests-final.log": "0c5e7ea683f9d936bc14b0f404a15437226836eec221a31268bdfb4e30ea6f9e"
+    },
+    "sourceSha256": {
+      "src/Agda2SysML/AlgebraicTarget.hs": "a2e126317a86800989d3954db3edb7625b3b351729bab1110467a1c92e13cfa7",
+      "src/Agda2SysML/Reduction.hs": "577252923e447dde52ad0aa619dee173a5e5bcfef86ca432c98559620d72114a",
+      "src/Agda2SysML/Specialize.hs": "b7558cfa8758a58fb5e8ded8e06954e4df462afa6dd0e040ddc38eaab4568a79",
+      "src/Agda2SysML/Target.hs": "0cf1aa444dcab6490b01d53f686369ed53fa8e335e1565048ff78cbf1cc13590",
+      "test/AlgebraicTargetTests.hs": "4455761013d4d4a7d5550bd0ea421ec86472ff5a04cd0cbcb4f543f26a30cadc"
+    },
+    "generatedModelsRegenerated": false,
+    "pilotRerun": false,
+    "artifactIdentityNote": "Generated models and Pilot results retain the recorded 8204236 checkpoint identities."
   }
 }
