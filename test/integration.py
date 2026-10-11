@@ -17,6 +17,7 @@ from recursive_core import verify_recursive_core
 from structured_indices import verify_structured_indices
 from callbacks import verify_callbacks
 from dependent_record_path import verify_dependent_record_path
+from family_scope import verify_family_scope
 from natural_values import verify_natural_values
 from tagged_sums import verify_tagged_sums
 from report_accounting import verify_report_accounting
@@ -457,6 +458,10 @@ models:
     check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 16, 'operations': 5,
                                   'nativeStatements': 3, 'statementComparisons': 90, 'bodyMutationsDetected': 8},
           "dependent-record path lacks complete members and projected index refusals")
+    family_scope_evidence = verify_family_scope(self_output)
+    check(family_scope_evidence == {'nativeStatements': 2, 'comparisons': 30,
+                                   'invalidBindingsRejected': 30, 'bodyMutationsDetected': 30},
+          "dependent computation laws lack cross-scope family and callback checks")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
           and self_manifest["selectionProfile"] == "declarations", "default generation required a hidden mapping")

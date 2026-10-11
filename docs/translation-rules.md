@@ -354,6 +354,20 @@ and `input-contract-sufficient` laws as native constraints. Parsed-model checks
 exercise complete records and equality evidence over Boolean and natural index
 domains, reject mismatched inputs, and detect mutations of the constraint bodies.
 
+Omitted symbolic family parameters are inferred across separate caller and
+callee telescopes. Their slot numbers need not coincide: inference first checks
+the domain telescope and universe, then binds the callee slot to the complete
+caller family. Repeated occurrences must agree with that same identity. Caller
+universe atoms remain in the caller's scope; incompatible domains, universes,
+arities or repeated family bindings remain refusals. Dependent indices within
+the family telescope must also agree after substitution.
+
+This admits `DefinitionalReduction.beta` and `record-field-computation` as
+native constraints. Parsed-model checks bind their dependent callbacks over
+opaque values and an unbounded natural domain, reject members at the wrong
+index, and detect false constraint bodies. Independent compiler fixtures vary
+family slots, type slots, symbolic universes and dependent domain indices.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known

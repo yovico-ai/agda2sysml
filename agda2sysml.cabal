@@ -5,7 +5,7 @@ synopsis: Generate traceable SysML from checked Agda specifications
 license: MIT
 license-file: LICENSE
 build-type: Simple
-extra-source-files: test/TargetEvaluation.java test/review.cjs test/emitted_model.py test/open_parameters.py test/dependent_evidence.py test/recursive_core.py test/structured_indices.py test/callbacks.py test/dependent_record_path.py test/natural_values.py test/tagged_sums.py test/report_accounting.py test/native_callbacks.py test/callable_fields.py test/equality_statements.py test/symbolic_levels.py test/dependent_callbacks.py test/multi_callbacks.py test/schema_records.py test/dependent_schemas.py test/arithmetic_indices.py test/dependent_patterns.py test/contextual_indices.py test/dependent_family_parameters.py test/specialized_callbacks.py test/index_closures.py test/indexed_validation.py test/computed_lists.py assets/review.html
+extra-source-files: test/TargetEvaluation.java test/review.cjs test/emitted_model.py test/open_parameters.py test/dependent_evidence.py test/recursive_core.py test/structured_indices.py test/callbacks.py test/dependent_record_path.py test/family_scope.py test/natural_values.py test/tagged_sums.py test/report_accounting.py test/native_callbacks.py test/callable_fields.py test/equality_statements.py test/symbolic_levels.py test/dependent_callbacks.py test/multi_callbacks.py test/schema_records.py test/dependent_schemas.py test/arithmetic_indices.py test/dependent_patterns.py test/contextual_indices.py test/dependent_family_parameters.py test/specialized_callbacks.py test/index_closures.py test/indexed_validation.py test/computed_lists.py assets/review.html
 
 common defaults
   default-language: GHC2021

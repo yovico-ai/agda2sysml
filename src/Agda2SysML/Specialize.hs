@@ -2197,11 +2197,18 @@ unify known (Parameter i) actual = case M.lookup i known of
   Just t@Named{} | Named{} <- actual -> unify known t actual
   _ -> refuse Semantics ("Inconsistent concrete type arguments: " <> T.pack (show (M.lookup i known,actual)))
 unify known (Open i l) (Open j m) | i == j && l == m = Right known
--- Signature inference may compare a family before its open binding is known.
--- Recover the omitted argument even when it remains symbolic; equality
--- preserves its lexical identity, domain and universe. This neither invents
--- a concrete binding nor discharges a runtime index equality.
-unify known a@(FamilyParameter i _ _) b@FamilyParameter{} | a == b = unify known (Parameter i) b
+-- A template family slot and the caller's symbolic family have separate
+-- namespaces. Infer their domains and universe before binding the template
+-- slot to the complete caller identity; repeated occurrences must still agree.
+unify known (FamilyParameter i domains level) actual@(FamilyParameter _ actualDomains actualLevel) = do
+  checked <- unify known (SchemaValue domains level) (SchemaValue actualDomains actualLevel)
+  let args = [M.findWithDefault (Parameter slot) slot checked | slot <- [0..maximum (0:M.keys checked)]]
+  resolved <- substitute args (SchemaValue domains level)
+  -- Ordinary value inference leaves runtime equalities to the target. Family
+  -- telescope indices bind their own domains and must agree here as well.
+  unless (indexNormalForm resolved == indexNormalForm (SchemaValue actualDomains actualLevel))
+    (refuse Semantics "Symbolic family has incompatible dependent domains or universe")
+  unify checked (Parameter i) actual
 unify known (FamilyParameter i _ _) actual@OpenFamily{} = unify known (Parameter i) actual
 unify known (FamilyParameter i _ _) actual@FamilyExpression{} = unify known (Parameter i) actual
 unify known (FamilyParameter i _ _) actual@SelectedFamily{} = unify known (Parameter i) actual
