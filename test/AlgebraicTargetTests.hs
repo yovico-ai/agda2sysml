@@ -206,6 +206,7 @@ main = do
   closureChecks inv
   diagnosticChecks inv finite shapes
   helperProvenanceChecks
+  payloadProjectionProvenanceChecks
   inputIndexProvenanceChecks
   resultIndexProvenanceChecks
   pick <- lower selected
@@ -4123,3 +4124,49 @@ indexAnnotationChecks = forM_ ["AnnotatedPacket","AnnotatedEnvelope"] $ \owner -
       plainNested = P.Named owner [P.Runtime bareNested (P.IndexInput 3)]
   check (not (isLeft (checkMember plainNested annotatedNested)))
     "nested callback domains were not normalized before checking redundant annotations"
+
+-- Source links and missing-source boundaries remain distinct after identity
+-- substitution and normalization. Exercise renamed compiler-shaped carriers.
+payloadProjectionProvenanceChecks :: IO ()
+payloadProjectionProvenanceChecks = forM_ ["Parcel","Envelope"] $ \owner -> do
+  let symbol = owner <> ".copy"
+      constructorName = owner <> ".pair"
+      fields = [(constructorName <> ".payload0",A.Boolean),(constructorName <> ".payload1",A.Boolean)]
+      shape = A.Shape owner False [A.Constructor constructorName fields []] []
+      shapes = M.singleton owner shape
+      constructorDefinition = set "family" (String owner) $
+        declaration constructorName "constructor" (signature [named "Bool",named "Bool"] (named owner))
+      body = split 0 [(constructorName,2,done 2 (constructor constructorName [variable 1 [],variable 0 []]))]
+      definition = operation symbol [owner] owner body
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(symbol,definition),(constructorName,constructorDefinition)]) M.empty M.empty
+      compile inventory = either (fail . show) pure (A.function inventory M.empty shapes (declarations inventory M.! symbol))
+  calc <- compile inv
+  let doc = A.renderCalculationDoc inv shapes id calc
+      trace = Trace.report inv inv doc
+      refs = [object ["owner" .= get "owner" r,"root" .= get "root" r,"path" .= get "path" r]
+             | r <- array (get "checkedOccurrences" trace)]
+      links = [object ["checked" .= ref,"source" .= ("source-" <> Text.pack (show i))
+        ,"rule" .= ("source.direct-first-order" :: Text),"ruleVersion" .= (1 :: Int)]
+        | (i,ref) <- zip [0 :: Int ..] refs]
+      document = object ["modules" .= [object ["name" .= owner
+        ,"sourceCorrespondence" .= object ["occurrences" .=
+          [object ["id" .= get "source" link,"module" .= owner] | link <- links]]
+        ,"sourceAlignment" .= object ["definitions" .= [object ["unavailable" .= Null,"links" .= links]]]]]]
+      source = inv { document=document }
+      aligned = Trace.report source source doc
+      projectionMarks report = [t | t <- array (get "targetOccurrences" report),get "role" t == String "projection"]
+  check (not (null (projectionMarks aligned))
+    && all ((== String "derived") . get "sourcePrecision") (projectionMarks aligned))
+    "identity normalization fabricated an unavailable payload origin"
+  check (Trace.validate (Trace.render doc) aligned == Right ()) "aligned payload trace failed validation"
+  check (Trace.render doc == Text.unlines (A.renderCalculation inv shapes id calc))
+    "provenance changed rendered model bytes"
+  check (all ((== String "unavailable") . get "sourcePrecision") (projectionMarks trace))
+    "payload projection without checked source links acquired derived precision"
+  let withoutLinks = source {document=Null}
+      unaligned = Trace.report withoutLinks withoutLinks doc
+      forged = set "targetOccurrences" (toJSON
+        [if get "role" t == String "projection" then set "sourcePrecision" (String "derived") t else t
+        | t <- array (get "targetOccurrences" unaligned)]) unaligned
+  check (isLeft (Trace.validate (Trace.render doc) forged)) "missing payload source evidence could be promoted"

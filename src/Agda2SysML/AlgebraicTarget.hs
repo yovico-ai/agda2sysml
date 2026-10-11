@@ -177,22 +177,43 @@ data Calculation = Calculation
   deriving (Eq, Show)
 
 retain :: Text -> Expression -> Expression -> Expression
-retain rule before after = Annotated (D.derived rule [] Null (origins before ++ origins after)) after
+retain rule before after
+  -- An identity traversal of a fresh leaf establishes no new origin and must
+  -- not manufacture a permanent generated boundary before checked attachment.
+  -- Existing annotations and composite derivations still retain all premises.
+  | freshLeaf before && freshLeaf after && before == after = after
+  | otherwise = Annotated (D.derived rule [] Null (origins True before ++ origins False after)) after
   where
-    origins e = annotation e : case e of
-      Construct _ fs -> concatMap (origins . snd) fs
-      Project x _ -> origins x
-      Equal x y -> origins x ++ origins y
-      Numeric _ x y -> origins x ++ origins y
-      Sequence xs -> concatMap origins xs
-      SequenceOp _ xs -> origins xs
-      SequenceHead _ xs -> origins xs
-      Conditional p x y -> origins p ++ origins x ++ origins y
-      Call _ xs -> concatMap origins xs
-      Apply f x -> origins f ++ concatMap origins x
-      Collect _ _ xs body -> origins xs ++ origins body
-      Cast _ value -> origins value
-      _ -> []
+    freshLeaf NInput{} = True
+    freshLeaf NArgument{} = True
+    freshLeaf NLiteral{} = True
+    freshLeaf NNumberLiteral{} = True
+    freshLeaf NEnumeration{} = True
+    freshLeaf NAbsent = True
+    freshLeaf NExtent{} = True
+    freshLeaf _ = False
+    -- The rule derives its rebuilt result from the original expression.
+    -- Retain actual result annotations, especially explicit boundaries, but
+    -- do not label a newly rebuilt root as independently generated material.
+    origins missing e = own ++ children
+      where
+       own = case e of Annotated o _ -> [o]; _ -> [annotation e | missing]
+       go = origins missing
+       children = case e of
+         Construct _ fs -> concatMap (go . snd) fs
+         Project x _ -> go x
+         Equal x y -> go x ++ go y
+         Numeric _ x y -> go x ++ go y
+         Sequence xs -> concatMap go xs
+         SequenceOp _ xs -> go xs
+         SequenceHead _ xs -> go xs
+         Conditional p x y -> go p ++ go x ++ go y
+         Call _ xs -> concatMap go xs
+         Apply f x -> go f ++ concatMap go x
+         Collect _ _ xs body -> go xs ++ go body
+         Cast _ value -> go value
+         Lambda _ _ value -> go value
+         _ -> []
 
 type Helpers = M.Map Text Calculation
 

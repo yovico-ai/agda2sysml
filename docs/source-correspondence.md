@@ -15,7 +15,11 @@ cite checked constructor signatures and source applications; incomplete signatur
 retain unavailable boundaries. `DependentPayload.copy` now has derived evidence
 for every marked occurrence after aligning `embedded`'s explicit record projection.
 Generated constructor-helper inputs and bodies also cite checked telescope
-positions and complete schemas. Constructor input contracts whose index is an
+positions and complete schemas. Identity traversal of a fresh expression leaf
+does not create a generated-origin boundary. Rebuilt results retain the original
+expression evidence and all explicit result boundaries; they do not acquire an
+unavailable marker solely because a transformation rebuilt their AST root.
+Constructor input contracts whose index is an
 earlier input or one proper field projection of an earlier input also derive.
 All `DependentPayload.Event` constructor helpers therefore derive throughout.
 Constructor result assertions also derive for fixed finite values and direct
