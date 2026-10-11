@@ -115,6 +115,55 @@ def verify_symbolic_levels(output):
         finally:
             model.calculations[symbol] = saved
 
+    # Public constructors copied by a module application must resolve to real
+    # canonical constructor calculations at that application's parameter slots.
+    # Read those targets from source correspondence, then check complete values
+    # against an independent sequence construction plan.
+    alias_rows = [r for r in report['obligations']
+                  if r['symbol'].startswith('Agda2SysML.SchemaConcatenation._#')
+                  and r['sourceKind'] == 'structure'
+                  and r['symbol'].rsplit('.', 1)[-1].split('#', 1)[0] in ('empty', 'prepend')]
+    assert len(alias_rows) == 4
+    aliases = {}
+    for row in alias_rows:
+        assert row['status'] == 'discharged' and row['target'], ('missing constructor root', row['symbol'])
+        assert row['source']['checkedDefinition'] == row['symbol'], 'alias provenance replaced'
+        name = row['symbol'].rsplit('.', 1)[-1].split('#', 1)[0]
+        aliases.setdefault(name, set()).add(target_name(row['target']))
+    assert all(len(targets) == 1 for targets in aliases.values()), 'equivalent aliases split identities'
+    alias_empty, alias_prepend = (next(iter(aliases[name])) for name in ('empty', 'prepend'))
+    alias_type = model.results[alias_empty]
+    assert alias_type == model.results[alias_prepend]
+    alias_slot = model.calculations[alias_empty][0][0][0]
+    assert alias_slot != slot, 'module parameter telescope was not instantiated'
+    alias_comparisons = 0
+    for domain in ((False, True), (0, 7, 10**40), opaque):
+        def expected_sequence(xs):
+            return Record(alias_type, ((alias_slot, domain),
+                ('constructor', alias_type + '.constructor-tag::' + (alias_prepend if xs else alias_empty)),
+                (alias_type + '.node-count', len(xs) + 1),
+                (alias_prepend + '.payload0', xs[0] if xs else ()),
+                (alias_prepend + '.payload1', expected_sequence(xs[1:]) if xs else ())))
+
+        for n in range(4):
+            for xs in itertools.product(domain, repeat=n):
+                actual = model.invoke(alias_empty, [domain])
+                for value in reversed(xs):
+                    actual = model.invoke(alias_prepend, [domain, value, actual])
+                compare(actual, expected_sequence(xs))
+                alias_comparisons += 1
+        refuse(lambda: model.invoke(alias_prepend, [domain, Record('Outside', ()), expected_sequence(())]))
+        refuse(lambda: model.invoke(alias_prepend, [domain[:1], domain[0], expected_sequence(domain)]))
+        refuse(lambda: model.invoke(alias_prepend,
+                                    [domain, domain[0], change(expected_sequence(()), alias_type + '.node-count', 0)]))
+    saved = model.calculations[alias_prepend]
+    model.calculations[alias_prepend] = (saved[0], ('reference', 'input1'), saved[2])
+    try:
+        refuse(lambda: compare(model.invoke(alias_prepend, [domain, domain[0], expected_sequence(())]),
+                               expected_sequence((domain[0],))))
+    finally:
+        model.calculations[alias_prepend] = saved
+
     for prefix in ('DependentFamilies.Family.', 'DependentRecords.Record.F.'):
         encode, decode = (operation(prefix + s) for s in ('encode', 'decode'))
         member_type = model.calculations[encode][0][-1][1]
@@ -165,6 +214,8 @@ def verify_symbolic_levels(output):
     assert len(roots) == 10
     return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'nativeStatementsExercised': len(sequence_laws), 'bodyMutationDetected': True,
+            'constructorAliasRoots': len(alias_rows), 'constructorAliasComparisons': alias_comparisons,
+            'constructorAliasMutationDetected': True,
             'completeValuesAndEvidencePreserved': True, 'source': 'parsed emitted SysML'}
 
 

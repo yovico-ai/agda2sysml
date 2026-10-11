@@ -1104,6 +1104,26 @@ spine. It does not guess omitted phantom module parameters from names or choose
 an arbitrary type to fill them. Missing identity metadata and abstract aliases
 remain refused.
 
+When a module-copy constructor is itself selected as a project declaration,
+preparation resolves that public root to its canonical constructor instance.
+The checked result family supplies the canonical static arguments: a module
+application may have fixed, reordered, or omitted parameters, so the alias's
+own argument list cannot be reused as the canonical specialization key.
+Preparation materializes the result family and checks the complete constructor
+telescope against the instantiated alias signature before recording a target.
+Equivalent aliases can share a target; different instantiated families retain
+distinct identities. The original alias and its source obligation remain in
+the report. Missing or abstract canonical identities, absent constructor
+instances, and incompatible telescopes remain explicit refusals.
+
+Copied proper projections use the checked original-field identity and their
+field-forwarding equation. Preparation verifies record ownership and the full
+instantiated receiver/result telescope, then retains the public source alias
+while targeting the materialized field calculation. Its behavior requirement
+is propagated to that target; a structural field alone does not discharge a
+callable projection. A field name or compatible result type without the checked
+forwarding equation is insufficient.
+
 The report retains the original conservative dependency obligations. After every
 selected root and its entire prepared dependency graph pass native admission,
 source-only dependencies outside that graph can satisfy a `reduction-source`

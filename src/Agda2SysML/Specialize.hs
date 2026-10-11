@@ -1348,7 +1348,14 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
     inv = UnusedParameters.annotate source
     needs = required inv
     active = not (null statementSeeds) || any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
-      || r == "behavior" && callbackSignature s) (S.toList needs)
+      || r == "behavior" && callbackSignature s
+      || r == "structure" && moduleConstructor s
+      || r `elem` ["structure","behavior"] && moduleProjection s) (S.toList needs)
+    moduleConstructor s = maybe False (\d -> get "kind" d == String "constructor"
+      && get "moduleInstanceCopy" d == Bool True) (M.lookup s (declarations inv))
+    moduleProjection s = maybe False (\d -> get "kind" d == String "function"
+      && get "moduleInstanceCopy" d == Bool True
+      && either (const False) ((/= Null) . get "proper") (field inv "projection" d)) (M.lookup s (declarations inv))
     statementSeeds = [s | (s,"statement") <- S.toAscList needs
       ,Just d <- [M.lookup s (declarations inv)],get "kind" d == String "function"
       ,Right ty <- [field inv "type" d],equalityResult ty]
@@ -1405,23 +1412,25 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
                 <*> liftEither (substituteLevel prior level)
               LevelKind -> pure (Level (openLevel i))
             pure (prior ++ [arg])) [] (zip [0..] kinds)
-        case string (get "kind" d) of
-          "record" -> ensureType inv [] (Named s args)
-          "datatype" -> do
-            ty <- liftEither (field inv "type" d)
-            -- Indexed relations keep their separate existing lowering rule.
-            when (generic s || get "tag" (get "term" ty) == String "sort") (ensureType inv [] (Named s args))
-          "function" -> do
-            alias <- liftEither (typeAlias inv d)
-            case alias of
-              Just ty -> ensureType inv [] ty
-              Nothing -> do
-                p <- liftEither (field inv "projection" d)
-                case get "proper" p of
-                  String owner -> ensureType inv [] (Named owner args)
-                  _ -> ensureFunction inv [] s args
-          _ -> pure ()
-        pure (instanceKey s args)
+        if moduleConstructor s then ensureConstructorRoot inv s args
+        else if moduleProjection s then ensureProjectionRoot inv s args else do
+          case string (get "kind" d) of
+            "record" -> ensureType inv [] (Named s args)
+            "datatype" -> do
+              ty <- liftEither (field inv "type" d)
+              -- Indexed relations keep their separate existing lowering rule.
+              when (generic s || get "tag" (get "term" ty) == String "sort") (ensureType inv [] (Named s args))
+            "function" -> do
+              alias <- liftEither (typeAlias inv d)
+              case alias of
+                Just ty -> ensureType inv [] ty
+                Nothing -> do
+                  p <- liftEither (field inv "projection" d)
+                  case get "proper" p of
+                    String owner -> ensureType inv [] (Named owner args)
+                    _ -> ensureFunction inv [] s args
+            _ -> pure ()
+          pure (instanceKey s args)
       case result of Left _ -> modify' (const before); Right _ -> pure ()
       pure (s,result)
     -- Statement preparation checks the telescope and its index computations,
@@ -1478,7 +1487,7 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
         callsIn (Array values) = S.unions (map callsIn (foldr (:) [] values))
         callsIn _ = S.empty
     errors = M.fromList [(s,e) | (s,Left e) <- attempts]
-    open = M.fromList [(s,key) | (s,Right key) <- attempts,generic s,openProfile,S.member s roots]
+    open = M.fromList [(s,key) | (s,Right key) <- attempts,generic s || key /= s,openProfile,S.member s roots]
     entries = M.elems (recorded store)
     -- Follow the specialized semantic graph separately for each model. Two
     -- models using one template at different types must not acquire each
@@ -1497,6 +1506,8 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
     extra ns = let reached = reach S.empty [M.findWithDefault s s open | (s,r) <- S.toList ns,r `elem` ["structure","behavior"]] in
       S.fromList [(identity i,r) | i <- entries,S.member (identity i) reached
         ,(s,r) <- S.toList ns,origin i == s,r `elem` ["structure","behavior"]]
+      `S.union` S.fromList [(key,r) | (s,r) <- S.toList ns,r `elem` ["structure","behavior"]
+        ,Just key <- [M.lookup s open]]
     expanded = inv { declarations = M.union (ready store) (declarations inv)
       ,modelRequirements = M.map (\ns -> ns `S.union` extra ns) (modelRequirements inv) }
     models = case get "models" (document inv) of Object ms -> KM.elems ms; _ -> []
@@ -1826,6 +1837,72 @@ data Binding = Static Type | Dynamic Type deriving (Eq,Show)
 isDynamic :: Binding -> Bool
 isDynamic Dynamic{} = True
 isDynamic _ = False
+
+-- A module copy's parameter slots need not match its canonical constructor's
+-- slots. Recover the latter from the checked result family, materialize that
+-- family, and verify the whole instantiated telescope before redirecting a
+-- public root. Keep the source alias in the inventory and root correspondence.
+ensureConstructorRoot :: Inventory -> Text -> [Type] -> Build Text
+ensureConstructorRoot inv s args = do
+  d <- definition inv s
+  sig <- liftEither (signature inv d)
+  liftEither (validateArguments inv (parameterKinds sig) args)
+  ins <- liftEither (traverse (substitute args) (inputs sig))
+  out <- liftEither (substitute args (output sig))
+  let term = object ["tag" .= ("constructor" :: Text),"symbol" .= s,"eliminations" .= ([] :: [Value])]
+  canonical <- case Reduction.reduceHead inv term of
+    Just (value,_) | get "tag" value == String "constructor",null (array (get "eliminations" value)) ->
+      pure (string (get "symbol" value))
+    _ -> abort Semantics "Module constructor lacks a checked canonical identity"
+  actualArgs <- case out of
+    Named _ ts -> pure (staticArguments ts)
+    _ -> abort Representation "Module constructor result is not a named carrier"
+  ensureType inv [] out
+  let key = instanceKey canonical actualArgs
+  target <- gets (M.lookup key . ready) >>= maybe
+    (abort Representation "Canonical module constructor was not materialized") pure
+  actualType <- liftEither (field inv "type" target)
+  unless (get "kind" target == String "constructor"
+    && Reduction.canonicalTerm actualType == Reduction.canonicalTerm (arrow ins out))
+    (abort Semantics "Module constructor telescope differs from its canonical instance")
+  pure key
+
+-- Proper projection copies similarly name a checked original field. Their
+-- eta-short forwarding body and complete receiver/result telescope must agree
+-- with that field; a matching result type alone cannot identify a projection.
+ensureProjectionRoot :: Inventory -> Text -> [Type] -> Build Text
+ensureProjectionRoot inv s args = do
+  d <- definition inv s
+  sig <- liftEither (signature inv d)
+  liftEither (validateArguments inv (parameterKinds sig) args)
+  ins <- liftEither (traverse (substitute args) (inputs sig))
+  out <- liftEither (substitute args (output sig))
+  p <- liftEither (field inv "projection" d)
+  tree <- liftEither (field inv "compiled" d)
+  let canonical = string (get "original" p)
+      forwarded = object ["tag" .= ("variable" :: Text),"index" .= (0 :: Int)
+        ,"eliminations" .= [object ["tag" .= ("project" :: Text),"symbol" .= canonical]]]
+  unless (get "abstract" d == Bool False && not (T.null canonical)
+    && get "tag" tree == String "done" && length (array (get "binders" tree)) == 1
+    && Reduction.canonicalTerm (get "body" tree) == Reduction.canonicalTerm forwarded)
+    (abort Semantics "Module projection lacks a checked field-forwarding equation")
+  (receiver,owner,ownerArgs) <- case ins of
+    [ty@(Named owner actual)] -> pure (ty,owner,actual)
+    _ -> abort Representation "Module projection needs a single record receiver"
+  ownerDef <- definition inv owner
+  fields <- map string . array <$> liftEither (field inv "fields" ownerDef)
+  unless (get "kind" ownerDef == String "record" && get "proper" p == String owner && canonical `elem` fields)
+    (abort Semantics "Module projection does not name a field of its receiver")
+  ensureType inv [] receiver
+  let key = instanceKey canonical (staticArguments ownerArgs)
+  target <- gets (M.lookup key . ready) >>= maybe
+    (abort Representation "Canonical module projection was not materialized") pure
+  actualType <- liftEither (field inv "type" target)
+  unless (get "kind" target == String "function"
+    && get "proper" (get "projection" target) == String (typeKey receiver)
+    && Reduction.canonicalTerm actualType == Reduction.canonicalTerm (arrow ins out))
+    (abort Semantics "Module projection telescope differs from its canonical instance")
+  pure key
 
 ensureFunction :: Inventory -> [Text] -> Text -> [Type] -> Build ()
 ensureFunction inv stack s actualArgs = do
