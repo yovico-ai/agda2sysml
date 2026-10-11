@@ -12,11 +12,15 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
     model = Model((output / model_file).read_text())
     prefix = 'Agda2SysML.DependentRecords.KnownProjection.'
     roots = {}
-    for operation in ('encode', 'decode', 'forgetInput', 'admitInput'):
+    for operation in ('encode', 'decode', 'forgetInput', 'admitInput', 'Bound.input-contract-required'):
         rows = [o for o in report['obligations'] if o['symbol'].startswith(prefix + operation + '#')
                 and '@' not in o['symbol'] and o['sourceKind'] == 'behavior']
         assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], ('record operation missing', operation, rows)
         roots[operation] = target_name(rows[0]['target'])
+    rows = [o for o in report['nativeStatements']
+            if o['symbol'].startswith(prefix + 'Bound.prefix-preserves#') and '@' not in o['symbol']]
+    assert len(rows) == 1 and rows[0]['status'] == 'translated' and rows[0]['target']
+    prefix_law = target_name(rows[0]['target'])
 
     source_type = model.calculations[roots['encode']][0][-1][1]
     native_type = model.results[roots['encode']]
@@ -55,7 +59,7 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
         return model.invoke(symbol, [*parameters, *values])
     def replace(record, field, value):
         return Record(record.type, tuple((k, value if k == field else v) for k, v in record.fields))
-    rejected = comparisons = 0
+    rejected = comparisons = statement_comparisons = mutations = 0
     def refuse(action):
         nonlocal rejected
         try:
@@ -92,7 +96,11 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
             assert same(model.invoke(roots['decode'], [*call_bindings, expected]), source), 'decode changed complete source record'
             assert same(model.invoke(roots['forgetInput'], [*call_bindings, expected]), raw), 'forgetInput changed prefix or carrier'
             assert same(model.invoke(roots['admitInput'], [*call_bindings, raw, proof]), expected), 'admission changed complete native record'
-            comparisons += 4
+            assert same(model.invoke(roots['Bound.input-contract-required'], [*call_bindings, expected]), proof), \
+                'required input contract changed the complete equality evidence'
+            assert model.invoke(prefix_law, [*call_bindings, source]) is True, 'prefix preservation constraint failed'
+            comparisons += 5
+            statement_comparisons += 1
 
         index, other = indices[:2]
         p = construct(prefix_type, [contexts[0], index], bindings)
@@ -104,6 +112,24 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
         wrong_carrier = construct(carrier_type, [other, member(other, 0)], bindings)
         wrong_raw = construct(raw_type, [p, wrong_carrier], bindings)
         wrong_proof = construct(proof_type, [other], bindings)
+        # Mutate actual parsed target bodies: wrong evidence and a false law
+        # must both be detected by the behavior/contract checks.
+        source = construct(source_type, [p, m], bindings)
+        for symbol, args, wrong, expected in (
+                (roots['Bound.input-contract-required'], [*call_bindings, native], wrong_proof, proof),
+                (prefix_law, [*call_bindings, source], False, True)):
+            saved = model.calculations[symbol]
+            model.calculations[symbol] = (saved[0], ('literal', wrong), saved[2])
+            try:
+                try:
+                    actual = model.invoke(symbol, args)
+                except AssertionError:
+                    mutations += 1
+                else:
+                    assert not same(actual, expected), 'schema-boundary body mutation escaped verification'
+                    mutations += 1
+            finally:
+                model.calculations[symbol] = saved
         refuse(lambda: model.invoke(roots['admitInput'], [*call_bindings, wrong_raw, proof]))
         refuse(lambda: model.invoke(roots['admitInput'], [*call_bindings, construct(raw_type, [p, carrier], bindings), wrong_proof]))
         capture = next(f for f, _, _, _ in model.carriers[fibre_type][1] if '.capture0' in f)
@@ -115,4 +141,5 @@ def verify_dependent_record_path(output, model_file='model.sysml', report_file='
         refuse(lambda: model.invoke(roots['encode'], [*narrowed_context, outside_source]))
         narrowed_family = [*call_bindings[:-1], relation[:1]]
         refuse(lambda: model.invoke(roots['encode'], [*narrowed_family, construct(source_type, [p, member(index, 0)], bindings)]))
-    return {'comparisons': comparisons, 'invalidCasesRejected': rejected, 'operations': 4}
+    return {'comparisons': comparisons, 'invalidCasesRejected': rejected, 'operations': len(roots),
+            'nativeStatements': 1, 'statementComparisons': statement_comparisons, 'bodyMutationsDetected': mutations}

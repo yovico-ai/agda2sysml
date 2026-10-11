@@ -330,6 +330,17 @@ repeated and reordered identities, empty reports, open evidence families and
 unbounded natural identities. Mismatched source lists, reasons and evidence must
 fail the emitted contracts.
 
+A computed index call may supply a static type family where the helper's
+existing signature expects a stored schema. Those representations are not
+implicitly interchangeable. When the supplied family has exactly the expected
+domains and universe, preparation may reduce the complete checked call using
+its transparent, terminating source equation, then read the result in the
+original caller context. This preserves symbolic family identity and dependent
+member domains without changing the helper's runtime-schema interface. Calls
+already supplied with stored schemas keep their ordinary calculation path.
+Opaque helpers, mismatched family telescopes and blocked reductions remain
+refused. This rule does not reify arbitrary static families as runtime schemas.
+
 ### Dependent pairs and projected record adapters
 
 Checked, transparent type aliases returning a universe may reduce at known
