@@ -6,14 +6,15 @@ module Agda2SysML.Specialize
   , Signature(..), ArgumentSlot(..), IndexExpr(..), LevelAtom(..), LevelExpr(..), ParameterKind(..), substitute, readType, constrainLevel, levelSymbols, typeAlias, nativeParameters, nativeFamilies ) where
 
 import Agda2SysML.Inventory hiding (prepare, field)
-import Agda2SysML.Diagnostic
+import Agda2SysML.Diagnostic hiding (context)
+import qualified Agda2SysML.Diagnostic as Diagnostic (context)
 import qualified Agda2SysML.Reduction as Reduction
 import qualified Agda2SysML.UnusedParameters as UnusedParameters
 import Agda2SysML.Sharing (digest)
 import Control.Monad (forM, forM_, unless, when, foldM, (>=>))
 import Control.Monad.Except
 import Control.Monad.State.Strict (State, runState, gets, modify')
-import Data.Aeson hiding (Result)
+import Data.Aeson hiding (Result, pairs)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -124,10 +125,10 @@ canonicalFamiliesAvoiding avoid ty = go M.empty start ty
     ix names next (IndexProject f ts x) = IndexProject f (map (go names next) ts) (ix names next x)
     ix names next (IndexCall f ts xs) = IndexCall f (map (go names next) ts) (map (ix names next) xs)
     ix names next (IndexSuccessor x) = IndexSuccessor (ix names next x)
-    ix names next (IndexTyped ty x) = typedIndex (go names next ty) (ix names next x)
-    ix names next (IndexLambda slots ty x) =
+    ix names next (IndexTyped indexType x) = typedIndex (go names next indexType) (ix names next x)
+    ix names next (IndexLambda slots lambdaType x) =
       let fresh = take (length slots) [next..]
-      in IndexLambda fresh (go names next ty) (ix (M.union (M.fromList (zip slots fresh)) names) (next+length slots) x)
+      in IndexLambda fresh (go names next lambdaType) (ix (M.union (M.fromList (zip slots fresh)) names) (next+length slots) x)
     ix names next (IndexApply f x) = IndexApply (ix names next f) (ix names next x)
     ix _ _ x = x
 
@@ -232,8 +233,8 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
           -- specializing a carrier used by that telescope, it is instead a
           -- free value and must become an explicit captured index.
           erase IndexArgument{} = if bound then IndexCaptured 0 else IndexInput 0
-          erase (IndexTyped ty x) = typedIndex (mapIndices erase ty) (erase x)
-          erase (IndexLambda slots ty x) = IndexLambda slots (mapIndices erase ty) (erase x)
+          erase (IndexTyped indexType x) = typedIndex (mapIndices erase indexType) (erase x)
+          erase (IndexLambda slots lambdaType x) = IndexLambda slots (mapIndices erase lambdaType) (erase x)
           erase (IndexApply f x) = IndexApply (erase f) (erase x)
           erase x = x
           localsInIndex = familyLocals (Runtime domain ix)
@@ -248,7 +249,7 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
         -- lambdas at different nesting depths. Deduplicate by their canonical
         -- binders, otherwise projecting a record changes its capture layout.
         let canonical = canonicalFamilies (Runtime domain (case ix of IndexTyped _ x -> x; _ -> ix))
-            value = case canonical of Runtime ty x -> (ty,x); _ -> (domain,ix)
+            value = case canonical of Runtime canonicalType x -> (canonicalType,x); _ -> (domain,ix)
             slot = length (takeWhile (/= value) slots)
         when (slot == length slots) (modify' (++ [value]))
         pure (Runtime domain (IndexCaptured slot))
@@ -260,15 +261,14 @@ captureArguments args = let (result,slots) = runState (traverse (visit False S.e
         _ -> pure (typedIndex ty ix)
     nested bound locals (IndexLambda slots ty ix) = IndexLambda slots <$> visit bound locals ty
       <*> nested bound (locals `S.union` S.fromList slots) ix
-    nested bound locals application@IndexApply{} = case spine [] application of
+    nested bound locals applied@(IndexApply f x) = case spine [] applied of
       (fn@(IndexTyped (Callable domains _) _),values) | length values <= length domains -> do
         capturedFn <- nested bound locals fn
         capturedValues <- forM (zip [0..] values) $ \(i,value) -> do
           captured <- visit bound locals (Runtime (applyCallback (take i values) (domains !! i)) value)
           case captured of Runtime _ ix -> pure ix; _ -> pure value
         pure (foldl IndexApply capturedFn capturedValues)
-      _ | IndexApply f x <- application -> IndexApply <$> nested bound locals f <*> nested bound locals x
-        | otherwise -> pure application
+      _ -> IndexApply <$> nested bound locals f <*> nested bound locals x
     nested bound locals (IndexCall f ts xs) = IndexCall f <$> traverse (visit bound locals) ts <*> traverse (nested bound locals) xs
     nested bound locals (IndexConstructor f ts xs) = IndexConstructor f <$> traverse (visit bound locals) ts <*> traverse (nested bound locals) xs
     nested bound locals (IndexProject f ts x) = IndexProject f <$> traverse (visit bound locals) ts <*> nested bound locals x
@@ -511,8 +511,8 @@ readTypeWithExpected inv env expected t = case string (get "tag" t) of
       _ -> Named name <$> traverse (app >=> readType inv env) es
   _ -> refuse Representation "Type expression is outside named first-order families"
   where
-    callback context domains arrow | get "tag" arrow == String "pi" = do
-      let dom = get "domain" arrow; cod = get "codomain" arrow
+    callback context domains callbackType | get "tag" callbackType == String "pi" = do
+      let dom = get "domain" callbackType; cod = get "codomain" callbackType
           modality = get "info" dom
       unless (get "relevance" modality == String "relevant" && get "quantity" modality /= String "zero")
         (refuse Semantics "Erased callback argument requires a separate representation rule")
@@ -529,7 +529,7 @@ readTypeWithExpected inv env expected t = case string (get "tag" t) of
     valueCarrier Level{} = False
     valueCarrier SchemaValue{} = False
     valueCarrier Unused = False
-    valueCarrier t = firstOrder t
+    valueCarrier carrier = firstOrder carrier
     -- Proven-unused module arguments are static bookkeeping inside a carrier,
     -- not function-valued data. They cannot themselves be callback domains.
     firstOrder Unused = True
@@ -545,7 +545,6 @@ readTypeWithExpected inv env expected t = case string (get "tag" t) of
     firstOrder FamilyParameter{} = True
     firstOrder OpenFamily{} = True
     firstOrder (FamilyExpression a _ b _) = firstOrder a && firstOrder b
-    firstOrder _ = False
     applyFamily family _ es = foldM (\current e -> do
       (domains,_) <- familyTelescope current
       domain <- at 0 domains
@@ -759,7 +758,7 @@ indexNormalFormWith project = normal . canonicalFamilies
       -- transparent. Applied callback heads still need their type evidence;
       -- a different annotation must not justify equality of the two domains.
       in Runtime actual (case checked of
-        IndexTyped annotation expression | annotation == actual -> expression
+        IndexTyped annotation annotatedIndex | annotation == actual -> annotatedIndex
         _ -> checked)
     normal ty = ty
     index (IndexTyped ty x) = typedIndex (normal ty) (index x)
@@ -773,10 +772,10 @@ indexNormalFormWith project = normal . canonicalFamilies
     spine (IndexApply f x) xs = spine f (x:xs)
     spine (IndexTyped _ f) xs = spine f xs
     spine f xs = (f,xs)
-    beta expression = case spine expression [] of
+    beta appliedIndex = case spine appliedIndex [] of
       (IndexLambda slots _ body,args) | length args >= length slots ->
         index (foldl IndexApply (bindIndexLocals (zip slots args) body) (drop (length slots) args))
-      _ -> expression
+      _ -> appliedIndex
 
 -- Comparison only, on an already typed index. Checked record metadata fixes
 -- the constructor and field order; contextual value parameters precede fields
@@ -902,13 +901,13 @@ readConstructorIndex inv env expected term = do
     hasParameter _ = False
     -- Signature reading also runs before specialization, when carrier
     -- parameters are symbolic. Only concrete carriers determine a level here.
-    complete sig known = foldM step known (zip [0..] (parameterKinds sig))
+    complete sig known = foldM completeParameter known (zip [0..] (parameterKinds sig))
       where
-        step table (i,UnusedKind) = Right (M.insert i Unused table)
-        step table (i,TypeKind level) = case M.lookup i table of
+        completeParameter table (i,UnusedKind) = Right (M.insert i Unused table)
+        completeParameter table (i,TypeKind level) = case M.lookup i table of
           Just ty | closed ty -> universeOf inv ty >>= constrainUniverse table level
           _ -> Right table
-        step table _ = Right table
+        completeParameter table _ = Right table
 
 replaceKnownInputs :: M.Map Int IndexExpr -> Type -> Type
 replaceKnownInputs values = mapIndices go
@@ -1094,8 +1093,8 @@ instantiate args values (Runtime ty index) = Runtime <$> instantiate args values
     go (IndexCall f ts xs) = IndexCall f <$> traverse (instantiate args values) ts <*> traverse go xs
     go (IndexConstructor c ts xs) = IndexConstructor c <$> traverse (instantiate args values) ts <*> traverse go xs
     go (IndexSuccessor i) = IndexSuccessor <$> go i
-    go (IndexTyped ty x) = typedIndex <$> instantiate args values ty <*> go x
-    go (IndexLambda slots ty x) = IndexLambda slots <$> instantiate args values ty <*> go x
+    go (IndexTyped indexType x) = typedIndex <$> instantiate args values indexType <*> go x
+    go (IndexLambda slots lambdaType x) = IndexLambda slots <$> instantiate args values lambdaType <*> go x
     go (IndexApply f x) = IndexApply <$> go f <*> go x
     go original@(IndexInput i) = Right (M.findWithDefault original i values)
     go i = Right i
@@ -1126,8 +1125,8 @@ closed (Runtime ty index) = closed ty && go index
     go IndexCaptured{} = True
     go IndexArgument{} = True
     go IndexFamilyArgument{} = True
-    go (IndexTyped ty x) = closed ty && go x
-    go (IndexLambda slots ty x) = closed ty && closed (Runtime Unused (bindIndexLocals (zip slots (repeat (IndexCaptured 0))) x))
+    go (IndexTyped indexType x) = closed indexType && go x
+    go (IndexLambda slots lambdaType x) = closed lambdaType && closed (Runtime Unused (bindIndexLocals (zip slots (repeat (IndexCaptured 0))) x))
     go (IndexApply f x) = go f && go x
     go IndexLocal{} = False
     go IndexInput{} = False
@@ -1713,8 +1712,11 @@ ensureType inv stack (Callable a b) = mapM_ (ensureType inv stack) (b:a)
 ensureType inv stack (SelectedFamily (Runtime schema index)) = ensureType inv stack schema >> ensureIndex inv index
 ensureType _ _ SelectedFamily{} = abort Semantics "Stored family lacks its schema value"
 ensureType inv stack schema@(SchemaValue domains level) = do
-  let ([SchemaValue canonicalDomains _],captures) = captureArguments [schema]
-      captureTypes = map (materializeCaptures . fst) captures
+  let (canonical,captures) = captureArguments [schema]
+  canonicalDomains <- case canonical of
+    [SchemaValue ds _] -> pure ds
+    _ -> abort Representation "Schema capture did not preserve its carrier"
+  let captureTypes = map (materializeCaptures . fst) captures
       prefix = length captures
       contextualDomains = materializeFamilyDomains prefix (map materializeCaptures canonicalDomains)
       key = typeKey schema
@@ -1801,7 +1803,7 @@ ensureType inv stack ty@(Named s allArgs) = do
       schemaArgs = map materializeCaptures args
       captureTypes = map (materializeCaptures . fst) captures
       prefix = length captures
-      instantiate sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
+      instantiateSchemaType sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
   unless (all closed args) (abort Representation "Carrier specialization requires concrete static arguments")
   forM_ (staticArguments allArgs) $ \arg -> case arg of Level{} -> pure (); Unused -> pure (); _ -> ensureType inv stack arg
   forM_ (drop (length args) allArgs) $ \arg -> case arg of
@@ -1821,7 +1823,7 @@ ensureType inv stack ty@(Named s allArgs) = do
     (kinds,indices,_) <- liftEither (familySignature inv d)
     let n = length kinds
     unless (n == length args) (abort Syntax "Carrier parameter arity mismatch")
-    indexTypes <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate indices)
+    indexTypes <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiateSchemaType indices)
     let contexts = [i | (i,Callable{}) <- zip [0 :: Int ..] (take (prefix+sourceParameters-n) indexTypes)]
     mapM_ (ensureType inv (instanceKey s args:stack)) indexTypes
     liftEither (validateArguments inv kinds args)
@@ -1847,8 +1849,8 @@ ensureType inv stack ty@(Named s allArgs) = do
       cd <- definition inv c
       sig <- liftEither (signature inv cd)
       unless (parameters sig == n) (abort Syntax "Constructor parameter telescope mismatch")
-      ins <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
-      out <- liftEither (instantiate (output sig))
+      ins <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiateSchemaType (inputs sig))
+      out <- liftEither (instantiateSchemaType (output sig))
       unless (typeKey out == typeKey ty && case out of
         Named _ xs -> length xs == n + length indices; _ -> False)
         (abort Semantics ("Constructor result has wrong family or index arity: " <> typeKey out <> " /= " <> typeKey ty))
@@ -1872,8 +1874,8 @@ ensureType inv stack ty@(Named s allArgs) = do
             rebaseIndex (IndexConstructor c ts xs) = IndexConstructor c (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexCall f ts xs) = IndexCall f (map (mapIndices rebaseIndex) ts) (map rebaseIndex xs)
             rebaseIndex (IndexSuccessor x) = IndexSuccessor (rebaseIndex x)
-            rebaseIndex (IndexTyped ty x) = typedIndex (mapIndices rebaseIndex ty) (rebaseIndex x)
-            rebaseIndex (IndexLambda slots ty x) = IndexLambda slots (mapIndices rebaseIndex ty) (rebaseIndex x)
+            rebaseIndex (IndexTyped indexType x) = typedIndex (mapIndices rebaseIndex indexType) (rebaseIndex x)
+            rebaseIndex (IndexLambda slots lambdaType x) = IndexLambda slots (mapIndices rebaseIndex lambdaType) (rebaseIndex x)
             rebaseIndex (IndexApply f x) = IndexApply (rebaseIndex f) (rebaseIndex x)
             rebaseIndex x = x
         forM_ (zip prefixFields (take recordPrefix ins)) $ \(f,domain) ->
@@ -1884,8 +1886,8 @@ ensureType inv stack ty@(Named s allArgs) = do
           fd <- definition inv f
           sig <- liftEither (signature inv fd)
           p <- liftEither (field inv "projection" fd)
-          actualIns <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
-          actualOut <- liftEither (instantiate (output sig))
+          actualIns <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiateSchemaType (inputs sig))
+          actualOut <- liftEither (instantiateSchemaType (output sig))
           unless (parameters sig == n && take prefix actualIns == captureTypes && length actualIns == recordPrefix+1
             && typeKey (last actualIns) == typeKey ty
             && get "proper" p == String s && get "index" p == toJSON (sourceParameters+1)) (abort Syntax "Dependent or malformed proper record projection")
@@ -2053,7 +2055,7 @@ ensureFunction inv stack s actualArgs = do
       prefix = length captures
       captureTypes = map (materializeCaptures . fst) captures
       schemaArgs = map materializeCaptures args
-      instantiate sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
+      instantiateSchemaType sourceType = substitute schemaArgs (shiftIndices prefix sourceType)
   exists <- cached inv s args
   when (exists && s `elem` stack) $ do
     d <- definition inv s
@@ -2063,8 +2065,8 @@ ensureFunction inv stack s actualArgs = do
     d <- definition inv s
     sig <- liftEither (signature inv d)
     liftEither (validateArguments inv (parameterKinds sig) args)
-    ins <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiate (inputs sig))
-    out <- liftEither (instantiate (output sig))
+    ins <- liftEither ((\xs -> captureTypes ++ xs) <$> traverse instantiateSchemaType (inputs sig))
+    out <- liftEither (instantiateSchemaType (output sig))
     mapM_ (ensureType inv []) (out:ins)
     p <- liftEither (field inv "projection" d)
     case get "proper" p of
@@ -2079,7 +2081,7 @@ ensureFunction inv stack s actualArgs = do
           let env = map Dynamic captureTypes ++ drop (dropped sig) sourceEnv
           specializeTree inv (s:stack) env out (prefixTree prefix tree)) `catchError` \reason -> do
             modify' $ \st -> st {ready = M.delete (instanceKey s args) (ready st), recorded = M.delete (instanceKey s args) (recorded st)}
-            throwError (context ("Specializing " <> s <> ": ") reason)
+            throwError (Diagnostic.context ("Specializing " <> s <> ": ") reason)
         let d' = set "type" (arrow ins out) $ set "compiled" body $ set "projection"
               (if runtimeDropped sig > 0 then set "index" (toJSON (runtimeDropped sig + 1)) p else Null)
               $ clone inv s args d
@@ -2189,8 +2191,8 @@ specializeTreeIn inv stack equations env out tree
               rewrite (IndexProject name ts x) = IndexProject name (map reindex ts) (rewrite x)
               rewrite (IndexCall name ts xs) = IndexCall name (map reindex ts) (map rewrite xs)
               rewrite (IndexSuccessor x) = IndexSuccessor (rewrite x)
-              rewrite (IndexTyped ty x) = typedIndex (reindex ty) (rewrite x)
-              rewrite (IndexLambda slots ty x) = IndexLambda slots (reindex ty) (rewrite x)
+              rewrite (IndexTyped indexType x) = typedIndex (reindex indexType) (rewrite x)
+              rewrite (IndexLambda slots lambdaType x) = IndexLambda slots (reindex lambdaType) (rewrite x)
               rewrite (IndexApply f x) = IndexApply (rewrite f) (rewrite x)
               rewrite x = x
               bindings = map rewrite contextual ++ payloadIndices
@@ -2201,7 +2203,7 @@ specializeTreeIn inv stack equations env out tree
           unless (arity == length fields) (abort Syntax "Specialized case payload arity mismatch")
           let branchEnv = map change (take i env) ++ map Dynamic fields ++ map change (drop (i+1) env)
           constructorResult <- liftEither (instantiate (map reindex args) (M.fromList (zip [0..] bindings)) (output sig))
-          let branchEquations = (constructorResult,reindex ty) : [(reindex a,reindex b) | (a,b) <- equations]
+          let branchEquations = (constructorResult,reindex ty) : [(reindex left,reindex right) | (left,right) <- equations]
               (facts,premises) = branchIndexBindings inv (reverse branchEnv) position count branchEquations
               refine (Dynamic domain) = Dynamic (replaceKnownInputs facts domain)
               refine binding = binding
@@ -2214,7 +2216,7 @@ specializeTreeIn inv stack equations env out tree
                     ,target >= 0,target < length sourcePositions -> Reduction.variable (sourcePositions !! target)
                   _ -> Reduction.variable (length branchEnv-j-1)
                 | (j,binding) <- zip [0..] branchEnv]
-              refinedEquations = [(replaceKnownInputs facts a,replaceKnownInputs facts b) | (a,b) <- branchEquations]
+              refinedEquations = [(replaceKnownInputs facts left,replaceKnownInputs facts right) | (left,right) <- branchEquations]
           child <- if sourceBindings == map Reduction.variable (reverse [0..length branchEnv-1])
             then pure (get "tree" b)
             else maybe (abort Syntax "Cannot transport checked branch index aliases") pure
@@ -2296,10 +2298,10 @@ unify known a@(FamilyExpression domainA _ bodyA levelA) b@(FamilyExpression doma
   pure inferred
 unify known a@OpenFamily{} b@OpenFamily{} | a == b = Right known
 unify known (FamilyApplication (FamilyParameter i _ _) indices) actual
-  | Just expression@FamilyExpression{} <- M.lookup i known = do
+  | Just familyExpression@FamilyExpression{} <- M.lookup i known = do
       let args = [M.findWithDefault (Parameter slot) slot known | slot <- [0..maximum (i:M.keys known)]]
       values <- traverse (substitute args) indices
-      applied <- applyTypeFamily expression values
+      applied <- applyTypeFamily familyExpression values
       unify known applied actual
 unify known (FamilyApplication f xs) (FamilyApplication g ys) | length xs == length ys = do
   first <- unify known f g
@@ -2482,11 +2484,11 @@ expression inv stack env (Just stored) term
 expression inv stack env expected term = do
   result <- infer `catchError` \failure ->
     higherOrder inv stack env term `catchError` \closureFailure -> case Reduction.reduceHead inv term of
-      Nothing -> throwError (context (message closureFailure <> "; ") failure)
+      Nothing -> throwError (Diagnostic.context (message closureFailure <> "; ") failure)
       Just (reduced,premises) -> do
         (ty,value) <- expression inv stack env expected reduced
         pure (ty,set "reductionEvidence" (object ["before" .= term,"after" .= reduced,"declarations" .= premises]) value)
-  forM_ expected $ \ty -> liftEither (either (Left . context "Specialized expression carrier mismatch: ") Right (unifyIn inv env M.empty ty (fst result)))
+  forM_ expected $ \ty -> liftEither (either (Left . Diagnostic.context "Specialized expression carrier mismatch: ") Right (unifyIn inv env M.empty ty (fst result)))
   pure result
   where
     es = array (get "eliminations" term)
@@ -2562,7 +2564,7 @@ expression inv stack env expected term = do
         let s = string (get "symbol" term)
         d <- definition inv s
         unless (get "kind" d `elem` [String "function",String "primitive"]) (abort Semantics "Runtime call is not a checked function")
-        sig <- liftEither (either (Left . context ("Signature of " <> s <> ": ")) Right (signature inv d))
+        sig <- liftEither (either (Left . Diagnostic.context ("Signature of " <> s <> ": ")) Right (signature inv d))
         let slots = drop (dropped sig) (argumentSlots sig)
             staticEs = [(i,e) | (TypePosition i,e) <- zip slots es]
             valueElims = [e | (ValuePosition _,e) <- zip slots es] ++ drop (length slots) es
@@ -2604,7 +2606,7 @@ expression inv stack env expected term = do
               resolved (Named _ ts) = all resolved ts
               resolved (Callable a b) = all resolved (b:a)
               resolved (SchemaValue ds l) = all resolved ds && closed (Level l)
-              resolved (SelectedFamily value) = resolved value
+              resolved (SelectedFamily familyValue) = resolved familyValue
               resolved (FamilyApplication f xs) = all resolved (f:xs)
               resolved (FamilyExpression domain _ body level) = resolved domain && resolved body && closed (Level level)
               resolved (OpenFamily _ xs _) = all resolved xs
@@ -2638,8 +2640,8 @@ expression inv stack env expected term = do
           foldl (\known (a,b) -> recoverInputs known a b) table (zip xs ys)
         recoverInputs table _ _ = table
     eliminate ty value [] = pure (ty,value)
-    eliminate (Callable domains out) value es@(_:_) = do
-      unless (length es >= length domains) (abort Representation "Partial callback application requires runtime closure construction")
+    eliminate (Callable domains out) value eliminations@(_:_) = do
+      unless (length eliminations >= length domains) (abort Representation "Partial callback application requires runtime closure construction")
       (indices,actuals) <- foldM (\(prior,values) (patternType,e) -> do
         let domain = applyCallback prior patternType
         when (S.member (-1) (familyLocals domain)) (abort Representation "Dependent callback requires a representable argument index")
@@ -2648,11 +2650,11 @@ expression inv stack env expected term = do
         let index = case readIndex inv (runtimeBindings env) domain argument of
               Right (Runtime _ ix) -> ix
               _ -> IndexArgument (length prior)
-        pure (prior ++ [index],values ++ [application actual])) ([],[]) (zip domains es)
+        pure (prior ++ [index],values ++ [application actual])) ([],[]) (zip domains eliminations)
       let result = applyCallback indices out
       when (S.member (-1) (familyLocals result)) (abort Representation "Dependent callback requires a representable argument index")
       let applied = set "eliminations" (toJSON (array (get "eliminations" value) ++ actuals)) value
-      eliminate result applied (drop (length domains) es)
+      eliminate result applied (drop (length domains) eliminations)
     eliminate ty@(Named owner args) value (e:rest) = do
       unless (get "tag" e == String "project") (abort Representation "Extra value application is unsupported")
       let f = string (get "symbol" e)
@@ -2739,7 +2741,7 @@ higherOrder inv stack env term = do
       descend (IndexCall f ts xs) = IndexCall f (map refine ts) (map (refineIndex . descend) xs)
       descend (IndexProject f ts x) = IndexProject f (map refine ts) (refineIndex (descend x))
       descend (IndexTyped ty x) = typedIndex (refine ty) (refineIndex (descend x))
-      descend (IndexLambda slots ty x) = IndexLambda slots (refine ty) (refineIndex (descend x))
+      descend (IndexLambda lambdaSlots ty x) = IndexLambda lambdaSlots (refine ty) (refineIndex (descend x))
       descend (IndexApply f x) = IndexApply (refineIndex (descend f)) (refineIndex (descend x))
       descend x = x
       callerPosition i = length (filter isDynamic (drop (i+1) env))
@@ -2756,7 +2758,7 @@ higherOrder inv stack env term = do
       rename (IndexCall f ts xs) = IndexCall f (map rebase ts) (map rename xs)
       rename (IndexProject f ts x) = IndexProject f (map rebase ts) (rename x)
       rename (IndexTyped ty x) = typedIndex (rebase ty) (rename x)
-      rename (IndexLambda slots ty x) = IndexLambda slots (rebase ty) (rename x)
+      rename (IndexLambda lambdaSlots ty x) = IndexLambda lambdaSlots (rebase ty) (rename x)
       rename (IndexApply f x) = IndexApply (rename f) (rename x)
       rename x = x
       allTypes = map (rebase . refine) (captureTypes ++ runtimeTypes)
@@ -2848,8 +2850,8 @@ higherOrder inv stack env term = do
     telescopeSlots ty [] = do
       out <- liftEither (readType inv (runtimeBindings env) (get "term" ty))
       pure ([],out)
-    telescopeSlots ty (value:rest) = do
-      let arrowTerm = get "term" ty
+    telescopeSlots telescopeType (value:rest) = do
+      let arrowTerm = get "term" telescopeType
           rawDomain = get "type" (get "domain" arrowTerm)
           dom = case Reduction.reduceHead inv (get "term" rawDomain) of
             Just (reduced,_) -> set "term" reduced rawDomain

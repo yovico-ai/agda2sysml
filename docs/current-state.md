@@ -192,6 +192,19 @@ Generation preceded the repair commit, so raw manifests retain the observed
 earlier revision and dirty state. Source and compiled-module hashes identify
 the implementation subsequently committed as `8204236`.
 
+**Warning-cleanup follow-up:** a complete compilation found 125 distinct
+first-party warning locations, including warnings absent from the incremental
+checkpoint logs. The cleanup qualifies imports, renames shadowing bindings,
+removes unused and unreachable code, specifies numeric types, and replaces
+implicit pattern/list assumptions with explicit checks. Unsupported expressions
+in the test evaluator fail explicitly. The application and all eight test
+components compiled with `-Wall -Werror`, with zero warnings; all eight suites
+passed in compiler-only mode. These checks used GHC 9.10.3 without optimization
+and reused cached dependencies. The machine-readable evidence records the
+follow-up source and log hashes separately. Generated models, coverage counts,
+and Pilot results above retain their original checkpoint identities; generation
+and Pilot were not repeated for this cleanup.
+
 The measurements use a shared Linux server with an AMD Ryzen 7 5700U
 (eight cores, 16 threads, frequency boost disabled) and 59.7 GiB usable RAM.
 The full self-model validator uses OpenJDK 21

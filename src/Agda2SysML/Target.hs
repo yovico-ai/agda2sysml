@@ -125,9 +125,9 @@ generate original = Generated text report problems (null problems)
     concreteInstances = M.fromListWith (++) [(Specialize.origin i,[Specialize.identity i]) | i <- Specialize.instances specialized]
     requirements = S.toAscList (required inv)
     finiteDomains = finiteFor inv
-    finiteFor context = M.fromList [(symbol,shape) | (symbol,d) <- M.toAscList (declarations context)
-      , S.member (symbol,"structure") (required context), symbol /= builtin context "bool"
-      , Right shape <- [Finite.domain context d]]
+    finiteFor scope = M.fromList [(symbol,shape) | (symbol,d) <- M.toAscList (declarations scope)
+      , S.member (symbol,"structure") (required scope), symbol /= builtin scope "bool"
+      , Right shape <- [Finite.domain scope d]]
     finiteSymbols = S.fromList (concat [[Finite.domainSymbol shape] ++ Finite.constructors shape
       | shape <- M.elems finiteDomains])
     (algebraicShapes,algebraicErrors) = Algebraic.discover inv finiteDomains
