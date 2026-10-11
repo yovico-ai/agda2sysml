@@ -706,6 +706,27 @@ Implementation tests check evaluation and refusal; native tests check helper
 results and valid/invalid computed constraints.
 
 
+### Already-admitted calculations in dependent contracts
+
+Carrier discovery retains its restricted index-helper rules. After the carrier
+set is established, calculation admission proceeds in stages: a calculation
+whose complete body and dependency closure have passed can supply a helper for
+dependent input and result contracts in the next stage. This includes safely
+terminating recursion over unindexed carriers, without requiring that its body
+match a particular list algorithm.
+
+New helpers require checked safe-module termination and no additional static
+index preconditions; their entire helper dependency closure must satisfy the
+same admission conditions. A caller cannot hide a conditional or unsupported
+helper. Previously admitted calculations and certified comparison normal forms
+are retained. Staging terminates when no additional helper identity is admitted.
+
+This process does not discover new carriers or assume a signature before its
+body is checked. In particular, a calculation cannot justify the carrier needed
+to admit that same calculation. Calls retain their typed arguments and explicit
+dependencies. Unknown recursive computations remain distinct; checked admission
+does not imply arbitrary injectivity or equality of functions.
+
 ## Computed structured indices
 
 After carriers are admitted, a separate pass can admit acyclic native

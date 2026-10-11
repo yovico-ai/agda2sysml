@@ -6,7 +6,7 @@ oracle reads emitted SysML; checked Agda terms are not an execution shortcut.
 import itertools
 import json
 from pathlib import Path
-from emitted_model import CalculationValue, Extent, Model, Record
+from emitted_model import CalculationValue, Extent, Model, Record, same
 from open_parameters import target_name
 
 
@@ -46,6 +46,16 @@ def verify_equality_statements(output):
     report = json.loads((output / 'correspondence.json').read_text())
     model = Model((output / 'model.sysml').read_text() + '''
 calc def statementIdentity { in x : Base::Anything [1]; return result : Base::Anything [1] = x; }
+calc def admissionClassify {
+  in x : Base::Anything [1];
+  return result : 'Agda2SysML.DeclarationSelection.Roles' [1] =
+    (if x == 0 ? 'Agda2SysML.DeclarationSelection.Roles.one'(
+      'Agda2SysML.Obligations.Kind'::'Agda2SysML.Obligations.Kind.structure')
+    else 'Agda2SysML.DeclarationSelection.Roles.more'(
+      'Agda2SysML.Obligations.Kind'::'Agda2SysML.Obligations.Kind.behavior',
+      'Agda2SysML.DeclarationSelection.Roles.one'(
+        'Agda2SysML.Obligations.Kind'::'Agda2SysML.Obligations.Kind.statement')));
+}
 ''')
     rows = report['nativeStatements']
     translated = {r['symbol'].split('#', 1)[0].removeprefix('Agda2SysML.'): r
@@ -178,6 +188,137 @@ calc def statementIdentity { in x : Base::Anything [1]; return result : Base::An
             model.calculations[decode] = saved
     for name in ('RecursiveValues.tag-preserves', 'RecursiveValues.payload-preserves'):
         refuse(lambda: law(name, [(False,), opaque[:1], trees[-1]]))
+
+    # Safely recursive calculations can also occur in dependent contracts.
+    # Check the complete generated inequality witnesses, not just their tags
+    # or the successful admission of the two source operations.
+    sum_bound = operation('RecursiveValues.child-sum-bound')
+    decreases = operation('RecursiveValues.child-decreases')
+    membership_type = model.calculations[sum_bound][0][-1][1]
+    head = constructor(membership_type, '.head')
+    tail = constructor(membership_type, '.tail')
+    le_type, lt_type = model.results[sum_bound], model.results[decreases]
+    zero_le, successor_le = (constructor(le_type, suffix) for suffix in ('.zero-le', '.successor-le'))
+    zero_lt, successor_lt = (constructor(lt_type, suffix) for suffix in ('.zero-below', '.successor-below'))
+    fixed_bindings = dict(zip(('typeArgument0', 'typeArgument1'), binding))
+
+    def bound_call(symbol, *values):
+        parameters = [fixed_bindings[f] for f, _, _, _ in model.calculations[symbol][0]
+                      if f.startswith('typeArgument')]
+        return model.invoke(symbol, [*parameters, *values])
+
+    def witness(a, b, strict=False):
+        assert 0 <= a < b if strict else 0 <= a <= b
+        if a == 0:
+            return bound_call(zero_lt if strict else zero_le, b - int(strict))
+        return bound_call(successor_lt if strict else successor_le, a - 1, b - 1,
+                          witness(a - 1, b - 1, strict))
+
+    # Independent counts come from the construction plan above, not the
+    # emitted count calculation whose use inside contracts is under test.
+    counted = [(trees[0], 1), (trees[-3], 2), (trees[-1], 3)]
+    index_samples = []
+    index_comparisons = 0
+    for children in ((counted[0],), (counted[0], counted[0]),
+                     (counted[2], counted[0], counted[1])):
+        suffixes = [nil]
+        for child, _ in reversed(children):
+            suffixes.append(call(cons, child, suffixes[-1]))
+        suffixes.reverse()
+        total = sum(n for _, n in children)
+        for position, (child, count) in enumerate(children):
+            membership = bound_call(head, child, suffixes[position + 1])
+            for earlier in reversed(range(position)):
+                membership = bound_call(tail, child, children[earlier][0], suffixes[earlier + 1], membership)
+            for symbol, values, expected in (
+                (sum_bound, [child, suffixes[0], membership], witness(count, total)),
+                (decreases, [child, suffixes[0], False, opaque[0], membership], witness(count, total + 1, True)),
+            ):
+                args = [*binding, *values]
+                assert same(model.invoke(symbol, args), expected), ('dependent count contract changed', symbol)
+                index_samples.append((symbol, args, expected))
+                index_comparisons += 1
+            # A valid membership for a different child/forest must not satisfy
+            # the actual dependent input contract.
+            refuse(lambda: call(sum_bound, child, nil, membership))
+            wrong_child = trees[1] if same(child, trees[0]) else trees[0]
+            refuse(lambda: call(sum_bound, wrong_child, suffixes[0], membership))
+
+    # Selection returns complete membership evidence. Compute the expected
+    # flattened inventory and witness position independently of select and
+    # roots-for; exercise both clauses, repeated IDs and multiple roles.
+    omissions = operation('DeclarationSelection.Selection.no-silent-omissions')
+    selection_inputs = model.calculations[omissions][0]
+    id_list, root_type, id_member, root_member = [a[1] for a in selection_inputs[-4:]]
+    root_ctor = constructor(root_type, '.root')
+    root_list = model.calculations[constructor(root_member, '.here')][0][-1][1]
+    selection_bindings = {'typeArgument0': (0, 7, 10**40), 'typeArgument1': opaque}
+
+    def selection_call(symbol, *values):
+        parameters = [selection_bindings[f] for f, _, _, _ in model.calculations[symbol][0]
+                      if f.startswith('typeArgument')]
+        return model.invoke(symbol, [*parameters, *values])
+
+    def selection_list(typ, values):
+        return Record(typ, tuple((f, selection_bindings[f]) for f, _, _, _ in model.carriers[typ][1]
+                                if f.startswith('typeArgument')) + (('items', tuple(values)),))
+
+    def membership(typ, list_type, values, position):
+        value = values[position]
+        witness = selection_call(constructor(typ, '.here'), value,
+                                 selection_list(list_type, values[position + 1:]))
+        for earlier in reversed(range(position)):
+            witness = selection_call(constructor(typ, '.there'), value, values[earlier],
+                                     selection_list(list_type, values[earlier + 1:]), witness)
+        return witness
+
+    kind = 'Agda2SysML.Obligations.Kind::Agda2SysML.Obligations.Kind.'
+    classify = CalculationValue('admissionClassify')
+    for ids in ((0,), (7,), (7, 0), (0, 7, 0), (10**40, 7)):
+        roots = [tuple(selection_call(root_ctor, value, kind + role)
+                       for role in (('structure',) if value == 0 else ('behavior', 'statement')))
+                 for value in ids]
+        flattened = tuple(root for group in roots for root in group)
+        for position, value in enumerate(ids):
+            id_witness = membership(id_member, id_list, ids, position)
+            for role_position, root_value in enumerate(roots[position]):
+                role_witness = membership(root_member, root_list, roots[position], role_position)
+                expected = membership(root_member, root_list, flattened,
+                                      sum(map(len, roots[:position])) + role_position)
+                args = [*selection_bindings.values(), classify, value, selection_list(id_list, ids),
+                        root_value, id_witness, role_witness]
+                assert same(model.invoke(omissions, args), expected), 'selection witness changed'
+                index_samples.append((omissions, args, expected))
+                index_comparisons += 1
+                wrong = args.copy()
+                wrong[4] = selection_list(id_list, ())
+                refuse(lambda: model.invoke(omissions, wrong))
+                wrong = args.copy()
+                wrong[3] = 7 if value == 0 else 0
+                refuse(lambda: model.invoke(omissions, wrong))
+                wrong = args.copy()
+                wrong[5] = selection_call(root_ctor, value, kind + 'external-assumption')
+                refuse(lambda: model.invoke(omissions, wrong))
+
+    index_body_mutations = 0
+    for symbol in (sum_bound, decreases, omissions):
+        saved = model.calculations[symbol]
+        constant = next(expected for name, _, expected in index_samples if name == symbol)
+        model.calculations[symbol] = (saved[0], ('literal', constant), saved[2])
+        detected = False
+        try:
+            for name, args, expected in index_samples:
+                if name != symbol:
+                    continue
+                try:
+                    assert same(model.invoke(symbol, args), expected)
+                except AssertionError:
+                    detected = True
+                    break
+            assert detected, ('constant witness mutation escaped', symbol)
+            index_body_mutations += 1
+        finally:
+            model.calculations[symbol] = saved
 
     # The static family argument captures a runtime schema. The complete
     # binding and index must reach every nested helper call in the statement.
@@ -373,6 +514,8 @@ calc def statementIdentity { in x : Base::Anything [1]; return result : Base::An
             'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'conclusionMutationDetected': True, 'premiseMutationDetected': premise_mutation,
             'computedIndexMutationsDetected': 2 + captured_mutations,
+            'admittedIndexOperations': 3, 'admittedIndexComparisons': index_comparisons,
+            'admittedIndexBodyMutationsDetected': index_body_mutations,
             'proofSourcesRetained': True}
 
 

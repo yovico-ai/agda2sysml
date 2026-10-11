@@ -963,10 +963,27 @@ signature inv finite helpers shapes d = do
   (args,env,res) <- typedTelescope inv finite helpers shapes ty
   (args,) <$> carrierIn inv finite helpers shapes env res
 
--- Check bodies as well as signatures, then close over actual invocation nodes.
--- A failed/recursive helper prevents every caller from acquiring a native rule.
+-- Carrier discovery has its own restricted helper set. Once those carriers
+-- are fixed, an independently checked calculation may also justify calls in
+-- dependent signatures. Grow this set in stages: a body is never admitted by
+-- assuming its own dependent contract, or by discovering a carrier from it.
+-- Keep earlier admitted calculations and certified comparison normal forms;
+-- expanding the helper set must not rewrite an already established interface.
 functions :: Inventory -> M.Map Text F.Domain -> Shapes -> M.Map Text (Either Refusal Calculation)
-functions inv finite shapes = functionsWith (indexHelpers inv finite shapes (finiteHelpers inv finite)) inv finite shapes
+functions inv finite shapes = admit initial M.empty
+  where
+    initial = indexHelpers inv finite shapes (finiteHelpers inv finite)
+    admit helpers established =
+      let outcomes = M.union (M.map Right established) (functionsWith helpers inv finite shapes)
+          checked = M.mapMaybe (either (const Nothing) Just) outcomes
+          eligible c = null (staticIndexEquations c)
+            && maybe False (terminationChecked inv) (M.lookup (calculationSymbol c) (declarations inv))
+          next = close (M.union helpers (M.filter eligible checked))
+      in if M.keysSet next == M.keysSet helpers then outcomes else admit next checked
+    -- Conditional helpers cannot become total index functions through a
+    -- caller. The whole helper dependency closure must satisfy admission.
+    close table = let next = M.filter (\c -> dependencies c `S.isSubsetOf` M.keysSet table) table
+      in if M.keysSet next == M.keysSet table then table else close next
 
 -- A theorem statement is lowered from its checked type, independently of its
 -- proof body. Proof-valued inputs remain ordinary, constrained domain values.
