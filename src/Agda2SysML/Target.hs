@@ -122,7 +122,14 @@ generate original = Generated text report problems (null problems)
     statements = M.mapMaybe (either (const Nothing) Just) statementOutcomes
     resolveStatement table rootResult = rootResult >>= \key ->
       M.findWithDefault (refuse Syntax "Prepared statement is missing") key table
-    concreteInstances = M.fromListWith (++) [(Specialize.origin i,[Specialize.identity i]) | i <- Specialize.instances specialized]
+    -- Statement-only structural uses must not create executable obligations
+    -- for every specialization of the same generic declaration. Aggregate
+    -- exactly the instances required at this semantic role.
+    instanceRoles = M.fromListWith (++) [(key,[role]) | (key,role) <- requirements]
+    concreteInstances = M.fromListWith (++)
+      [((Specialize.origin i,role),[Specialize.identity i])
+      | i <- Specialize.instances specialized
+      ,role <- M.findWithDefault [] (Specialize.identity i) instanceRoles]
     requirements = S.toAscList (required inv)
     finiteDomains = finiteFor inv
     finiteFor scope = M.fromList [(symbol,shape) | (symbol,d) <- M.toAscList (declarations scope)
@@ -165,7 +172,7 @@ generate original = Generated text report problems (null problems)
         _ | Just schema <- M.lookup symbol (Specialize.openRoots specialized) -> do
             _ <- discharge schema role
             Right ("native.open-parameters",Nothing)
-        _ | Just uses <- M.lookup symbol concreteInstances
+        _ | Just uses <- M.lookup (symbol,role) concreteInstances
           , not (S.member symbol (Specialize.directRoots specialized)) -> do
             mapM_ (\s -> discharge s role) uses
             Right ("native.concrete-instantiations",Nothing)
@@ -241,7 +248,7 @@ generate original = Generated text report problems (null problems)
       ,"retainedReason" .= (if S.member (symbol,role) retained
           then String "Checked preparation removed this dependency from every selected runtime root; its checked declaration and source remain in inventory.json."
           else Null)
-      ,"instances" .= M.findWithDefault [] symbol concreteInstances
+      ,"instances" .= M.findWithDefault [] (symbol,role) concreteInstances
       ,"status" .= (case result of Left _ -> "textual"; Right _ -> "discharged" :: Text)
       ,"rule" .= (case result of Left _ -> Null; Right (r,_) -> String r)
       ,"reason" .= (case result of Left r -> String (message r); Right _ -> Null)

@@ -572,6 +572,31 @@ parameterizedChecks base = do
   let sourceLinks = array (get "obligations" (T.correspondence generated))
   check (all (\o -> M.member (string (get "checkedDefinition" (get "source" o))) (declarations inv)) sourceLinks)
     "specialization source link points outside checked inventory"
+  -- The same generic field can be executable in one model and structural
+  -- evidence in another. Structural-only uses must not widen its behavior
+  -- obligation, and must not discharge it when no executable use exists.
+  let support = set "constructor" (String "support") $ set "induction" (String "Nothing")
+        $ set "fields" (toJSON (["supportValue"] :: [Text])) $ declaration "Support" "record" sort0
+      supportCtor = set "family" (String "Support") $ declaration "support" "constructor"
+        (piType False (boxTy (named "Tone")) (named "Support"))
+      supportField = set "projection" (object ["proper" .= ("Support" :: Text),"index" .= (1 :: Int)])
+        $ declaration "supportValue" "function" (piType False (named "Support") (boxTy (named "Tone")))
+      evidenceNeeds = S.fromList [(s,"structure") | s <- ["Support","support","supportValue","Box","box","contents","Tone"]]
+      runtimeNeeds = S.unions (M.elems (modelRequirements base)) `S.union` S.fromList
+        [("readBoolBox","behavior"),("genericRetain","behavior"),("contents","behavior"),("Box","structure"),("box","structure")]
+      mixed = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- [support,supportCtor,supportField]]) defs
+        ,modelRequirements = M.fromList [("runtime",runtimeNeeds),("evidence",evidenceNeeds)]}
+      mixedOutput = T.generate mixed
+      fieldRows = [o | o <- array (get "obligations" (T.correspondence mixedOutput))
+        ,get "symbol" o == String "contents",get "sourceKind" o == String "behavior"]
+      expectedUse = key "contents" [ty "Bool"]
+  check (T.complete mixedOutput) ("structural field use widened runtime coverage: " ++ show (T.diagnostics mixedOutput))
+  check (length fieldRows == 1 && all (\o -> get "instances" o == toJSON [expectedUse]
+      && get "status" o == String "discharged") fieldRows)
+    "generic behavior evidence included a structural-only projection instance"
+  let structuralOnly = mixed {modelRequirements = M.fromList
+        [("runtime",S.singleton ("contents","behavior")),("evidence",evidenceNeeds)]}
+  check (not (T.complete (T.generate structuralOnly))) "structural field alone discharged executable behavior"
 
 universeChecks :: Inventory -> IO ()
 universeChecks base = do

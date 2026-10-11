@@ -1180,6 +1180,13 @@ checks are separate from official model validation.
 
 ## Checked reduction and retained source dependencies
 
+Generic coverage aggregation follows the required semantic role of each
+specialization. An executable projection use requires its calculation; a field
+used only as structural evidence by a native statement does not add a behavior
+obligation to another instance of the same template. Reports list the exact
+instances checked for each role. Structural evidence alone cannot discharge a
+behavior requirement, and every required executable instance must still pass.
+
 Demand-driven reduction follows transparent, terminating checked definitions,
 beta reduction, constructor projections, record eta, copattern selection, and
 exhaustive identity cases. It neither assumes proof irrelevance nor classifies

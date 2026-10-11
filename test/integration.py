@@ -811,15 +811,22 @@ models:
     instances = universes["specializations"]
     check(universes["complete"] and all(o["status"] == "discharged" for o in universes["obligations"]),
           "universe-polymorphic generation is incomplete")
-    check(len(instances) == 13 and len({i["instance"] for i in instances}) == 13,
-          "universe instances missing or duplicated")
+    check(len({i["instance"] for i in instances}) == len(instances),
+          "universe instance identities duplicated")
     check(all(i["symbol"] in source_symbols and i["instance"] not in source_symbols for i in instances),
           "universe specialization changed original inventory")
     check(all(o["source"]["checkedDefinition"] in source_symbols for o in universes["obligations"]),
           "universe instance lost its checked source")
     def level_instance(name, value):
-        return next(i for i in instances if i["symbol"].startswith("UniversePolymorphic." + name + "#")
-                    and i["arguments"][0] == {"level": value})
+        matches = [i for i in instances if i["symbol"].startswith("UniversePolymorphic." + name + "#")
+                   and i["arguments"] and i["arguments"][0] == {"level": value}]
+        check(len(matches) == 1, f"expected one universe instance for {name} at level {value}, found {len(matches)}")
+        return matches[0]
+    for name, levels in (("Box", (0, 2)), ("Box.contents", (0, 2)), ("Lift", (0,)),
+                         ("Lift.lower", (0,)), ("box", (0, 2)), ("enclose", (0,)),
+                         ("identity", (0, 2)), ("lift", (0,)), ("retain", (0,))):
+        for value in levels:
+            level_instance(name, value)
     def level_carrier(name, value):
         key = level_instance(name, value)["instance"]
         return next(c for c in universes["algebraicCarriers"] if c["symbol"] == key)
