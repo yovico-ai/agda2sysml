@@ -1282,44 +1282,57 @@ completeKnown inv sig known = do
       Nothing -> Right table
     step table _ = Right table
 
+-- Redundant annotations do not distinguish specialization identities. Binding
+-- evidence must nevertheless retain their types: a composed callback's middle
+-- domain can occur only in an IndexTyped annotation, yet its native contract
+-- still needs that domain's type/family extent in the enclosing scope.
 typeValue :: Type -> Value
-typeValue (Callable [a] b) = object ["callableInput" .= typeValue a,"callableResult" .= typeValue b]
-typeValue (Callable as b) = object ["callableInputs" .= map typeValue as,"callableResult" .= typeValue b]
-typeValue (SchemaValue ds l) = object ["schemaDomains" .= map typeValue ds,"schemaUniverse" .= levelValue l]
-typeValue (SelectedFamily value) = object ["selectedFamily" .= typeValue value]
-typeValue Unused = object ["unusedModuleParameter" .= True]
-typeValue (Level l) = case levelNumber l of
-  Right n -> object ["level" .= n]
-  Left _ -> object ["levelExpression" .= levelValue l]
-typeValue (Parameter i) = object ["parameter" .= i]
-typeValue (Open i level) = object ["openParameter" .= i,"universe" .= levelValue level]
-typeValue (FamilyParameter i domains level) = object ["familyParameter" .= i,"domains" .= map typeValue domains,"level" .= typeValue (Level level)]
-typeValue t@(OpenFamily i domains level) = object ["openFamily" .= i,"domains" .= map typeValue domains,"universe" .= levelValue level,"familySymbol" .= typeKey t]
-typeValue (FamilyApplication family indices) = object ["family" .= typeValue family,"indices" .= map typeValue indices]
-typeValue family@FamilyExpression{} = case canonicalFamilies family of
-  FamilyExpression domain slot body level -> object ["familyExpression" .= object
-    ["domain" .= typeValue domain,"slot" .= slot,"body" .= typeValue body,"level" .= typeValue (Level level)]]
-  _ -> Null
-typeValue (Runtime ty index) = object ["runtimeType" .= typeValue ty,"index" .= indexValue index]
-typeValue (Named s ts) = object ["symbol" .= s,"arguments" .= map typeValue ts]
-indexValue :: IndexExpr -> Value
-indexValue (IndexInput i) = object ["input" .= i]
-indexValue (IndexCaptured i) = object ["capture" .= i]
-indexValue (IndexLocal i) = object ["familyInput" .= i]
-indexValue (IndexFamilyArgument i) = object ["familyArgument" .= i]
-indexValue (IndexArgument 0) = object ["callbackArgument" .= True]
-indexValue (IndexArgument i) = object ["callbackArgument" .= i]
-indexValue (IndexTyped _ x) = indexValue x
-indexValue (IndexLambda slots ty x) = object ["closureInputs" .= slots,"closureType" .= typeValue ty,"body" .= indexValue x]
-indexValue (IndexApply f x) = object ["callback" .= indexValue f,"argument" .= indexValue x]
-indexValue (IndexNatural n) = object ["natural" .= n]
-indexValue (IndexSuccessor i) = object ["successor" .= indexValue i]
-indexValue (IndexConstructor c args values) = object (["constructor" .= c,"arguments" .= map typeValue args]
-  ++ ["values" .= map indexValue values | not (null values)])
-indexValue (IndexCall f args values) = object
-  ["calculation" .= f,"arguments" .= map typeValue args,"values" .= map indexValue values]
-indexValue (IndexProject f args receiver) = object
-  ["projection" .= f,"arguments" .= map typeValue args,"receiver" .= indexValue receiver]
+typeValue = typeValueWith False
+
+bindingTypeValue :: Type -> Value
+bindingTypeValue = typeValueWith True
+
+typeValueWith :: Bool -> Type -> Value
+typeValueWith retainTypes = value
+  where
+    value (Callable [a] b) = object ["callableInput" .= value a,"callableResult" .= value b]
+    value (Callable as b) = object ["callableInputs" .= map value as,"callableResult" .= value b]
+    value (SchemaValue ds l) = object ["schemaDomains" .= map value ds,"schemaUniverse" .= levelValue l]
+    value (SelectedFamily ty) = object ["selectedFamily" .= value ty]
+    value Unused = object ["unusedModuleParameter" .= True]
+    value (Level l) = case levelNumber l of
+      Right n -> object ["level" .= n]
+      Left _ -> object ["levelExpression" .= levelValue l]
+    value (Parameter i) = object ["parameter" .= i]
+    value (Open i level) = object ["openParameter" .= i,"universe" .= levelValue level]
+    value (FamilyParameter i domains level) = object ["familyParameter" .= i,"domains" .= map value domains,"level" .= value (Level level)]
+    value t@(OpenFamily i domains level) = object ["openFamily" .= i,"domains" .= map value domains,"universe" .= levelValue level,"familySymbol" .= typeKey t]
+    value (FamilyApplication family indices) = object ["family" .= value family,"indices" .= map value indices]
+    value family@FamilyExpression{} = case canonicalFamilies family of
+      FamilyExpression domain slot body level -> object ["familyExpression" .= object
+        ["domain" .= value domain,"slot" .= slot,"body" .= value body,"level" .= value (Level level)]]
+      _ -> Null
+    value (Runtime ty ix) = object ["runtimeType" .= value ty,"index" .= index ix]
+    value (Named s ts) = object ["symbol" .= s,"arguments" .= map value ts]
+    index (IndexInput i) = object ["input" .= i]
+    index (IndexCaptured i) = object ["capture" .= i]
+    index (IndexLocal i) = object ["familyInput" .= i]
+    index (IndexFamilyArgument i) = object ["familyArgument" .= i]
+    index (IndexArgument 0) = object ["callbackArgument" .= True]
+    index (IndexArgument i) = object ["callbackArgument" .= i]
+    index (IndexTyped ty x)
+      | retainTypes = object ["indexType" .= value ty,"typedIndex" .= index x]
+      | otherwise = index x
+    index (IndexLambda slots ty x) = object ["closureInputs" .= slots,"closureType" .= value ty,"body" .= index x]
+    index (IndexApply f x) = object ["callback" .= index f,"argument" .= index x]
+    index (IndexNatural n) = object ["natural" .= n]
+    index (IndexSuccessor i) = object ["successor" .= index i]
+    index (IndexConstructor c args values) = object (["constructor" .= c,"arguments" .= map value args]
+      ++ ["values" .= map index values | not (null values)])
+    index (IndexCall f args values) = object
+      ["calculation" .= f,"arguments" .= map value args,"values" .= map index values]
+    index (IndexProject f args receiver) = object
+      ["projection" .= f,"arguments" .= map value args,"receiver" .= index receiver]
 instanceKey :: Text -> [Type] -> Text
 instanceKey s [] = s
 instanceKey s ts = s <> "@" <> digest (BL.toStrict (encode (object ["symbol" .= s,"arguments" .= map typeValue (fst (captureArguments ts))])))
@@ -1548,7 +1561,7 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
             statement = set "name" (String key) $ set "kind" (String "native-equality-statement")
               $ set "displayName" (String (display inv s <> ".law" <> if null args then "" else suffix inv args))
               $ set "statementOrigin" (String s) $ set "specializationOrigin" (String s)
-              $ set "preparationOrigin" (String s) $ set "specializationArguments" (toJSON (map typeValue args))
+              $ set "preparationOrigin" (String s) $ set "specializationArguments" (toJSON (map bindingTypeValue args))
               $ set "type" (arrow ins out) $ set "compiled" Null d
         when (M.member key (declarations inv)) (abort Syntax "Statement identity collides with checked source")
         modify' $ \st -> st {ready = M.insert key statement (ready st)}
@@ -1682,7 +1695,7 @@ save s args d = do
   old <- gets (M.lookup key . recorded)
   unless (maybe True (== item) old) (abort Syntax "Specialization identity collision")
   modify' $ \st -> st {ready = M.insert key (set "preparationOrigin" (String source)
-      $ set "specializationArguments" (toJSON (map typeValue (fst (captureArguments args)))) d) (ready st)
+      $ set "specializationArguments" (toJSON (map bindingTypeValue (fst (captureArguments args)))) d) (ready st)
     ,recorded = if null args && source == s then recorded st else M.insert key item (recorded st)}
 
 cached :: Inventory -> Text -> [Type] -> Build Bool
@@ -1714,7 +1727,7 @@ ensureType inv stack schema@(SchemaValue domains level) = do
       ["name" .= symbol,"displayName" .= (showType inv schema <> "." <> kind),"kind" .= ("native-schema-value" :: Text)
       ,"nativeSchema" .= kind,"schemaBinding" .= key,"schemaDomains" .= zipWith asType [prefix..] contextualDomains
       ,"schemaCaptures" .= [asType i domain | (i,domain) <- zip [0..] captureTypes]
-      ,"specializationArguments" .= [typeValue (SchemaValue canonicalDomains level)],"universe" .= levelValue level]) (ready st)}
+      ,"specializationArguments" .= [bindingTypeValue (SchemaValue canonicalDomains level)],"universe" .= levelValue level]) (ready st)}
   where
     firstOrder Callable{} = False
     firstOrder Runtime{} = False
@@ -1748,7 +1761,7 @@ ensureType inv stack family@(OpenFamily slot domains level) = do
   mapM_ (ensureType inv stack) contextualDomains
   modify' $ \st -> st {ready = M.insert key (object ["name" .= key,"displayName" .= ("type family " <> T.pack (show slot))
     ,"kind" .= ("native-family-parameter" :: Text),"nativeFamily" .= slot,"familyDomains" .= zipWith asType [0..] contextualDomains
-    ,"specializationArguments" .= [typeValue family],"universe" .= levelValue level]) (ready st)}
+    ,"specializationArguments" .= [bindingTypeValue family],"universe" .= levelValue level]) (ready st)}
 ensureType inv _ ty@(Open i level) = do
   let key = typeKey ty
   when (M.member key (declarations inv)) (abort Syntax "Native parameter identity collides with a source declaration")
@@ -2790,7 +2803,7 @@ higherOrder inv stack env term = do
             ,"captures" .= map typeValue (take (length captures) allTypes)
             -- Open extents used only inside a specialized body are still
             -- inputs of its native calculation (e.g. schema construction).
-            ,"types" .= map typeValue (resultType:allTypes ++ staticTypes ++ lexicalTypes)]) d
+            ,"types" .= map bindingTypeValue (resultType:allTypes ++ staticTypes ++ lexicalTypes)]) d
       extended = inv {declarations = M.insert key generated (declarations inv)}
   ensureFunction extended stack key []
   modify' $ \st -> st {recorded = M.insert key (Instance source [] key) (recorded st)}

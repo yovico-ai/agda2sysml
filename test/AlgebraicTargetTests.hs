@@ -145,6 +145,7 @@ universeAt l = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= obj
 
 main :: IO ()
 main = do
+  callbackBindingModel <- callbackBindingChecks
   familyParameterChecks
   symbolicFamilyScopeChecks
   recordIndexNormalizationChecks
@@ -317,7 +318,7 @@ main = do
           first = cmd "first" p "true" "null"
           second = cmd "second" "null" "null" "'Tone'::'blue'"
           none = cmd "none" "null" "null" "null"
-      Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel)
+      Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel <> "\n" <> callbackBindingModel)
       callProcess (root </> "bin/agda2sysml-validate") [file]
       callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
         ,"test/TargetEvaluation.java",library </> "sysml.library",file
@@ -3865,6 +3866,58 @@ automaticSelectionChecks = do
   check (needs `S.isSubsetOf` required annotated && S.member ("step-preserves","behavior") (required annotated))
     "a local theorem annotation removed a default computational requirement"
 
+-- A composed callback can mention an intermediate type only in an index's
+-- checked type evidence. Every emitted reference must still have a binding.
+callbackBindingChecks :: IO Text
+callbackBindingChecks = fmap Text.unlines $ mapM fixture ["BindingPacket","BindingEnvelope"]
+  where
+    fixture owner = do
+      let universe = universeAt (level 0)
+          v i = variable i []
+          term x = object ["term" .= x]
+          apply f xs = set "eliminations" (toJSON (map application xs)) f
+          lambda x = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= x]]
+          make = owner <> ".make"
+          wrap = owner <> ".wrap"
+          pair a b = term (call owner [a,b] [])
+          carrier = set "parameters" (Number 2) $ set "constructors" (toJSON [make])
+            $ declaration owner "datatype" (signature [universe,signature [term (v 0)] universe] universe)
+          ctor = set "parameters" (Number 2) $ set "family" (String owner)
+            $ declaration make "constructor" (signature
+              [universe,signature [term (v 0)] universe,term (v 1),term (apply (v 1) [v 0])]
+              (pair (v 3) (v 2)))
+          composite = lambda (apply (v 5) [apply (v 4) [apply (v 3) [v 0]]])
+          operationType = signature
+            [universe,universe,universe,signature [term (v 0)] universe
+            ,signature [term (v 2)] (term (v 2)),signature [term (v 4)] (term (v 4))
+            ,term (v 5),term (apply (v 3) [apply (v 2) [apply (v 1) [v 0]]])]
+            (pair (v 7) composite)
+          operationDecl = set "type" operationType $ operation wrap [] owner (done 8 (constructor make [v 1,v 0]))
+          defs = [carrier,ctor,operationDecl]
+          inv = Inventory (object ["selectionProfile" .= ("declarations" :: Text),"library" .= ("bindings" :: Text)
+              ,"modules" .= [object ["source" .= object ["library" .= ("bindings" :: Text)],"definitions" .= [operationDecl]]]])
+            (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+            (M.singleton "bindings" (S.fromList [(wrap,"behavior"),(owner,"structure"),(make,"structure")]))
+          prepared = P.prepare inv
+          expanded = P.inventory prepared
+          (shapes,errors) = A.discover expanded M.empty
+          calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+          instances = [d | d <- M.elems (declarations expanded),get "specializationOrigin" d == String make]
+      check (M.null (P.failures prepared) && not (null instances))
+        ("composed callback fixture failed preparation: " ++ show (P.failures prepared,errors))
+      forM_ instances $ \d -> do
+        check (P.nativeParameters d == [0,1,2])
+          ("intermediate callback type lost its native binding: " ++ show (P.nativeParameters d))
+        let name = string (get "name" d)
+        calc <- maybe (fail ("missing callback constructor " ++ show name)) pure (M.lookup name calculations)
+        let rendered = Text.unlines (A.renderCalculation expanded shapes id calc)
+        check ("in 'typeArgument1' : Base::Anything [0..*];" `Text.isInfixOf` rendered
+          && "::'typeArgument1'" `Text.isInfixOf` rendered)
+          "callback contract references an undeclared intermediate extent"
+      let output = T.generate inv
+      check (T.complete output) (show (T.diagnostics output))
+      pure (Text.replace "package 'AgdaModel'" ("package '" <> owner <> "'") (T.modelText output))
+
 -- Static carrier arguments can capture runtime values. The constructor used
 -- inside another index must carry those values as well as all source fields.
 constructorCaptureChecks :: IO ()
@@ -4011,6 +4064,8 @@ indexAnnotationChecks = forM_ ["AnnotatedPacket","AnnotatedEnvelope"] $ \owner -
   forM_ wrappers $ \wrap -> do
     let bare = wrap (member fn)
         annotated = wrap (member typed)
+    check (P.typeValue bare == P.typeValue annotated)
+      "redundant index type evidence changed the canonical specialization identity"
     check (checkMember bare annotated == Right (P.Named accept [bare,P.Runtime annotated (P.IndexInput 9)]))
       "redundant callback annotation changed the checked dependent domain"
     check (checkMember annotated bare == Right (P.Named accept [annotated,P.Runtime bare (P.IndexInput 9)]))
