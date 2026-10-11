@@ -111,3 +111,44 @@ module ProjectedInput {ℓp ℓr ℓi ℓm : Level}
   refuses-projected-mismatch raw mismatch value equality =
     Input.input-contract-refuses-mismatch raw
       (λ proof → mismatch (contract-backward raw proof)) value equality
+
+-- A closed-level API for the general record adapter with an actual checked
+-- projection. Context, indices and complete members remain arbitrary.
+module KnownProjection (Context Index : Set) (Member : Index → Set) where
+  record Prefix : Set where
+    constructor prefix
+    field
+      context : Context
+      tag : Index
+  open Prefix public
+
+  module Bound = Record Prefix Index tag Member
+  Source = Bound.Source
+  Native = Bound.Native
+  RawInput = Bound.RawInput
+  InputContract = Bound.InputContract
+
+  encode : Source → Native
+  encode = Bound.encode
+
+  decode : Native → Source
+  decode = Bound.decode
+
+  forgetInput : Native → RawInput
+  forgetInput = Bound.forgetInput
+
+  admitInput : (raw : RawInput) → InputContract raw → Native
+  admitInput = Bound.admitInput
+
+  roundtrip : ∀ value → decode (encode value) ≡ value
+  roundtrip = Bound.decode-encode
+
+  native-roundtrip : ∀ value → encode (decode value) ≡ value
+  native-roundtrip = Bound.encode-decode
+
+  admission-roundtrip : ∀ value → admitInput (forgetInput value) (Bound.input-contract-required value) ≡ value
+  admission-roundtrip = Bound.input-contract-roundtrip
+
+  mismatch-refused : ∀ raw → (InputContract raw → Empty)
+    → (value : Native) → forgetInput value ≡ raw → Empty
+  mismatch-refused = Bound.input-contract-refuses-mismatch

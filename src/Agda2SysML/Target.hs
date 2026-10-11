@@ -100,12 +100,34 @@ generate :: Inventory -> Generated
 generate original = Generated text report problems (null problems)
   where
     specialized = Specialize.prepare original
-    inv = Specialize.inventory specialized
+    prepared = Specialize.inventory specialized
+    -- A failed optional statement must not add unresolved requirements to an
+    -- otherwise complete runtime model. Admit candidate closures first, then
+    -- construct the actual required scope from successful statements only.
+    withStatements selected = prepared {modelRequirements = M.insertWith S.union "$native-statements"
+      (S.unions [needs | (s,needs) <- M.toList (Specialize.statementDependencies specialized),S.member s selected])
+      (modelRequirements prepared)}
+    candidateInv = withStatements (M.keysSet (Specialize.statementRoots specialized))
+    candidateFinite = finiteFor candidateInv
+    candidateShapes = fst (Algebraic.discover candidateInv candidateFinite)
+    candidateFunctions = Algebraic.functions candidateInv candidateFinite candidateShapes
+    candidateStatements = Algebraic.equalityStatements candidateInv candidateFinite candidateShapes candidateFunctions
+    candidateOutcomes = M.map (resolveStatement candidateStatements) (Specialize.statementRoots specialized)
+    selectedStatements = M.keysSet (M.mapMaybe (either (const Nothing) Just) candidateOutcomes)
+    inv = withStatements selectedStatements
+    statementResults = Algebraic.equalityStatements inv finiteDomains algebraicShapes functionResults
+    statementOutcomes = M.mapWithKey (\s result -> if S.member s selectedStatements
+      then resolveStatement statementResults result else M.findWithDefault (refuse Representation "Statement not admitted") s candidateOutcomes)
+      (Specialize.statementRoots specialized)
+    statements = M.mapMaybe (either (const Nothing) Just) statementOutcomes
+    resolveStatement table rootResult = rootResult >>= \key ->
+      M.findWithDefault (refuse Syntax "Prepared statement is missing") key table
     concreteInstances = M.fromListWith (++) [(Specialize.origin i,[Specialize.identity i]) | i <- Specialize.instances specialized]
     requirements = S.toAscList (required inv)
-    finiteDomains = M.fromList [(symbol,shape) | (symbol,d) <- M.toAscList (declarations inv)
-      , S.member (symbol,"structure") (required inv), symbol /= builtin inv "bool"
-      , Right shape <- [Finite.domain inv d]]
+    finiteDomains = finiteFor inv
+    finiteFor context = M.fromList [(symbol,shape) | (symbol,d) <- M.toAscList (declarations context)
+      , S.member (symbol,"structure") (required context), symbol /= builtin context "bool"
+      , Right shape <- [Finite.domain context d]]
     finiteSymbols = S.fromList (concat [[Finite.domainSymbol shape] ++ Finite.constructors shape
       | shape <- M.elems finiteDomains])
     (algebraicShapes,algebraicErrors) = Algebraic.discover inv finiteDomains
@@ -132,7 +154,8 @@ generate original = Generated text report problems (null problems)
       def <- maybe (refuse Syntax "missing checked declaration") Right (M.lookup symbol (declarations inv))
       case role of
         "proof-source" -> Right ("source.proof",Nothing)
-        "statement" -> Right ("source.statement",Nothing)
+        "statement" | M.member symbol statements -> Right ("native.equality-statement",Nothing)
+                    | otherwise -> Right ("source.statement",Nothing)
         "external-assumption" | get "kind" def == String "axiom" -> Right ("source.assumption",Nothing)
         _ | symbol `S.member` Specialize.levelSymbols original
           , not (null (Specialize.instances specialized))
@@ -177,7 +200,8 @@ generate original = Generated text report problems (null problems)
       | (_,Right (_,Just calc)) <- outcomes]
       ++ [(Algebraic.calculationSymbol c,AlgebraicCalculation c) | c <- Algebraic.constructorCalculations inv algebraicShapes])
     labels = M.fromListWith (+) [(display symbol,1 :: Int)
-      | symbol <- S.toAscList (S.unions [finiteSymbols,relationSymbols,S.fromList (Algebraic.references algebraicShapes),S.fromList (map calculationSymbol emitted)])]
+      | symbol <- S.toAscList (S.unions [finiteSymbols,relationSymbols,S.fromList (Algebraic.references algebraicShapes),S.fromList (map calculationSymbol emitted)
+        ,S.fromList [Algebraic.calculationSymbol (Algebraic.statementCalculation law) | law <- M.elems statements]])]
     sourceDisplay symbol = maybe symbol (string . get "displayName") (M.lookup symbol (declarations inv))
     helperNames = Algebraic.generatedNames sourceDisplay algebraicShapes
     display symbol = M.findWithDefault (sourceDisplay symbol) symbol helperNames
@@ -191,11 +215,12 @@ generate original = Generated text report problems (null problems)
       <> mconcat [D.boundary (Finite.domainSymbol shape) "native.finite-domain" (Finite.enumText targetLabel shape) | shape <- M.elems finiteDomains]
       <> mconcat [let {symbol = Algebraic.shapeSymbol shape;
                       fragment = Algebraic.renderShapesIn targetLabel algebraicShapes (M.singleton symbol shape)}
-                 in if maybe True ((/= Null) . get "nativeFamily") (M.lookup symbol (declarations inv))
+                 in if maybe True (\d -> get "nativeFamily" d /= Null || get "nativeSchema" d /= Null) (M.lookup symbol (declarations inv))
                     then D.mark symbol "generated-family-shape" (D.generated "native.family-relation") (D.linesDoc (map D.text fragment))
                     else D.boundary symbol "native.algebraic-shape" fragment
                  | shape <- M.elems algebraicShapes]
       <> mconcat (map calculation emitted) <> mconcat (map (Relation.renderDoc targetLabel) emittedRelations)
+      <> mconcat (map (Algebraic.renderStatementDoc inv algebraicShapes targetLabel) (M.elems statements))
       <> Presentation.renderCatalogue declarationCatalogue <> "}\n"
     calculation (AlgebraicCalculation c) = Algebraic.renderCalculationDoc inv algebraicShapes targetLabel c
     calculation definition = D.mark symbol "calculation" (D.derived "native.calculation" [D.root symbol "type"] Null []) $
@@ -222,6 +247,8 @@ generate original = Generated text report problems (null problems)
       ,"reason" .= (case result of Left r -> String (message r); Right _ -> Null)
       ,"reasonCode" .= (case result of Left r -> String (code r); Right _ -> Null)
       ,"target" .= (case result of
+          Right ("native.equality-statement",_) | Just law <- M.lookup symbol statements ->
+            String (targetReference (Algebraic.calculationSymbol (Algebraic.statementCalculation law)))
           Right ("native.open-parameters",_) | Just schema <- M.lookup symbol (Specialize.openRoots specialized) ->
             String (if role == "structure" then structuralReference schema else targetReference schema)
           Right (_,Just _) -> String (targetReference symbol)
@@ -270,6 +297,13 @@ generate original = Generated text report problems (null problems)
     declarationCatalogue = if get "selectionProfile" (document original) == String "declarations"
       then Presentation.catalogue original obligations else []
     report = object ["sourceCorrespondence" .= trace,"schemaVersion" .= (1 :: Int), "obligations" .= obligations,"models" .= modelLinks
+      ,"nativeStatements" .= [object ["symbol" .= symbol,"kind" .= ("equality" :: Text)
+        ,"status" .= (either (const "textual") (const "translated") outcome :: Text)
+        ,"target" .= either (const Null) (String . targetReference . Algebraic.calculationSymbol . Algebraic.statementCalculation) outcome
+        ,"reason" .= either (String . message) (const Null) outcome
+        ,"reasonCode" .= either (String . code) (const Null) outcome
+        ,"proof" .= sourceLink symbol]
+        | (symbol,outcome) <- M.toAscList statementOutcomes]
       ,"selectionProfile" .= get "selectionProfile" (document original)
       ,"declarationCatalogue" .= declarationCatalogue
       ,"specializations" .= [object ["symbol" .= Specialize.origin i,"instance" .= Specialize.identity i
@@ -280,8 +314,8 @@ generate original = Generated text report problems (null problems)
       ,"algebraicCarriers" .= Algebraic.carrierReport targetLabel algebraicShapes
       ,"indexContracts" .= [object ["symbol" .= Algebraic.calculationSymbol c
         ,"target" .= targetReference (Algebraic.calculationSymbol c)
-        ,"constraints" .= Algebraic.calculationContracts targetLabel c]
-        | AlgebraicCalculation c <- emitted,not (null (Algebraic.calculationContracts targetLabel c))]
+        ,"constraints" .= Algebraic.calculationContractsIn algebraicShapes targetLabel c]
+        | AlgebraicCalculation c <- emitted,not (null (Algebraic.calculationContractsIn algebraicShapes targetLabel c))]
       ,"calculationDependencies" .= [object ["symbol" .= Algebraic.calculationSymbol c
         ,"target" .= targetReference (Algebraic.calculationSymbol c)
         ,"callees" .= [object ["symbol" .= s,"target" .= targetReference s] | s <- S.toAscList (Algebraic.dependencies c)]]
@@ -302,13 +336,16 @@ generate original = Generated text report problems (null problems)
         ,"specializedDefinitions" .= length (Specialize.instances specialized)
         ,"requiredDefinitions" .= S.size requiredSymbols, "requiredObligations" .= length outcomes
         ,"dischargedObligations" .= (length outcomes - length problems)
-        ,"runtimeDefinitions" .= S.size runtime,"retainedReductionObligations" .= S.size retained]]
+        ,"runtimeDefinitions" .= S.size runtime,"retainedReductionObligations" .= S.size retained
+        ,"nativeEqualityStatements" .= M.size statements,"textualEqualityStatements" .= (M.size statementOutcomes - M.size statements)]]
 
 builtin :: Inventory -> Text -> Text
 builtin inv key = string (get key (get "builtins" (document inv)))
 
 booleanFunction :: Inventory -> Value -> Either Refusal (Int,Expr)
 booleanFunction inv def = do
+  unless (null (array (get "closureIndexEquations" def)))
+    (refuse Representation "Static container index constraints require algebraic lowering")
   ty <- field inv "type" def
   names <- telescope ty
   tree <- field inv "compiled" def

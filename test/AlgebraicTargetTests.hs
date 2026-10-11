@@ -10,6 +10,7 @@ import qualified Agda2SysML.FiniteTarget as F
 import qualified Agda2SysML.Target as T
 import qualified Agda2SysML.Specialize as P
 import qualified Agda2SysML.Reduction as Reduction
+import qualified Agda2SysML.UnusedParameters as UnusedParameters
 import Control.Monad (forM_, unless)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -19,7 +20,7 @@ import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Environment (getEnv)
+import System.Environment (getArgs, getEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (callProcess)
@@ -74,15 +75,18 @@ operation s ins out tree = set "compiled" tree $ set "sourceSyntax" (toJSON [obj
 
 -- An independent evaluator of the target expression algebra checks lowering
 -- over all fixture values, including constructions the Pilot cannot execute.
-data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | N deriving (Eq,Show)
+data Val = B Bool | Z Integer | Seq [Val] | E Text Text | R Text (M.Map Text Val) | Fn Text | Closure [Text] A.Expression [Val] (M.Map Text Val) | N deriving (Eq,Show)
 eval :: [Val] -> A.Expression -> Val
 eval = evalWith M.empty
 
 evalWith :: M.Map Text A.Calculation -> [Val] -> A.Expression -> Val
-evalWith _ env (A.Input i) = env !! i
-evalWith _ _ (A.Literal b) = B b
-evalWith _ _ (A.NumberLiteral n) = Z n
-evalWith table env (A.Numeric op x y) = case (evalWith table env x,evalWith table env y) of
+evalWith table env = evalIn table env M.empty
+
+evalIn :: M.Map Text A.Calculation -> [Val] -> M.Map Text Val -> A.Expression -> Val
+evalIn _ env _ (A.Input i) = env !! i
+evalIn _ _ _ (A.Literal b) = B b
+evalIn _ _ _ (A.NumberLiteral n) = Z n
+evalIn table env locals (A.Numeric op x y) = case (evalIn table env locals x,evalIn table env locals y) of
   (Z a,Z b) -> case op of
     "+" -> Z (a+b)
     "*" -> Z (a*b)
@@ -91,11 +95,11 @@ evalWith table env (A.Numeric op x y) = case (evalWith table env x,evalWith tabl
     "==" -> B (a==b)
     _ -> error "unknown numeric operation"
   _ -> error "non-natural numeric argument"
-evalWith table env (A.Sequence xs) = Seq (concatMap flatten (map (evalWith table env) xs))
+evalIn table env locals (A.Sequence xs) = Seq (concatMap flatten (map (evalIn table env locals) xs))
   where flatten (Seq vs) = vs
         flatten v = [v]
-evalWith table env (A.SequenceHead _ xs) = evalWith table env (A.SequenceOp "head" xs)
-evalWith table env (A.SequenceOp op xs) = case evalWith table env xs of
+evalIn table env locals (A.SequenceHead _ xs) = evalIn table env locals (A.SequenceOp "head" xs)
+evalIn table env locals (A.SequenceOp op xs) = case evalIn table env locals xs of
   Seq values -> case (op,values) of
     ("head",x:_) -> x
     ("tail",_:rest) -> Seq rest
@@ -103,19 +107,27 @@ evalWith table env (A.SequenceOp op xs) = case evalWith table env xs of
     ("size",_) -> Z (toInteger (length values))
     _ -> error "sequence operation outside admitted domain"
   _ -> error "non-sequence argument"
-evalWith _ _ (A.Enumeration t c) = E t c
-evalWith table env (A.Construct t fields) = R t (M.fromList [(f,evalWith table env x) | (f,x) <- fields])
-evalWith table env (A.Project x f) = case evalWith table env x of
+evalIn _ _ _ (A.Enumeration t c) = E t c
+evalIn table env locals (A.Construct t fields) = R t (M.fromList [(f,evalIn table env locals x) | (f,x) <- fields])
+evalIn table env locals (A.Project x f) = case evalIn table env locals x of
   R _ fields -> M.findWithDefault N f fields
   value -> error ("projection from " ++ show value)
-evalWith table env (A.Equal x y) = B (evalWith table env x == evalWith table env y)
-evalWith table env (A.Conditional p yes no) = case evalWith table env p of
-  B b -> evalWith table env (if b then yes else no)
+evalIn table env locals (A.Equal x y) = B (evalIn table env locals x == evalIn table env locals y)
+evalIn table env locals (A.Conditional p yes no) = case evalIn table env locals p of
+  B b -> evalIn table env locals (if b then yes else no)
   _ -> error "non-Boolean guard"
-evalWith _ _ A.Absent = N
-evalWith table env (A.Call s args) = case M.lookup s table of
+evalIn _ _ _ A.Absent = N
+evalIn table env locals (A.Call s args) = case M.lookup s table of
   Nothing -> error ("missing helper " ++ show s)
-  Just calc -> evalWith table (map (evalWith table env) args) (A.body calc)
+  Just calc -> evalWith table (map (evalIn table env locals) args) (A.body calc)
+evalIn table env locals (A.Apply callback argument) = case evalIn table env locals callback of
+  Fn symbol -> evalIn table env locals (A.Call symbol argument)
+  Closure names body captures lexical -> evalIn table captures
+    (M.union (M.fromList (zip names (map (evalIn table env locals) argument))) lexical) body
+  _ -> error "native invocation needs a callable value"
+
+evalIn _ env locals (A.Lambda args _ body) = Closure (map fst args) body env locals
+evalIn _ _ locals (A.Iterator name _) = locals M.! name
 
 call :: Text -> [Value] -> [Text] -> Value
 call s args fields = object ["tag" .= ("definition" :: Text),"symbol" .= s
@@ -133,9 +145,20 @@ universeAt l = object ["term" .= object ["tag" .= ("sort" :: Text),"sort" .= obj
 
 main :: IO ()
 main = do
+  callbackBindingModel <- callbackBindingChecks
   familyParameterChecks
+  symbolicFamilyScopeChecks
+  recordIndexNormalizationChecks
+  indexAnnotationChecks
+  constructorScopeChecks
+  constructorCaptureChecks
+  constructorContextChecks
+  earlierIndexChecks
+  nestedSequencePatternChecks
+  sharedIndexChecks
   reductionChecks
   naturalChecks
+  constructorFibreChecks
   automaticSelectionChecks
   let universe = universeAt (level 0)
       tone = set "constructors" (toJSON (["red","blue"] :: [Text])) (declaration "Tone" "datatype" universe)
@@ -264,43 +287,161 @@ main = do
   composedChecks inv
   indexedChecks inv
   computedChecks inv
+  indexedLookupChecks inv
+  admittedIndexChecks inv
+  unusedParameterChecks inv
+  emptyCarrierChecks inv
+  callbackModel <- callableFieldChecks inv
+  dependentCallbackModel <- dependentCallableChecks inv
+  schemaRecordModel <- schemaRecordChecks inv
+  statementModel <- equalityStatementChecks inv
+  contextualModel <- contextualMembershipChecks inv
+  moduleAliasChecks inv
+  moduleConstructorRootChecks inv
+  moduleCarrierRootChecks inv
+  staticSchemaBoundaryChecks inv
+  interleavedParameterChecks inv
+  indexClosureChecks inv
   let generated = T.generate callInventory
   check (T.complete generated) (show (T.diagnostics generated))
-  root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
-  java <- getEnv "AGDA2SYSML_TEST_JAVA"
-  withSystemTempDirectory "algebraic-target" $ \directory -> do
-    let file = directory </> "model.sysml"
-        library = root </> "share/agda2sysml-validator/sysml"
-        p = "new 'Pair'('flag'=true,'tone'='Tone'::'red')"
-        cmd tag x y z = "new 'Choice'('constructor'='Choice.constructor-tag'::'" ++ tag
-          ++ "','first.payload0'=" ++ x ++ ",'first.payload1'=" ++ y ++ ",'second.payload0'=" ++ z ++ ")"
-        first = cmd "first" p "true" "null"
-        second = cmd "second" "null" "null" "'Tone'::'blue'"
-        none = cmd "none" "null" "null" "null"
-    Text.writeFile file (T.modelText generated)
-    callProcess (root </> "bin/agda2sysml-validate") [file]
-    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
-      ,"test/TargetEvaluation.java",library </> "sysml.library",file
-      ,"'flag'(" ++ p ++ ")","true"
-      ,"'tone'(" ++ p ++ ") == 'Tone'::'red'","true"
-      ,"'selected'(" ++ p ++ "," ++ first ++ ")","true"
-      ,"'selected'(" ++ p ++ "," ++ second ++ ")","false"
-      ,"'selected'(" ++ p ++ "," ++ none ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ first ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ second ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ none ++ ")","true"
-      ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
-      ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"]
-    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
-      ,"test/TargetEvaluation.java",library </> "sysml.library",file
-      ,"'nested'(" ++ p ++ ")","true"
-      ,"'throughRecord'(" ++ p ++ ")","true"
-      ,"'callSelected'(" ++ second ++ "," ++ p ++ ")","false"
-      ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
-      ,"'callZero'(true)","false"
-      ,"'clashCaller'(true)","false"
-      ,"'clashCaller'(false)","true"]
-  putStrLn "algebraic carrier, binding, rejection, and native evaluation checks passed"
+  options <- getArgs
+  unless (options `elem` [[],["--compiler-only"]]) (fail "Expected --compiler-only or no test options")
+  unless (options == ["--compiler-only"]) $ do
+    root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
+    java <- getEnv "AGDA2SYSML_TEST_JAVA"
+    withSystemTempDirectory "algebraic-target" $ \directory -> do
+      let file = directory </> "model.sysml"
+          library = root </> "share/agda2sysml-validator/sysml"
+          p = "new 'Pair'('flag'=true,'tone'='Tone'::'red')"
+          cmd tag x y z = "new 'Choice'('constructor'='Choice.constructor-tag'::'" ++ tag
+            ++ "','first.payload0'=" ++ x ++ ",'first.payload1'=" ++ y ++ ",'second.payload0'=" ++ z ++ ")"
+          first = cmd "first" p "true" "null"
+          second = cmd "second" "null" "null" "'Tone'::'blue'"
+          none = cmd "none" "null" "null" "null"
+      Text.writeFile file (T.modelText generated <> "\n" <> callbackModel <> "\n" <> dependentCallbackModel <> "\n" <> schemaRecordModel <> "\n" <> statementModel <> "\n" <> contextualModel <> "\n" <> callbackBindingModel)
+      callProcess (root </> "bin/agda2sysml-validate") [file]
+      callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+        ,"test/TargetEvaluation.java",library </> "sysml.library",file
+        ,"'flag'(" ++ p ++ ")","true"
+        ,"'tone'(" ++ p ++ ") == 'Tone'::'red'","true"
+        ,"'selected'(" ++ p ++ "," ++ first ++ ")","true"
+        ,"'selected'(" ++ p ++ "," ++ second ++ ")","false"
+        ,"'selected'(" ++ p ++ "," ++ none ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ first ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ second ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ none ++ ")","true"
+        ,"'Choice.payload-valid'(" ++ cmd "first" p "null" "null" ++ ")","false"
+        ,"'Choice.payload-valid'(" ++ cmd "none" p "true" "null" ++ ")","false"
+        ,"SequenceFunctions::size('SchemaRecordFixture'::'produceSchema'().'producedFamily'.items) == 4","true"]
+      callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+        ,"test/TargetEvaluation.java",library </> "sysml.library",file
+        ,"'nested'(" ++ p ++ ")","true"
+        ,"'throughRecord'(" ++ p ++ ")","true"
+        ,"'callSelected'(" ++ second ++ "," ++ p ++ ")","false"
+        ,"'callSelected'(" ++ first ++ "," ++ p ++ ")","true"
+        ,"'callZero'(true)","false"
+        ,"'clashCaller'(true)","false"
+        ,"'clashCaller'(false)","true"
+        ,"'EqualityFixture'::'unrelatedIdentity.law'(true)","true"
+        ,"'EqualityFixture'::'unrelatedIdentity.law'(false)","true"
+        ,"'EqualityFixture'::'unrelatedSymmetry.law'(true, true, 'EqualityFixture'::'witness'(true))","true"
+        ,"'EqualityFixture'::'unrelatedComparison.law'(true, false)","false"]
+  putStrLn (if options == ["--compiler-only"] then "algebraic compiler checks passed; Pilot skipped" else "algebraic carrier, binding, rejection, and native evaluation checks passed")
+
+equalityStatementChecks :: Inventory -> IO Text
+equalityStatementChecks base = do
+  let equal a b = object ["term" .= call "Claim" [a,b] []]
+      family = set "constructors" (toJSON (["witness"] :: [Text])) $
+        declaration "Claim" "datatype" (signature [named "Bool",named "Bool"] (universeAt (level 0)))
+      witness = set "family" (String "Claim") $ declaration "witness" "constructor"
+        (signature [named "Bool"] (equal (variable 0 []) (variable 0 [])))
+      law s ty = set "compiled" Null $ declaration s "function" ty
+      reflexive = law "unrelatedIdentity" (signature [named "Bool"] (equal (variable 0 []) (variable 0 [])))
+      comparison = law "unrelatedComparison" (signature [named "Bool",named "Bool"] (equal (variable 1 []) (variable 0 [])))
+      helper = operation "retainedFunction" ["Bool"] "Bool" (done 1 (variable 0 []))
+      helperLaw = law "unrelatedCall" (signature [named "Bool"]
+        (equal (call "retainedFunction" [variable 0 []] []) (variable 0 [])))
+      projected = variable 0 ["flag"]
+      fieldLaw = law "unrelatedField" (signature [named "Pair"] (equal projected projected))
+      symmetry = law "unrelatedSymmetry" (signature [named "Bool",named "Bool",equal (variable 1 []) (variable 0 [])]
+        (equal (variable 1 []) (variable 2 [])))
+      badBinding = law "badBinding" (signature [named "Bool"] (equal (variable 5 []) (variable 0 [])))
+      broken = operation "unavailableOperation" ["Bool"] "Bool" Null
+      badDependency = law "badDependency" (signature [named "Bool"]
+        (equal (call "unavailableOperation" [variable 0 []] []) (variable 0 [])))
+      defs = [family,witness,reflexive,comparison,helper,helperLaw,fieldLaw,symmetry,badBinding,broken,badDependency]
+      laws = ["unrelatedIdentity","unrelatedComparison","unrelatedCall","unrelatedField","unrelatedSymmetry","badBinding","badDependency"]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- defs]) (declarations base)
+        ,document = set "builtins" (set "equality" (String "Claim") (get "builtins" (document base))) (document base)
+        ,modelRequirements = M.singleton "statements" (S.fromList [(s,r) | s <- laws,r <- ["statement","proof-source"]])}
+      generated = T.generate inv
+      rows = array (get "nativeStatements" (T.correspondence generated))
+      translated s = any (\r -> get "symbol" r == String s && get "status" r == String "translated") rows
+  check (T.complete generated) (show (T.diagnostics generated))
+  check (all translated ["unrelatedIdentity","unrelatedComparison","unrelatedCall","unrelatedField","unrelatedSymmetry"] && not (any translated ["badBinding","badDependency"]))
+    ("statement admission lost bindings or concealed a dependency: " ++ show rows)
+  let originalRows = array (get "obligations" (T.correspondence generated))
+  check (all (\s -> any (\r -> get "symbol" r == String s && get "sourceKind" r == String "proof-source"
+      && get "rule" r == String "source.proof" && get "target" r == Null) originalRows) laws)
+    "native statements replaced retained proof provenance"
+  check (not (any (\r -> get "symbol" r == String "unavailableOperation" && get "sourceKind" r == String "behavior") originalRows))
+    "failed optional statement expanded the required runtime scope"
+  check (not (any (\r -> get "symbol" r == String "flag" && get "sourceKind" r == String "behavior") originalRows))
+    "reading a structural field introduced a standalone calculation requirement"
+  check ("in 'input2'" `Text.isInfixOf` T.modelText generated) "equality premise witness was erased"
+  check ("constraint def 'unrelatedSymmetry.law'" `Text.isInfixOf` T.modelText generated) "statement not rendered as a native constraint"
+  pure (Text.replace "package 'AgdaModel' {" "package 'EqualityFixture' {" (T.modelText generated))
+
+-- A callback supplies membership context, never stored function identity.
+contextualMembershipChecks :: Inventory -> IO Text
+contextualMembershipChecks base = do
+  let fn = A.Callable [A.Boolean] A.Boolean
+      ticket = A.Shape "ContextTicket" True
+        [A.Constructor "contextTicket" [("ticketIndex",A.Boolean),("ticketValue",A.Boolean)] [A.Input 0]] [A.Boolean]
+      envelope = (A.Shape "ContextEnvelope" True
+        [A.Constructor "contextEnvelope" [("virtualContext",fn),("prefix",A.Boolean)
+          ,("member",A.Fibre "ContextTicket" [A.Apply (A.Input 0) [A.Input 1]])] [A.Input 0]] [fn])
+        {A.contextIndices = [0]}
+      shapes = M.fromList [(A.shapeSymbol sh,sh) | sh <- [ticket,envelope]]
+      term x = object ["term" .= x]
+      v i = variable i []
+      apply f x = set "eliminations" (toJSON [application x]) f
+      callable = term (object ["tag" .= ("native-callable" :: Text),"input" .= named "Bool"
+        ,"result" .= named "Bool","binds" .= True])
+      family name xs = term (call name xs [])
+      envelopeAt i = family "ContextEnvelope" [v i]
+      construct = set "type" (signature [callable,named "Bool",family "ContextTicket" [apply (v 1) (v 0)]] (envelopeAt 2))
+        $ operation "buildContextEnvelope" [] "Bool" (done 3 (constructor "contextEnvelope" [v 2,v 1,v 0]))
+      reconstruct = set "type" (signature [callable,envelopeAt 0] (envelopeAt 1))
+        $ operation "rebuildContextEnvelope" [] "Bool" (split 1
+          [("contextEnvelope",2,done 3 (constructor "contextEnvelope" [v 2,v 1,v 0]))])
+      observe = set "type" (signature [callable,envelopeAt 0] (named "Bool"))
+        $ operation "readContextEnvelope" [] "Bool" (done 2 (variable 0 ["member","ticketValue"]))
+      ctor = set "patternCaptures" (Number 1) $ declaration "contextEnvelope" "constructor" (named "Bool")
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- [construct,reconstruct,observe,ctor]]) (declarations base)}
+  cs <- traverse (either (fail . show) pure . A.function inv M.empty shapes) [construct,reconstruct,observe]
+  let [build,rebuild,readValue] = cs
+  forM_ [False,True] $ \prefix -> forM_ [False,True] $ \payload -> do
+    let member = R "ContextTicket" (M.fromList [("ContextTicket.index0",B (not prefix)),("ticketIndex",B (not prefix)),("ticketValue",B payload)])
+        value = R "ContextEnvelope" (M.fromList [("prefix",B prefix),("member",member)])
+    check (eval [Fn "suppliedIndex",B prefix,member] (A.body build) == value)
+      "context construction stored a callback or changed the domain payload"
+    check (eval [Fn "suppliedIndex",value] (A.body rebuild) == value)
+      "context reconstruction read a fictional callback field"
+    check (eval [Fn "suppliedIndex",value] (A.body readValue) == B payload)
+      "context projection lost the nested payload"
+  let wrong = set "compiled" (done 3 (constructor "contextEnvelope" [v 2,constructor "false" [],v 0])) construct
+  check (isLeft (A.function inv M.empty shapes wrong))
+    "a constructor accepted a member indexed by a different preceding value"
+  let rendered = Text.unlines (["package 'ContextualFixture' {"] ++ A.renderShapes id shapes
+        ++ concatMap (A.renderCalculation inv shapes id) cs ++ ["}"])
+  check (not ("virtualContext" `Text.isInfixOf` rendered)
+    && not ("ContextEnvelope.index0" `Text.isInfixOf` rendered))
+    "contextual membership emitted stored function identity"
+  check ("'buildContextEnvelope'::'input0'(" `Text.isInfixOf` rendered
+    && "'rebuildContextEnvelope'::'result'.'member'.'ContextTicket.index0'" `Text.isInfixOf` rendered)
+    "contextual membership constraints were omitted at construction or return"
+  pure rendered
 
 parameterizedChecks :: Inventory -> IO ()
 parameterizedChecks base = do
@@ -497,14 +638,29 @@ universeChecks base = do
   check (P.readType inv [] primitiveTwo == Right two) "registered zero/successor/maximum not normalized"
   check (isLeft (P.readType inv [] (levelTerm (-1)))) "negative universe accepted"
   check (isLeft (P.readType inv [] (object ["tag" .= ("meta" :: Text)]))) "unresolved meta accepted"
-  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 0)) 2 == Right M.empty)
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton (P.BoundLevel 0) 0)) 2 == Right M.empty)
     "ambiguous maximum guessed a level"
-  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton 0 2)) 2 == Right (M.singleton 0 zero))
+  check (P.constrainLevel M.empty (P.LevelExpr 2 (M.singleton (P.BoundLevel 0) 2)) 2 == Right (M.singleton 0 zero))
     "uniquely determined zero level was not inferred"
   check (isLeft (P.constrainLevel M.empty (P.LevelExpr 3 M.empty) 2)) "inconsistent level constraint accepted"
+  let consumePhantom = function "consumePhantom" (piType True (named "Level#builtin")
+        (piType False (phantomTy (variable 0 [])) (named "Bool"))) (done 2 (constructor "true" []))
+      phantomInventory = inv {declarations = M.insert "consumePhantom" consumePhantom (declarations inv)}
+      callerLevels = [P.Level (P.LevelExpr 0 (M.singleton atom 0))
+        | atom <- map P.BoundLevel [0,1,8,31] ++ map P.RigidLevel [0,8]] ++
+        [P.Level (P.LevelExpr 2 (M.fromList [(P.BoundLevel 3,0),(P.BoundLevel 7,1)]))]
+  forM_ callerLevels $ \callerLevel -> do
+    check (isLeft (P.constrainLevel (M.singleton 0 callerLevel)
+        (P.LevelExpr 0 (M.singleton (P.BoundLevel 0) 0)) 0))
+      "a supplied caller level was solved as an unknown callee level"
+    check (P.readType phantomInventory [Just callerLevel]
+        (call "consumePhantom" [variable 0 [],constructor "phantom" []] []) == Right
+        (P.Runtime (P.Named "Bool" []) (P.IndexCall "consumePhantom" [callerLevel]
+          [P.IndexConstructor "phantom" [callerLevel] []])))
+      "an omitted constructor level was not recovered from its symbolic expected carrier"
   forM_ [0..4] $ \constant -> forM_ [0..4] $ \offset -> forM_ [0..4] $ \target -> do
     let solutions = [x | x <- [0..target],max constant (x+offset) == target]
-        solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton 0 offset)) target
+        solved = P.constrainLevel M.empty (P.LevelExpr constant (M.singleton (P.BoundLevel 0) offset)) target
     case solutions of
       [] -> check (isLeft solved) "unsatisfiable maximum constraint accepted"
       [x] -> check (solved == Right (M.singleton 0 (P.Level (P.LevelExpr x M.empty)))) "unique level solution lost"
@@ -525,6 +681,46 @@ universeChecks base = do
         (object ["constant" .= (2 :: Int),"maximum" .= [object ["offset" .= (0 :: Int),"term" .= variable 0 []]]]))
         (piType False (varType 0) (varType 0)))) inferred
   bad ambiguous "ambiguous omitted level accepted"
+  -- The same checked operations must work with symbolic levels, without
+  -- choosing a concrete level or merging caller and template level slots.
+  let relay = function "openRelay" (generic (piType False (varType 0) (varType 0)))
+        (done 3 (call "inferredIdentity" [variable 0 []] []))
+      openInv = inv {document = set "selectionProfile" (String "declarations") $ set "library" (String "test") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("test" :: Text)]
+            ,"definitions" .= [ident,inferred,pick,relay]]]) (document inv)
+        ,declarations = M.insert "openRelay" relay (declarations inv)
+        ,modelRequirements = M.singleton "open" (S.fromList [(s,"behavior") | s <- ["polyIdentity","inferredIdentity","polyPick","openRelay"]])}
+      openPrepared = P.prepare openInv
+      openGenerated = T.generate openInv
+      rigid i = P.LevelExpr 0 (M.singleton (P.RigidLevel i) 0)
+      openType = P.Open 1 (rigid 0)
+      openTable = M.mapMaybe (either (const Nothing) Just) $ A.functions (P.inventory openPrepared) finite
+        (fst (A.discover (P.inventory openPrepared) finite))
+      openCalc s = openTable M.! (P.openRoots openPrepared M.! s)
+  check (T.complete openGenerated) (show (T.diagnostics openGenerated))
+  check (all (\s -> P.arguments s == [P.Level (rigid 0),openType])
+      [s | s <- P.instances openPrepared,P.origin s `elem` ["polyIdentity","inferredIdentity","polyPick"]])
+    "symbolic levels were concretized or changed scope"
+  forM_ [False,True] $ \x -> do
+    forM_ ["polyIdentity","inferredIdentity","openRelay"] $ \s ->
+      check (evalWith openTable [B x] (A.body (openCalc s)) == B x) "open level changed identity/call behavior"
+    forM_ [False,True] $ \y -> forM_ [False,True] $ \z ->
+      check (eval [B x,B y,B z] (A.body (openCalc "polyPick")) == B (if x then y else z))
+        "open level changed a runtime case position"
+  check (P.substitute [two] (P.Level (rigid 0)) == Right (P.Level (rigid 0)))
+    "callee substitution captured a caller's open level"
+  check (P.typeKey (P.Level (rigid 0)) /= P.typeKey (P.Level (rigid 1)))
+    "distinct symbolic levels shared a static identity"
+  let maxOpen = maxLevel (variable 0 []) (suc (variable 0 []))
+      shifted = P.LevelExpr 0 (M.singleton (P.RigidLevel 0) 1)
+  check (P.readType inv [Just (P.Level (rigid 0))] maxOpen == Right (P.Level shifted))
+    "symbolic successor/maximum did not canonicalize"
+  check (P.readType inv [Just (P.Level (rigid 0))] (maxLevel (levelTerm 1) (suc (variable 0 [])))
+      == Right (P.Level shifted)) "dominated level constant changed symbolic identity"
+  let wrong = set "compiled" (done 3 (call "polyIdentity"
+        [suc (variable 2 []),variable 1 [],variable 0 []] [])) ident
+      invalid = openInv {declarations = M.insert "polyIdentity" wrong (declarations openInv)}
+  check (not (T.complete (T.generate invalid))) "mismatched symbolic universe was accepted"
 
 indexedChecks :: Inventory -> IO ()
 indexedChecks base = do
@@ -645,6 +841,24 @@ indexedChecks base = do
       generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
   check (A.indexTypes (shapes M.! "Evidence") == [A.Boolean]) "finite family lost its index domain"
+  let project :: Value -> [Text] -> Value
+      project term names = set "eliminations" (toJSON (array (get "eliminations" term)
+        ++ [object ["tag" .= ("project" :: Text),"symbol" .= name] | name <- names])) term
+      made = constructor "bundle" [false,constructor "off" [variable 0 []],true,constructor "flagValue" [true]]
+      indexedProjection term = function "constructedIndexProjection"
+        (signature [named "Bool",family "Flags" [term]] (named "Bool")) (done 2 (variable 1 []))
+  forM_ [(project made ["switch"],False),(project made ["selectedFlag"],True)
+        ,(project (constructor "envelope" [made]) ["inner","switch"],False)] $ \(term,expected) -> do
+    calculation <- either (fail . show) pure (A.function inv finite shapes (indexedProjection term))
+    case A.inputs calculation of
+      [A.Boolean,A.Fibre "Flags" [index]] -> forM_ [False,True] $ \b ->
+        check (eval [B b] index == B expected) "constructed index projection selected the wrong field"
+      _ -> fail "constructed projection lost the indexed input contract"
+  forM_ [project made ["inner"],project (constructor "bundle" [false]) ["switch"]
+        ,project (constructor "bundle" [false,constructor "off" [false],true,constructor "flagValue" [true],false]) ["switch"]
+        ,project made ["witness"]] $ \term ->
+    check (isLeft (A.function inv finite shapes (indexedProjection term)))
+      "constructed index projection admitted the wrong owner, payload arity or field type"
   forM_ [False,True] $ \b -> do
     let off = value "off" (B b)
     check (calculate "readEvidence" [B False,off] == B b) "indexed dispatch lost Boolean payload"
@@ -835,6 +1049,42 @@ composedChecks base = do
         check (not (T.complete (T.generate altered))) message
   check (M.null (P.failures prepared)) (show (P.failures prepared))
   check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  let boolType = P.Named "Bool" []
+      fibre = P.Named "GenericEvidence" [boolType,P.Runtime boolType (P.IndexInput 7)]
+      receiver = P.Runtime fibre (P.IndexInput 9)
+      readOmitted value = P.readType inv [Just receiver] value
+  check (readOmitted (call "gretain" [variable 0 []] []) == Right
+    (P.Runtime fibre (P.IndexCall "gretain" [boolType] [P.IndexInput 7,P.IndexInput 9])))
+    "computed index did not recover omitted static and runtime parameters"
+  check (readOmitted (call "gretain" [call "gretain" [variable 0 []] []] []) == Right
+    (P.Runtime fibre (P.IndexCall "gretain" [boolType]
+      [P.IndexInput 7,P.IndexCall "gretain" [boolType] [P.IndexInput 7,P.IndexInput 9]])))
+    "nested omitted index call confused caller and signature input positions"
+  check (isLeft (readOmitted (call "gretain" [] []))) "partial omitted index call was admitted"
+  check (isLeft (readOmitted (call "gretain" [variable 0 [],variable 0 []] [])))
+    "omitted index call admitted an excess value application"
+  let phantom = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)])
+        $ function "phantomIndex" (generic (piType False (named "Bool") (named "Bool"))) (done 1 (variable 0 []))
+      phantomInv = inv {declarations = M.insert "phantomIndex" phantom (declarations inv)}
+  check (isLeft (P.readType phantomInv [Just (P.Runtime boolType (P.IndexInput 0))]
+    (call "phantomIndex" [variable 0 []] []))) "uninferable static index parameter was guessed"
+  let repeated = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)])
+        $ function "repeatedIndex" (generic (piType True (named "Bool")
+          (piType True (evidence (varType 1) (variable 0 []))
+            (piType False (evidence (varType 2) (variable 1 []))
+              (evidence (varType 2) (variable 1 [])))))) (done 2 (variable 0 []))
+      repeatedInv = inv {declarations = M.insert "repeatedIndex" repeated (declarations inv)}
+      second a ix = P.Runtime (P.Named "GenericEvidence" [a,P.Runtime boolType ix]) (P.IndexInput 10)
+      repeatedCall other = P.readType repeatedInv [Just receiver,Just other]
+        (call "repeatedIndex" [variable 0 [],variable 1 []] [])
+  check (repeatedCall (second boolType (P.IndexInput 7)) == Right
+    (P.Runtime fibre (P.IndexCall "repeatedIndex" [boolType]
+      [P.IndexInput 7,P.IndexInput 9,P.IndexInput 10])))
+    "consistent repeated omitted index was not reconstructed"
+  check (isLeft (repeatedCall (second boolType (P.IndexInput 8))))
+    "conflicting evidence for an omitted runtime index was accepted"
+  check (isLeft (repeatedCall (second (P.Named "Tone" []) (P.IndexInput 7))))
+    "conflicting evidence for an omitted static parameter was accepted"
   check (length [i | i <- P.instances prepared,P.origin i == "GenericEvidence"] == 2)
     "runtime indices split static family identities"
   forM_ [False,True] $ \tag -> do
@@ -880,7 +1130,984 @@ composedChecks base = do
   bad (set "compiled" (done 1 (call "gcopy" [get "term" (named "Tone"),variable 0 []] []))
     (use "copyBoolPacket" "gcopy" (named "Bool"))) "different static payload types unified"
 
+-- Compiler-provided module equations determine carrier identity; names and
+-- structurally similar constructor results do not establish an alias.
+moduleAliasChecks :: Inventory -> IO ()
+moduleAliasChecks base = do
+  let alias = set "moduleInstanceCopy" (Bool True) $ set "moduleAlias"
+        (object ["telescope" .= ([] :: [Value]),"patterns" .= ([] :: [Value]),"body" .= call "Pair" [] []]) $
+        declaration "CopiedPair" "record" (universeAt (level 0))
+      inv = base {declarations = M.insert "CopiedPair" alias (declarations base)}
+      readAlias i = P.readType i [] (call "CopiedPair" [] [])
+  check (readAlias inv == Right (P.Named "Pair" [])) "checked module carrier alias was not followed"
+  forM_ [set "moduleAlias" Null,set "abstract" (Bool True)
+        ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= constructor "true" []]]
+            ,"body" .= call "Pair" [] []])] $ \change ->
+    check (isLeft (readAlias inv {declarations = M.adjust change "CopiedPair" (declarations inv)}))
+      "absent, opaque or matching carrier equation was assumed to be an alias"
+  let safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "Copied")
+      original = safe $ operation "sourceIdentity" ["Bool"] "Bool" (done 1 (variable 0 []))
+      copied = safe $ set "moduleInstanceCopy" (Bool True) $ set "sourceSyntax" (toJSON ([] :: [Value])) $
+        operation "copiedIdentity" ["Bool"] "Bool" (done 1 (call "sourceIdentity" [variable 0 []] []))
+      functions = inv {declarations = M.insert "sourceIdentity" original $ M.insert "copiedIdentity" copied (declarations inv)
+        ,document = set "checking" (toJSON [object ["module" .= ("Copied" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document inv)
+        ,modelRequirements = M.singleton "copy" (S.fromList [("sourceIdentity","behavior"),("copiedIdentity","behavior")])}
+      calculations i = A.functions i M.empty M.empty
+  check (either (const False) (const True) (calculations functions M.! "copiedIdentity"))
+    "checked module function alias requires nonexistent standalone syntax"
+  forM_ [set "moduleInstanceCopy" (Bool False),set "terminates" (Bool False)
+        ,set "compiled" (done 1 (call "missing" [variable 0 []] []))] $ \change ->
+    check (isLeft (calculations functions {declarations = M.adjust change "copiedIdentity" (declarations functions)} M.! "copiedIdentity"))
+      "unanchored or unsupported module alias was accepted"
+  -- A copied proper projection forwards its actual record field, including
+  -- when no generic declaration otherwise activates specialization.
+  forM_ [("readFlag","flag","Bool"),("readTone","tone","Tone")] $ \(s,f,ty) -> forM_ [False,True] $ \lambda -> do
+    let copiedField = set "moduleInstanceCopy" (Bool True) $ set "projection"
+          (object ["proper" .= ("CopiedPair" :: Text),"original" .= f,"index" .= (1 :: Int)]) $
+          operation s ["CopiedPair"] ty (if lambda then done 0 (object ["tag" .= ("lambda" :: Text)
+            ,"abstraction" .= object ["binds" .= True,"body" .= variable 0 [f]]]) else done 1 (variable 0 [f]))
+        selected = base {declarations = M.insert s copiedField (declarations inv)
+          ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+            set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)]
+              ,"definitions" .= [alias,copiedField]]]) (document base)
+          ,modelRequirements = M.map (S.insert ("CopiedPair","structure") . S.insert (s,"behavior")) (modelRequirements base)}
+        prepared = P.prepare selected
+        expanded = P.inventory prepared
+        finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+        table = A.functions expanded finite (fst (A.discover expanded finite))
+    check (M.lookup s (P.openRoots prepared) == Just f && M.member f (declarations expanded))
+      "copied projection root did not resolve to its materialized field"
+    check (T.complete (T.generate selected)) (show (T.diagnostics (T.generate selected)))
+    calculation <- either (fail . show) pure (table M.! f)
+    forM_ [False,True] $ \b -> forM_ ["red","blue"] $ \color ->
+      check (eval [R "Pair" (M.fromList [("flag",B b),("tone",E "Tone" color)])] (A.body calculation)
+        == if f == "flag" then B b else E "Tone" color) "copied projection read another field"
+    forM_ [set "abstract" (Bool True),set "compiled" (done 1 (variable 0 ["missing"]))
+        ,set "compiled" (done 0 (object ["tag" .= ("lambda" :: Text)
+            ,"abstraction" .= object ["binds" .= False,"body" .= variable 0 [f]]]))
+        ,set "projection" (object ["proper" .= ("Tone" :: Text),"original" .= f,"index" .= (1 :: Int)])
+        ,set "projection" (object ["proper" .= ("Pair" :: Text),"index" .= (1 :: Int)])
+        ,set "type" (signature [named "Pair"] (named (if ty == "Bool" then "Tone" else "Bool")))] $ \change ->
+      check (not (T.complete (T.generate selected {declarations = M.adjust change s (declarations selected)})))
+        "unproved or incompatible copied projection was admitted"
+
+-- A selected module-copy constructor must resolve to a materialized canonical
+-- constructor at the actual module arguments, not a fictional alias instance.
+moduleConstructorRootChecks :: Inventory -> IO ()
+moduleConstructorRootChecks base = forM_ ["Parcel","Envelope"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      family = name "Pair"; ctor = name "PairValue"; copy = name "Copy"
+      v i = object ["term" .= variable i []]
+      applied ts = object ["term" .= call family (map (get "term") ts) []]
+      piType a b = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["type" .= a,"info" .= info]
+        ,"codomain" .= object ["binds" .= False,"body" .= b]]]
+      generic = signature [universeAt (level 0)]
+      pair = set "parameters" (Number 2) $ set "constructors" (toJSON [ctor]) $
+        declaration family "datatype" (generic (generic (universeAt (level 0))))
+      original = set "parameters" (Number 2) $ set "family" (String family) $
+        declaration ctor "constructor" (generic (generic (piType (v 1) (piType (v 0) (applied [v 1,v 0])))))
+      owner = set "parameters" (Number 1) $ declaration copy "datatype" (generic (universeAt (level 0)))
+      alias suffix fixed = set "parameters" (Number 1) $ set "family" (String copy)
+        $ set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String ctor)
+        $ declaration (name suffix) "constructor" (generic
+          (piType (named fixed) (piType (v 0) (applied [named fixed,v 0]))))
+      aliases = [alias "Bool" "Bool",alias "Tone" "Tone",alias "Again" "Bool"]
+      ds = pair:original:owner:aliases
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= aliases]]) (document base)
+        ,modelRequirements = M.singleton "copy" (S.fromList [(s,"structure") | s <- [family,ctor,"Tone",name "Bool",name "Tone",name "Again"]])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      open = P.Open 0 (P.LevelExpr 0 M.empty)
+      key symbol fixed = P.typeKey (P.Named symbol [P.Named fixed [],open])
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover expanded finite)
+      calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  forM_ [("Bool","Bool",B False),("Tone","Tone",E "Tone" "red"),("Again","Bool",B True)] $ \(suffix,fixed,value) -> do
+    target <- maybe (fail "selected constructor has no target") pure (M.lookup (name suffix) (P.openRoots prepared))
+    check (target == key ctor fixed && M.member target (declarations expanded))
+      "selected constructor target was not materialized at canonical module arguments"
+    calculation <- maybe (fail "materialized constructor has no native calculation") pure (M.lookup target calculations)
+    forM_ [B False,B True,R "Opaque" (M.singleton "payload" (Z (10^40)))] $ \payload ->
+      check (eval [value,payload] (A.body calculation) == R (key family fixed) (M.fromList
+        [("constructor",E (key family fixed <> ".constructor-tag") target)
+        ,(target <> ".payload0",value),(target <> ".payload1",payload)]))
+        "module constructor changed its complete ordered payload"
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  forM_ [set "canonicalConstructor" Null,set "canonicalConstructor" (String "missingConstructor")
+      ,set "abstract" (Bool True),set "moduleInstanceCopy" (Bool False)
+      ,set "type" (generic (piType (named "Tone") (piType (v 0) (applied [named "Bool",v 0]))))] $ \change -> do
+    let invalid = inv {declarations = M.adjust change (name "Bool") (declarations inv)}
+    check (not (T.complete (T.generate invalid))) "unproved or incompatible constructor alias was admitted"
+
+-- Alias equations, not copied constructor lists, determine selected carrier
+-- identity. Exercise fixed/reordered parameters and dependent runtime indices
+-- under two unrelated naming schemes.
+moduleCarrierRootChecks :: Inventory -> IO ()
+moduleCarrierRootChecks base = forM_ ["Cargo","Packet"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      family = name "Indexed"; ctor = name "Value"
+      v i = object ["term" .= variable i []]
+      applied s xs = object ["term" .= call s (map (get "term") xs) []]
+      universe = universeAt (level 0)
+      canonical = set "parameters" (Number 2) $ set "constructors" (toJSON [ctor]) $
+        declaration family "datatype" (signature [universe,universe,named "Bool"] universe)
+      original = set "parameters" (Number 2) $ set "family" (String family) $
+        declaration ctor "constructor" (signature [universe,universe,named "Bool",v 2,v 2]
+          (applied family [v 4,v 3,v 2]))
+      equation s body = set "moduleInstanceCopy" (Bool True) $ set "moduleAlias"
+        (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]],"body" .= body]) $
+        set "parameters" (Number 1) $ set "constructors" (toJSON [ctor]) $
+        declaration s "datatype" (signature [universe,named "Bool"] universe)
+      alias suffix fixed swap = equation (name suffix) (call family
+        (if swap then [variable 0 [],get "term" (named fixed)] else [get "term" (named fixed),variable 0 []]) [])
+      aliases = [alias "Bool" "Bool" False,alias "Tone" "Tone" False,alias "Again" "Bool" False,alias "Swap" "Bool" True]
+      ds = canonical:original:aliases
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= aliases]]) (document base)
+        ,modelRequirements = M.singleton "copy" (S.insert ("Tone","structure")
+            (S.fromList [(string (get "name" d),"structure") | d <- aliases]))}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      open = P.Open 0 (P.LevelExpr 0 M.empty)
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover expanded finite)
+      calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  forM_ [("Bool","Bool",False,B False),("Tone","Tone",False,E "Tone" "red")
+        ,("Again","Bool",False,B True),("Swap","Bool",True,B True)] $ \(suffix,fixed,swap,value) -> do
+    let args = if swap then [open,P.Named fixed []] else [P.Named fixed [],open]
+        key s = P.typeKey (P.Named s args)
+    check (M.lookup (name suffix) (P.openRoots prepared) == Just (key family)
+      && M.member (key family) (declarations expanded)) "copied carrier did not resolve its actual canonical arguments"
+    calculation <- maybe (fail "canonical carrier constructor is absent") pure (M.lookup (key ctor) calculations)
+    forM_ [False,True] $ \index -> forM_ [B False,R "Opaque" (M.singleton "payload" (Z (10^40)))] $ \payload -> do
+      let values = if swap then [payload,value] else [value,payload]
+      check (eval (B index:values) (A.body calculation) == R (key family) (M.fromList
+        [("constructor",E (key family <> ".constructor-tag") (key ctor)),(key family <> ".index0",B index)
+        ,(key ctor <> ".payload0",B index),(key ctor <> ".payload1",head values),(key ctor <> ".payload2",last values)]))
+        "canonical carrier changed its index or ordered complete payload"
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  forM_ [set "moduleAlias" Null,set "abstract" (Bool True)
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= constructor "true" []]]
+          ,"body" .= call family [get "term" (named "Bool"),variable 0 []] []])
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]]
+          ,"body" .= call "missingCarrier" [] []])
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]]
+          ,"body" .= call family [get "term" (named "Bool")] []])] $ \change ->
+    check (not (T.complete (T.generate inv {declarations = M.adjust change (name "Bool") (declarations inv)})))
+      "unproved or ill-applied module carrier equation was admitted"
+
+-- Checked partial evaluation bridges a static-family argument at a stored
+-- schema slot without changing the helper's existing runtime signature.
+staticSchemaBoundaryChecks :: Inventory -> IO ()
+staticSchemaBoundaryChecks base = forM_ ["Atlas","Beacon"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      boolean = P.Named "Bool" []; zero = P.LevelExpr 0 M.empty
+      schema = P.SchemaValue [boolean] zero
+      v i = object ["term" .= variable i []]
+      familyType = signature [named "Bool"] (universeAt (level 0))
+      safe = set "sourceModule" (String prefix) . set "opaque" (Bool False) . set "terminates" (Bool True)
+      helper = safe $ set "type" (signature [named "Bool",familyType,named "Bool"] (named "Bool")) $
+        operation (name "select") [] "Bool" (done 3 (variable 0 []))
+      member f i = object ["term" .= set "eliminations" (toJSON [application (variable i [])]) (variable f [])]
+      memberHelper = safe $ set "type" (signature [named "Bool",familyType,member 0 1] (member 1 2)) $
+        operation (name "selectMember") [] "Bool" (done 3 (variable 0 []))
+      indexed term = object ["term" .= call (name "Ticket") [term] []]
+      ticket = set "constructors" (toJSON [name "stamp"]) $
+        declaration (name "Ticket") "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      stamp = set "family" (String (name "Ticket")) $ declaration (name "stamp") "constructor"
+        (signature [named "Bool"] (indexed (variable 0 [])))
+      use = safe $ set "type" (signature [familyType,named "Bool"
+          ,indexed (call (name "select") [variable 0 [],variable 1 [],variable 0 []] [])]
+          (indexed (variable 1 []))) $
+        operation (name "preserve") [] "Bool" (done 3 (variable 0 []))
+      ds = [helper,memberHelper,ticket,stamp,use]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= prefix,"safe" .= True,"terminationCheck" .= True]]) $
+          set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= ds]]) (document base)
+        ,modelRequirements = M.singleton "boundary" (S.fromList
+          [(name "select","behavior"),(name "selectMember","behavior"),(name "Ticket","structure")
+          ,(name "stamp","structure"),(name "preserve","behavior")])}
+      readCall source family = P.readType source
+        [Just (P.Runtime boolean (P.IndexInput 7)),Just family,Just (P.Runtime boolean (P.IndexInput 2))]
+        (call (name "select") [variable 2 [],variable 1 [],variable 0 []] [])
+      generated = T.generate inv
+  sig <- either (fail . show) pure (P.signature inv helper)
+  check (P.parameters sig == 0 && P.inputs sig == [boolean,schema,boolean])
+    "static/schema bridge changed the existing runtime signature"
+  forM_ [P.FamilyParameter 3 [boolean] zero,P.OpenFamily 5 [boolean] zero] $ \family ->
+    check (readCall inv family == Right (P.Runtime boolean (P.IndexInput 7)))
+      "checked schema-boundary reduction lost the caller's index scope"
+  check (readCall inv (P.Runtime schema (P.IndexInput 11)) == Right (P.Runtime boolean
+    (P.IndexCall (name "select") [] [P.IndexInput 2,P.IndexInput 11,P.IndexInput 7])))
+    "stored-schema call was reclassified or lost its runtime binding"
+  forM_ [3,9] $ \slot -> do
+    let family = P.FamilyParameter slot [boolean] zero
+        index = P.Runtime boolean (P.IndexInput 7)
+        payload = P.Runtime (P.FamilyApplication family [index]) (P.IndexInput 12)
+    check (P.readType inv [Just payload,Just index,Just family]
+      (call (name "selectMember") [variable 1 [],variable 2 [],variable 0 []] []) == Right payload)
+      "schema-boundary reduction merged families or lost a member's dependent domain"
+  -- Reduction may expose a constructor whose omitted family cannot be
+  -- inferred from one member. The expected carrier supplies that family.
+  let box f = object ["term" .= call (name "Box") [f] []]
+      boxType = set "parameters" (Number 1) $ set "constructors" (toJSON [name "box"]) $
+        declaration (name "Box") "datatype" (signature [familyType] (universeAt (level 0)))
+      boxConstructor = set "family" (String (name "Box")) $ declaration (name "box") "constructor"
+        (signature [familyType,named "Bool",member 1 0] (box (variable 2 [])))
+      wrap = safe $ set "type" (signature [named "Bool",familyType,member 0 1] (box (variable 1 []))) $
+        operation (name "wrap") [] "Bool" (done 3 (constructor (name "box") [variable 2 [],variable 0 []]))
+      indexedBox = set "parameters" (Number 1) $ declaration (name "IndexedBox") "datatype"
+        (signature [familyType,box (variable 0 [])] (universeAt (level 0)))
+      boxInv = inv {declarations = M.union (M.fromList [(string (get "name" d),d)
+        | d <- [boxType,boxConstructor,wrap,indexedBox]]) (declarations inv)}
+      identityFamily = P.FamilyParameter 0 [boolean] zero
+      lambdaFamily = P.FamilyExpression boolean 5
+        (P.FamilyApplication identityFamily [P.Runtime boolean (P.IndexLocal 5)]) zero
+  forM_ ([(f,f) | slot <- [3,9],let f = P.OpenFamily slot [boolean] zero]
+      ++ [(lambdaFamily,identityFamily)]) $ \(family,appliedFamily) -> do
+    let index = P.Runtime boolean (P.IndexInput 7)
+        payload = P.Runtime (P.FamilyApplication appliedFamily [index]) (P.IndexInput 12)
+        context = [Just payload,Just index,Just family]
+        wrapped = call (name "wrap") [variable 1 [],variable 2 [],variable 0 []] []
+        result = P.Runtime (P.Named (name "Box") [family])
+          (P.IndexConstructor (name "box") [family] [P.IndexInput 7,P.IndexInput 12])
+        actual = P.readType boxInv context (call (name "IndexedBox") [variable 2 [],wrapped] [])
+    check (actual == Right (P.Named (name "IndexedBox") [family,result]))
+      ("reduced constructor lost the expected family and its complete payload: " ++ show actual)
+    check (isLeft (P.readType boxInv context wrapped))
+      "constructor inferred an arbitrary family from one member without a result context"
+    forM_ [P.FamilyApplication appliedFamily [P.Runtime boolean (P.IndexInput 8)]
+          ,P.FamilyApplication (P.OpenFamily 11 [boolean] zero) [index]] $ \wrong ->
+      check (isLeft (P.readType boxInv [Just (P.Runtime wrong (P.IndexInput 12)),Just index,Just family]
+        (call (name "IndexedBox") [variable 2 [],wrapped] [])))
+        "contextual reduction accepted a member from a different index or family"
+    forM_ [set "opaque" (Bool True),set "abstract" (Bool True),set "terminates" (Bool False)] $ \change ->
+      check (isLeft (P.readType boxInv {declarations = M.adjust change (name "wrap") (declarations boxInv)}
+        context (call (name "IndexedBox") [variable 2 [],wrapped] [])))
+        "expected result bypassed the checked reduction gate"
+  forM_ [P.FamilyParameter 3 [P.Named "Tone" []] zero
+        ,P.FamilyParameter 3 [boolean] (P.LevelExpr 1 M.empty)] $ \family ->
+    check (isLeft (readCall inv family)) "static/schema bridge accepted a different domain or universe"
+  forM_ [set "opaque" (Bool True),set "abstract" (Bool True),set "terminates" (Bool False)
+        ,set "compiled" (split 0 [("true",0,done 2 (variable 0 [])),("false",0,done 2 (variable 0 []))])] $ \change ->
+    check (isLeft (readCall inv {declarations = M.adjust change (name "select") (declarations inv)}
+      (P.FamilyParameter 3 [boolean] zero))) "unavailable checked reduction crossed a schema boundary"
+  check (T.complete generated) (show (T.diagnostics generated))
+  let prepared = P.prepare inv; expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      table = A.functions expanded M.empty shapes
+  target <- maybe (fail "schema-boundary caller has no native root") pure (M.lookup (name "preserve") (P.openRoots prepared))
+  calculation <- either (fail . show) pure (table M.! target)
+  forM_ [False,True] $ \tag -> do
+    let value = R (name "Ticket") (M.fromList [("constructor",E (name "Ticket" <> ".constructor-tag") (name "stamp"))
+          ,(name "Ticket" <> ".index0",B tag),(name "stamp" <> ".payload0",B tag)])
+    check (eval [B tag,value] (A.body calculation) == value) "schema-boundary caller changed the complete indexed value"
+
+emptyCarrierChecks :: Inventory -> IO ()
+emptyCarrierChecks base = do
+  let empty = set "induction" (String "Inductive") $ set "sourceModule" (String "CheckedEmpty") $
+        set "constructors" (toJSON ([] :: [Text])) $ declaration "NoValue" "datatype" (universeAt (level 0))
+      optional = set "constructors" (toJSON (["absentValue","impossibleValue"] :: [Text])) $
+        declaration "OptionalEmpty" "datatype" (universeAt (level 0))
+      absent = set "family" (String "OptionalEmpty") $ declaration "absentValue" "constructor" (named "OptionalEmpty")
+      impossible = set "family" (String "OptionalEmpty") $
+        declaration "impossibleValue" "constructor" (signature [named "NoValue"] (named "OptionalEmpty"))
+      additions = [empty,optional,absent,impossible]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedEmpty" :: Text),"safe" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "empty" (S.fromList [(string (get "name" d),"structure") | d <- additions])}
+      (shapes,errors) = A.discover inv M.empty
+      rendered = Text.unlines (A.renderShapes id shapes)
+  check (M.null errors && M.member "NoValue" shapes && M.member "OptionalEmpty" shapes) (show errors)
+  check (null (A.variants (shapes M.! "NoValue"))) "empty datatype acquired a constructor"
+  check ("constraint def 'NoValue.payload-valid' {\n    in 'value' : 'NoValue' [1];\n    false" `Text.isInfixOf` rendered
+    && not ("enum def 'NoValue.constructor-tag'" `Text.isInfixOf` rendered))
+    "empty datatype was emitted as an inhabited or empty-enumeration carrier"
+  check (all ((/= A.Named "NoValue") . A.result) (A.constructorCalculations inv shapes))
+    "empty datatype acquired a value constructor helper"
+  forM_ [set "constructors" Null,set "constructors" (String "[]"),set "abstract" (Bool True)
+    ,set "induction" (String "CoInductive"),set "sourceModule" (String "UncheckedEmpty")] $ \change ->
+      check (M.notMember "NoValue" (fst (A.discover inv {declarations = M.adjust change "NoValue" (declarations inv)} M.empty)))
+        "missing, opaque or unchecked constructor coverage justified an empty datatype"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+
+-- Unused higher-order module parameters are static only after dependency checks.
+unusedParameterChecks :: Inventory -> IO ()
+unusedParameterChecks base = do
+  let callback = signature [named "Bool"] (named "Bool")
+      ty s args = object ["term" .= call s args []]
+      v i = variable i []
+      parameterized = set "moduleParameters" (Number 1)
+      safe = parameterized . set "opaque" (Bool False) . set "terminates" (Bool True)
+        . set "sourceModule" (String "UnusedChecked")
+      carrier = parameterized $ set "parameters" (Number 1) $ set "constructors" (toJSON (["wrapUnused"] :: [Text])) $
+        declaration "PhantomCallback" "datatype" (signature [callback] (universeAt (level 0)))
+      ctor = parameterized $ set "parameters" (Number 1) $ set "family" (String "PhantomCallback") $
+        declaration "wrapUnused" "constructor" (signature [callback,named "Bool"] (ty "PhantomCallback" [v 1]))
+      passthrough = safe $ set "type" (signature [callback,ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1])) $
+        operation "passUnused" [] "Bool" (done 2 (v 0))
+      forwarded = safe $ set "type" (signature [callback,ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1])) $
+        operation "forwardUnused" [] "Bool" (done 2 (call "passUnused" [v 1,v 0] []))
+      used = safe $ set "type" (signature [callback,named "Bool"] (named "Bool")) $
+        operation "usedCallback" [] "Bool" (done 2 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      transitivelyUsed = safe $ set "type" (signature [callback,named "Bool"] (named "Bool")) $
+        operation "forwardUsed" [] "Bool" (done 2 (call "usedCallback" [v 1,v 0] []))
+      transformed = safe $ set "type" (signature
+        [callback,signature [ty "PhantomCallback" [v 0]] (ty "PhantomCallback" [v 1]),ty "PhantomCallback" [v 1]]
+        (ty "PhantomCallback" [v 2])) $
+        operation "transformUnused" [] "Bool" (done 3 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      declarations' = [carrier,ctor,passthrough,forwarded,used,transitivelyUsed,transformed]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- declarations']) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "test") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("test" :: Text)],"definitions" .= declarations']]) $
+          set "checking" (toJSON [object ["module" .= ("UnusedChecked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "unused" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- declarations'])}
+      omitted inventory s = get "unusedModuleParameters" (declarations (UnusedParameters.annotate inventory) M.! s)
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      calculations = A.functions expanded M.empty shapes
+  forM_ ["PhantomCallback","wrapUnused","passUnused","forwardUnused","transformUnused"] $ \s ->
+    check (omitted inv s == toJSON ([0] :: [Int])) ("unused forwarding not established: " ++ show s)
+  forM_ ["usedCallback","forwardUsed"] $ \s -> do
+    check (omitted inv s == toJSON ([] :: [Int])) "live callback was classified unused"
+    check (M.notMember s (P.failures prepared)) (show (P.failures prepared))
+    calc <- either (fail . show) pure (calculations M.! s)
+    check (A.inputs calc == [A.Callable [A.Boolean] A.Boolean,A.Boolean]) "callback signature lost its domain or result"
+    check ("in calc 'input0'" `Text.isInfixOf` Text.unlines (A.renderCalculation expanded shapes id calc))
+      "callback was not emitted as a native calculation input"
+  callbackCalc <- either (fail . show) pure (calculations M.! "usedCallback")
+  check (A.body callbackCalc == A.Apply (A.Input 0) [A.Input 1]) "callback application was not retained"
+  let identity = A.Calculation "identity" [A.Boolean] A.Boolean (A.Input 0) []
+      invert = A.Calculation "invert" [A.Boolean] A.Boolean
+        (A.Conditional (A.Input 0) (A.Literal False) (A.Literal True)) []
+      table = M.union (M.fromList [("identity",identity),("invert",invert)])
+        (M.mapMaybe (either (const Nothing) Just) calculations)
+  forM_ ["usedCallback","forwardUsed"] $ \symbol -> forM_ [False,True] $ \value ->
+    forM_ [("identity",value),("invert",not value)] $ \(fn,expected) ->
+      check (evalWith table [Fn fn,B value] (A.body (table M.! symbol)) == B expected)
+        "native callback invocation/forwarding changed the supplied function"
+  let preparedBody definition =
+        let input = inv {declarations = M.insert "usedCallback" definition (declarations inv)}
+            transformed = P.prepare input
+            target = P.inventory transformed
+        in (transformed,A.functions target M.empty (fst (A.discover target M.empty)))
+      wrongArgument = set "compiled" (done 2 (set "eliminations"
+        (toJSON [application (constructor "red" [])]) (v 1))) used
+      (_,wrongCalculations) = preparedBody wrongArgument
+  check (maybe True isLeft (M.lookup "usedCallback" wrongCalculations)) "ill-typed callback application admitted"
+  check (isLeft (P.readType inv [] (get "term" (signature [callback] (named "Bool")))))
+    "higher-order callback domain admitted by unary rule"
+  check (isLeft (P.readType inv [Just P.Unused] (get "term" (signature [object ["term" .= v 0]] (named "Bool")))))
+    "unused bookkeeping marker admitted as a runtime callback domain"
+  check (P.readType inv [] (get "term" (signature [named "Bool",named "Bool"] (named "Bool"))) == Right (P.Callable [P.Named "Bool" [],P.Named "Bool" []] (P.Named "Bool" [])))
+    "multiargument callback telescope was not retained"
+  let dependent = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= named "Bool"]
+        ,"codomain" .= object ["binds" .= True,"body" .= object ["term" .= v 0]]]]
+  check (isLeft (P.readType inv [] (get "term" dependent))) "dependent callback result admitted"
+  forM_ ["passUnused","forwardUnused"] $ \s -> do
+    key <- maybe (fail (show (s,P.failures prepared))) pure (M.lookup s (P.openRoots prepared))
+    calc <- either (fail . show) pure (calculations M.! key)
+    check (length (A.inputs calc) == 1) "unused callback leaked into runtime arguments"
+    forM_ [False,True] $ \b -> do
+      let owner = case head (A.inputs calc) of A.Named name -> name; _ -> error "missing carrier"
+          con = head (A.variants (shapes M.! owner))
+          value = R owner (M.fromList [("constructor",E (owner <> ".constructor-tag") (A.constructorSymbol con))
+            ,(fst (head (A.payload con)),B b)])
+          table = M.mapMaybe (either (const Nothing) Just) calculations
+      check (evalWith table [value] (A.body calc) == value) "unused callback omission changed retained payload"
+  transformedKey <- maybe (fail (show (P.failures prepared))) pure (M.lookup "transformUnused" (P.openRoots prepared))
+  transformedCalc <- either (fail . show) pure (calculations M.! transformedKey)
+  owner <- case A.inputs transformedCalc of
+    [A.Callable [A.Named a] (A.Named b),A.Named c] | a == b && b == c -> pure a
+    other -> fail ("callback over a phantom carrier changed its signature: " ++ show other)
+  let con = head (A.variants (shapes M.! owner))
+      payloadField = fst (head (A.payload con))
+      wrapped b = R owner (M.fromList [("constructor",E (owner <> ".constructor-tag") (A.constructorSymbol con)),(payloadField,B b)])
+      identityWrapped = A.Calculation "identityWrapped" [A.Named owner] (A.Named owner) (A.Input 0) []
+      clearWrapped = A.Calculation "clearWrapped" [A.Named owner] (A.Named owner)
+        (A.Construct owner [("constructor",A.Enumeration (owner <> ".constructor-tag") (A.constructorSymbol con)),(payloadField,A.Literal False)]) []
+      callbacks = M.union (M.fromList [("identityWrapped",identityWrapped),("clearWrapped",clearWrapped)]) table
+  forM_ [False,True] $ \b -> forM_ [("identityWrapped",b),("clearWrapped",False)] $ \(fn,expected) ->
+    check (evalWith callbacks [Fn fn,wrapped b] (A.body transformedCalc) == wrapped expected)
+      "callback over a carrier with unused parameters changed its complete payload"
+  let noOmission = inv {declarations = M.adjust (set "moduleParameters" Null) "PhantomCallback" (declarations inv)}
+  check (M.member "transformUnused" (P.failures (P.prepare noOmission)))
+    "callback carrier omitted a live function parameter without checked unused evidence"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null
+        ,set "moduleParameters" Null] $ \change -> do
+    let altered = inv {declarations = M.adjust change "passUnused" (declarations inv)}
+    check (omitted altered "passUnused" == toJSON ([] :: [Int])
+      && omitted altered "forwardUnused" == toJSON ([] :: [Int]))
+      "missing metadata or opaque dependency allowed omission"
+  let stored = inv {declarations = M.adjust (set "type" (signature [callback,callback]
+        (ty "PhantomCallback" [v 1]))) "wrapUnused" (declarations inv)}
+  -- The second function is a stored payload, not an unused module parameter.
+  let storedPrepared = P.prepare stored
+      storedInventory = P.inventory storedPrepared
+      storedShapes = fst (A.discover storedInventory M.empty)
+  storedKey <- maybe (fail (show (P.failures storedPrepared))) pure (M.lookup "PhantomCallback" (P.openRoots storedPrepared))
+  storedShape <- maybe (fail "stored callback carrier missing") pure (M.lookup storedKey storedShapes)
+  check ([t | c <- A.variants storedShape,(_,t) <- A.payload c] == [A.Callable [A.Boolean] A.Boolean])
+    "stored function payload was erased or changed"
+
+callableFieldChecks :: Inventory -> IO Text
+callableFieldChecks base = do
+  let callback = signature [named "Bool"] (named "Bool")
+      box = set "constructor" (String "makeCallbackBox") $ set "fields" (toJSON (["callbackField"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "CallbackBox" "record" (universeAt (level 0))
+      ctor = set "family" (String "CallbackBox") $ declaration "makeCallbackBox" "constructor"
+        (signature [callback] (named "CallbackBox"))
+      projection = set "projection" (object ["proper" .= ("CallbackBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration "callbackField" "function" (signature [named "CallbackBox"] callback)
+      applied = set "eliminations" (toJSON (array (get "eliminations" (variable 1 ["callbackField"]))
+        ++ [application (variable 0 [])])) (variable 1 [])
+      use = operation "useCallbackBox" ["CallbackBox","Bool"] "Bool" (done 2 applied)
+      rebuild = operation "rebuildCallbackBox" ["CallbackBox"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [variable 0 ["callbackField"]]))
+      lambda binds body = object ["tag" .= ("lambda" :: Text)
+        ,"abstraction" .= object ["binds" .= binds,"body" .= body]]
+      capture = operation "captureValue" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda True (variable 1 [])]))
+      unused = operation "captureUnused" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda False (variable 0 [])]))
+      nested = operation "captureNested" ["Bool"] "CallbackBox"
+        (done 1 (constructor "makeCallbackBox" [lambda True (call "useCallbackBox"
+          [constructor "makeCallbackBox" [lambda True (variable 2 [])],variable 0 []] [])]))
+      ds = [box,ctor,projection,use,rebuild,capture,unused,nested]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "callbacks" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      shapes = fst (A.discover expanded M.empty)
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  shape <- maybe (fail "callable record not admitted") pure (M.lookup "CallbackBox" shapes)
+  check (A.isRecord shape && map snd (A.payload (head (A.variants shape))) == [A.Callable [A.Boolean] A.Boolean])
+    "callable member changed its containing value carrier"
+  sig <- either (fail . show) pure (P.signature inv projection)
+  check (P.inputs sig == [P.Named "CallbackBox" []] && P.output sig == P.Callable [P.Named "Bool" []] (P.Named "Bool" []))
+    "proper projection flattened its callable result into additional inputs"
+  let identity = A.Calculation "fieldIdentity" [A.Boolean] A.Boolean (A.Input 0) []
+      invert = A.Calculation "fieldInvert" [A.Boolean] A.Boolean
+        (A.Conditional (A.Input 0) (A.Literal False) (A.Literal True)) []
+      table = M.union (M.fromList [("fieldIdentity",identity),("fieldInvert",invert)])
+        (M.mapMaybe (either (const Nothing) Just) results)
+  forM_ ["useCallbackBox","rebuildCallbackBox","callbackField"] $ \s ->
+    check (M.member s table) (show (s,M.lookup s results))
+  forM_ [("fieldIdentity",id),("fieldInvert",not)] $ \(fn,expected) -> forM_ [False,True] $ \value -> do
+    let record = R "CallbackBox" (M.singleton "callbackField" (Fn fn))
+    check (evalWith table [record,B value] (A.body (table M.! "useCallbackBox")) == B (expected value))
+      "projected callback invoked the wrong binding"
+    check (evalWith table [record] (A.body (table M.! "rebuildCallbackBox")) == record)
+      "reconstruction changed the stored callable reference"
+  check ("ref calc 'callbackField' [1]" `Text.isInfixOf` Text.unlines (A.renderShapes id shapes))
+    "callable member was emitted as an attribute or composite occurrence"
+  check ("return ref calc 'result'" `Text.isInfixOf` Text.unlines
+      (A.renderCalculation expanded shapes id (table M.! "callbackField")))
+    "projection dropped its returned callback signature"
+  forM_ ["captureValue","captureUnused","captureNested"] $ \s -> do
+    calculation <- either (fail . show) pure (results M.! s)
+    check ("{ in 'lambdaArgument" `Text.isInfixOf` Text.unlines (A.renderCalculation expanded shapes id calculation))
+      "captured lambda did not become a native body expression"
+    forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument -> do
+      let value = evalWith table [B captured] (A.body calculation)
+      check (evalWith table [value,B argument] (A.body (table M.! "useCallbackBox")) == B captured)
+        "nested or unused lambda binder changed a captured value"
+  forM_ [lambda True (constructor "red" []),lambda True (variable 9 []),lambda True (lambda True (variable 0 []))] $ \badBody -> do
+    let invalid = inv {declarations = M.insert "captureValue"
+          (set "compiled" (done 1 (constructor "makeCallbackBox" [badBody])) capture) (declarations inv)}
+    check (not (T.complete (T.generate invalid))) "ill-typed or unbound captured lambda admitted"
+  forM_ [set "index" (Number 2),set "proper" (String "WrongOwner")] $ \change -> do
+    let invalid = inv {declarations = M.adjust (set "projection" (change (get "projection" projection))) "callbackField" (declarations inv)}
+    check (M.notMember "CallbackBox" (fst (A.discover (P.inventory (P.prepare invalid)) M.empty)))
+      "malformed proper callable projection admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  pure (Text.replace "package 'AgdaModel' {" "package 'CallableFieldFixture' {" (T.modelText generated))
+
+-- Renamed compiler-shaped declarations: a stored callback and a dependent
+-- evidence callback whose result retains an application of the first field.
+-- No project-specific dispatch or source wrappers can satisfy this fixture.
+dependentCallableChecks :: Inventory -> IO Text
+dependentCallableChecks base = do
+  let indexed = declaration "IndexedValue" "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      eqType = set "parameters" (Number 1) $ declaration "ScopedEvidence" "datatype"
+        (signature [universeAt (level 0),object ["term" .= variable 0 []],object ["term" .= variable 1 []]] (universeAt (level 0)))
+      scoped = base {declarations = M.union (M.fromList [("IndexedValue",indexed),("ScopedEvidence",eqType)]) (declarations base)}
+      boolean = P.Named "Bool" []
+      fibre = P.Named "IndexedValue" [P.Runtime boolean (P.IndexInput 0)]
+      environment = [Just (P.Runtime fibre (P.IndexInput 1)),Just (P.Runtime boolean (P.IndexInput 0))]
+      evidenceType = call "ScopedEvidence" [call "IndexedValue" [variable 1 []] [],variable 0 [],variable 0 []] []
+  scopedType <- either (fail . show) pure (P.readType scoped environment evidenceType)
+  check (scopedType == P.Named "ScopedEvidence" [fibre,P.Runtime fibre (P.IndexInput 1),P.Runtime fibre (P.IndexInput 1)])
+    "index substitution captured an index inside the caller's static type argument"
+  dependent <- either (fail . show) pure (P.readType scoped []
+    (get "term" (signature [named "Bool"] (object ["term" .= call "IndexedValue" [variable 0 []] []]))))
+  check (dependent == P.Callable [boolean] (P.Named "IndexedValue" [P.Runtime boolean (P.IndexArgument 0)]))
+    "callback argument was confused with an enclosing runtime index"
+  let v i = variable i []
+      ty s xs = object ["term" .= call s xs []]
+      applied f x = set "eliminations" (toJSON (array (get "eliminations" f) ++ [application x])) f
+      callback = signature [named "Bool"] (named "Bool")
+      evidence fn = signature [named "Bool"] (ty "Receipt" [applied fn (v 0),v 0])
+      receipt = set "constructors" (toJSON (["receipt"] :: [Text])) $
+        declaration "Receipt" "datatype" (signature [named "Bool",named "Bool"] (universeAt (level 0)))
+      receiptCtor = set "family" (String "Receipt") $ declaration "receipt" "constructor"
+        (signature [named "Bool"] (ty "Receipt" [v 0,v 0]))
+      copiedReceipt = set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String "receipt")
+        $ set "name" (String "copiedReceipt") $ set "displayName" (String "copiedReceipt") receiptCtor
+      box = set "constructor" (String "bindContract") $ set "fields" (toJSON (["transform","witness"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "ContractBox" "record" (universeAt (level 0))
+      ctor = set "family" (String "ContractBox") $ declaration "bindContract" "constructor"
+        (signature [callback,evidence (v 1)] (named "ContractBox"))
+      projection s out = set "projection" (object ["proper" .= ("ContractBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration s "function" (signature [named "ContractBox"] out)
+      transform = projection "transform" callback
+      witness = projection "witness" (evidence (variable 1 ["transform"]))
+      invoke = set "type" (signature [named "ContractBox",named "Bool"]
+          (ty "Receipt" [applied (variable 1 ["transform"]) (v 0),v 0]))
+        $ operation "invokeWitness" [] "Bool" (done 2 (applied (variable 1 ["witness"]) (v 0)))
+      direct = set "type" (signature [signature [named "Bool"] (ty "Receipt" [v 0,v 0]),named "Bool"]
+          (ty "Receipt" [v 0,v 0]))
+        $ operation "invokeDependent" [] "Bool" (done 2 (applied (v 1) (v 0)))
+      rebuild = operation "rebindContract" ["ContractBox"] "ContractBox"
+        (done 1 (constructor "bindContract" [variable 0 ["transform"],variable 0 ["witness"]]))
+      make = set "type" (signature [named "Bool"] (ty "Receipt" [v 0,v 0]))
+        $ operation "makeCopiedReceipt" [] "Bool" (done 1 (constructor "copiedReceipt" [v 0]))
+      many = signature [named "Bool",named "Bool",ty "Receipt" [v 1,v 0]] (ty "Receipt" [v 2,v 1])
+      invokeMany = set "type" (signature [many,named "Bool",named "Bool",ty "Receipt" [v 1,v 0]]
+          (ty "Receipt" [v 2,v 1])) $ operation "invokeMany" [] "Bool"
+          (done 4 (applied (applied (applied (v 3) (v 2)) (v 1)) (v 0)))
+      multiBox = set "constructor" (String "bindMany") $ set "fields" (toJSON (["manyMember"] :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration "MultiBox" "record" (universeAt (level 0))
+      multiCtor = set "family" (String "MultiBox") $ declaration "bindMany" "constructor" (signature [many] (named "MultiBox"))
+      multiField = set "projection" (object ["proper" .= ("MultiBox" :: Text),"index" .= (1 :: Int)])
+        $ declaration "manyMember" "function" (signature [named "MultiBox"] many)
+      invokeField = set "type" (signature [named "MultiBox",named "Bool",named "Bool",ty "Receipt" [v 1,v 0]]
+          (ty "Receipt" [v 2,v 1])) $ operation "invokeManyField" [] "Bool"
+          (done 4 (applied (applied (applied (variable 3 ["manyMember"]) (v 2)) (v 1)) (v 0)))
+      forwarded = set "name" (String "forwardMany") $ set "displayName" (String "forwardMany")
+        $ set "compiled" (done 4 (call "invokeMany" [v 3,v 2,v 1,v 0] [])) invokeMany
+      ds = [receipt,receiptCtor,copiedReceipt,box,ctor,transform,witness,invoke,direct,rebuild,make,
+            invokeMany,multiBox,multiCtor,multiField,invokeField,forwarded]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "dependent-callbacks" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure")
+          | d <- ds,get "name" d /= String "copiedReceipt"])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (M.member "ContractBox" shapes) (show errors)
+  table <- traverse (either (fail . show) pure) results
+  forM_ ["invokeWitness","invokeDependent","rebindContract","invokeMany","invokeManyField","forwardMany"] $ \s ->
+    check (M.member s table) (show (s,results))
+  let identity = A.Calculation "receiptIdentity" [A.Boolean] A.Boolean (A.Input 0) []
+      certify = A.Calculation "certify" [A.Boolean] (A.Fibre "Receipt" [A.Input 0,A.Input 0])
+        (A.Construct "Receipt" [("constructor",A.Enumeration "Receipt.constructor-tag" "receipt")
+          ,("Receipt.index0",A.Input 0),("Receipt.index1",A.Input 0),("receipt.payload0",A.Input 0)]) []
+      identityMany = A.Calculation "identityMany" [A.Boolean,A.Boolean,A.Fibre "Receipt" [A.Input 0,A.Input 1]]
+        (A.Fibre "Receipt" [A.Input 0,A.Input 1]) (A.Input 2) []
+      runtime = M.union (M.fromList [("receiptIdentity",identity),("certify",certify),("identityMany",identityMany)]) table
+      record = R "ContractBox" (M.fromList [("transform",Fn "receiptIdentity"),("witness",Fn "certify")])
+  forM_ [False,True] $ \b -> do
+    let expected = evalWith runtime [B b] (A.body certify)
+    check (evalWith runtime [record,B b] (A.body (table M.! "invokeWitness")) == expected)
+      "dependent callback discarded or changed its evidence value"
+    check (evalWith runtime [Fn "certify",B b] (A.body (table M.! "invokeDependent")) == expected)
+      "direct callback failed to instantiate its result indices"
+    check (evalWith runtime [B b] (A.body (table M.! "makeCopiedReceipt")) == expected)
+      "module-copy constructor retained an unadmitted alias head"
+    forM_ ["invokeMany","forwardMany"] $ \s ->
+      check (evalWith runtime [Fn "identityMany",B b,B b,expected] (A.body (table M.! s)) == expected)
+        "multiargument callback lost its complete dependent evidence result"
+    check (evalWith runtime [R "MultiBox" (M.singleton "manyMember" (Fn "identityMany")),B b,B b,expected]
+      (A.body (table M.! "invokeManyField")) == expected) "stored multiargument callback changed its result"
+  check (evalWith runtime [record] (A.body (table M.! "rebindContract")) == record)
+    "reconstruction changed evidence-producing callback bindings"
+  let wrong = inv {declarations = M.adjust (set "compiled" (done 2
+        (applied (variable 1 ["witness"]) (constructor "red" [])))) "invokeWitness" (declarations inv)}
+      wrongPrepared = P.prepare wrong
+      wrongInventory = P.inventory wrongPrepared
+  check (M.member "invokeWitness" (P.failures wrongPrepared)
+    || maybe True isLeft (M.lookup "invokeWitness" (A.functions wrongInventory M.empty (fst (A.discover wrongInventory M.empty)))))
+    "wrong callback argument admitted"
+  forM_ [applied (v 3) (v 2),applied (applied (applied (v 3) (v 1)) (v 2)) (v 0),
+         applied (applied (applied (applied (v 3) (v 2)) (v 1)) (v 0)) (v 0)] $ \term -> do
+    let bad = P.prepare (inv {declarations = M.adjust (set "compiled" (done 4 term)) "invokeMany" (declarations inv)})
+        checked = P.inventory bad
+    check (M.member "invokeMany" (P.failures bad) || maybe True isLeft
+      (M.lookup "invokeMany" (A.functions checked M.empty (fst (A.discover checked M.empty)))))
+      "partial, overapplied or wrongly indexed callback admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("'Receipt.index0'" `Text.isInfixOf` T.modelText generated
+    && "ref calc 'witness'" `Text.isInfixOf` T.modelText generated)
+    "dependent evidence callback signature missing from emitted model"
+  let nativeCallback = object ["term" .= object ["tag" .= ("native-callable" :: Text)
+        ,"binds" .= True,"input" .= named "Bool","result" .= named "Bool"]]
+      functionIndexed = set "constructors" (toJSON (["functionIndex"] :: [Text]))
+        $ declaration "FunctionIndexed" "datatype" (signature [nativeCallback] (universeAt (level 0)))
+      functionIndex = set "family" (String "FunctionIndexed") $ declaration "functionIndex" "constructor"
+        (signature [nativeCallback] (ty "FunctionIndexed" [v 0]))
+      functionRelation = set "nativeFamily" (Number 0) $ set "familyDomains" (toJSON [nativeCallback])
+        $ declaration "FunctionRelation" "native-family-parameter" (universeAt (level 0))
+      unsupported = base {declarations = M.union (M.fromList
+        [(string (get "name" d),d) | d <- [functionIndexed,functionIndex,functionRelation]]) (declarations base)
+        ,modelRequirements = M.singleton "function-indices" (S.singleton ("FunctionIndexed","structure"))}
+      (unsupportedShapes,unsupportedErrors) = A.discover unsupported M.empty
+  forM_ ["FunctionIndexed","FunctionRelation"] $ \s -> do
+    check (M.notMember s unsupportedShapes) "function-valued family index emitted as a data attribute"
+    check (maybe False (Text.isInfixOf "Function-valued family indices" . Text.pack . show)
+      (M.lookup s unsupportedErrors)) "function-valued family index lacks an explicit refusal"
+  pure (Text.replace "package 'AgdaModel' {" "package 'DependentCallableFixture' {" (T.modelText generated))
+
+-- Stored type/family fields are runtime bindings, distinct from a record's
+-- declared parameters. The member keeps both that binding and its payload.
+schemaRecordChecks :: Inventory -> IO Text
+schemaRecordChecks base = do
+  check (either (const True) (const False) (P.readType base [] (object
+    ["tag" .= ("sort" :: Text),"sort" .= object ["tag" .= ("universe" :: Text)
+      ,"kind" .= ("UProp" :: Text),"level" .= level 0]])))
+    "proof-irrelevant universe admitted by the stored Set schema rule"
+  let boolean = P.Named "Bool" []
+      indexed i = P.Named "Indexed" [P.Runtime boolean i]
+      wrapper i = P.Named "Wrapper" [indexed i]
+  check (P.typeKey (wrapper (P.IndexArgument 0)) == P.typeKey (wrapper (P.IndexInput 4)))
+    "callback-local static carrier argument was not captured like a caller-local argument"
+  check (P.typeKey (P.Named "Wrapper" [P.Callable [boolean] (indexed (P.IndexArgument 0))])
+      /= P.typeKey (P.Named "Wrapper" [P.Callable [boolean] (indexed (P.IndexInput 0))]))
+    "bound callback argument was confused with a captured outer value"
+  let term t = object ["term" .= t]
+      v i = variable i []
+      apply f x = set "eliminations" (toJSON (array (get "eliminations" f) ++ [application x])) f
+      record name ctor fields = set "constructor" (String ctor) $ set "fields" (toJSON (fields :: [Text]))
+        $ set "induction" (String "Just Inductive") $ declaration name "record" (universeAt (level 1))
+      field owner name result = set "projection" (object ["proper" .= owner,"index" .= (1 :: Int)])
+        $ declaration name "function" (signature [named owner] result)
+      box = record "SchemaBox" "schemaBox" ["schemaType","schemaPayload"]
+      ctor = set "family" (String "SchemaBox") $ declaration "schemaBox" "constructor"
+        (signature [universeAt (level 0),term (v 0)] (named "SchemaBox"))
+      typ = field "SchemaBox" "schemaType" (universeAt (level 0))
+      value = field "SchemaBox" "schemaPayload" (term (variable 0 ["schemaType"]))
+      rebuild = operation "rebuildSchemaBox" ["SchemaBox"] "SchemaBox"
+        (done 1 (constructor "schemaBox" [variable 0 ["schemaType"],variable 0 ["schemaPayload"]]))
+      familyType = signature [named "Bool"] (universeAt (level 0))
+      wrapped value = object ["term" .= call "SchemaWrapper" [value] []]
+      wrapper = set "parameters" (Number 1) $ set "type" (signature [universeAt (level 0)] (universeAt (level 0)))
+        $ record "SchemaWrapper" "schemaWrapper" ["wrappedPayload"]
+      wrapperCtor = set "parameters" (Number 1) $ set "family" (String "SchemaWrapper")
+        $ declaration "schemaWrapper" "constructor" (signature [universeAt (level 0),term (v 0)] (wrapped (v 1)))
+      wrapperProjection = set "projection" (object ["proper" .= ("SchemaWrapper" :: Text),"index" .= (2 :: Int)])
+        $ declaration "wrappedPayload" "function" (signature [universeAt (level 0),wrapped (v 0)] (term (v 1)))
+      receipt familyTerm = signature [named "Bool"] (wrapped (apply familyTerm (v 0)))
+      family = record "FamilyBox" "familyBox" ["storedFamily","otherFamily","familyIndex","familyPayload","familyReceipt"]
+      familyCtor = set "family" (String "FamilyBox") $ declaration "familyBox" "constructor"
+        (signature [familyType,familyType,named "Bool",term (apply (v 2) (v 0)),receipt (v 4)] (named "FamilyBox"))
+      stored = field "FamilyBox" "storedFamily" familyType
+      other = field "FamilyBox" "otherFamily" familyType
+      index = field "FamilyBox" "familyIndex" (named "Bool")
+      payload = field "FamilyBox" "familyPayload" (term (apply (variable 0 ["storedFamily"]) (variable 0 ["familyIndex"])))
+      receiptProjection = field "FamilyBox" "familyReceipt" (receipt (variable 1 ["storedFamily"]))
+      rebuildFamily = operation "rebuildFamilyBox" ["FamilyBox"] "FamilyBox"
+        (done 1 (constructor "familyBox" [variable 0 [f] | f <- ["storedFamily","otherFamily","familyIndex","familyPayload","familyReceipt"]]))
+      dependentFields = ["dependentType","differentType","dependentFamily","dependentIndex","dependentEvidence"]
+      dependent = record "DependentSchemaBox" "dependentSchemaBox" dependentFields
+      dependentCtor = set "family" (String "DependentSchemaBox") $ declaration "dependentSchemaBox" "constructor"
+        (signature [universeAt (level 0),universeAt (level 0),signature [term (v 1)] (universeAt (level 0))
+          ,term (v 2),term (apply (v 1) (v 0))] (named "DependentSchemaBox"))
+      dependentType = field "DependentSchemaBox" "dependentType" (universeAt (level 0))
+      differentType = field "DependentSchemaBox" "differentType" (universeAt (level 0))
+      dependentFamily = field "DependentSchemaBox" "dependentFamily"
+        (signature [term (variable 0 ["dependentType"])] (universeAt (level 0)))
+      dependentIndex = field "DependentSchemaBox" "dependentIndex" (term (variable 0 ["dependentType"]))
+      dependentEvidence = field "DependentSchemaBox" "dependentEvidence"
+        (term (apply (variable 0 ["dependentFamily"]) (variable 0 ["dependentIndex"])))
+      rebuildDependent = operation "rebuildDependentSchemaBox" ["DependentSchemaBox"] "DependentSchemaBox"
+        (done 1 (constructor "dependentSchemaBox" [variable 0 [f] | f <- dependentFields]))
+      produced = record "ProducedSchema" "producedSchema" ["producedFamily"]
+      producedCtor = set "family" (String "ProducedSchema") $ declaration "producedSchema" "constructor"
+        (signature [familyType] (named "ProducedSchema"))
+      producedField = field "ProducedSchema" "producedFamily" familyType
+      indexedFamily = set "parameters" (Number 1)
+        $ set "type" (signature [named "Bool"] (universeAt (level 0)))
+        $ record "IndexedPayload" "indexedPayload" ["payloadFlag"]
+      indexedCtor = set "parameters" (Number 1) $ set "family" (String "IndexedPayload")
+        $ declaration "indexedPayload" "constructor"
+          (signature [named "Bool",named "Bool"] (term (call "IndexedPayload" [v 1] [])))
+      indexedField = set "projection" (object ["proper" .= ("IndexedPayload" :: Text),"index" .= (2 :: Int)])
+        $ declaration "payloadFlag" "function"
+          (signature [named "Bool",term (call "IndexedPayload" [v 0] [])] (named "Bool"))
+      produce = operation "produceSchema" [] "ProducedSchema"
+        (done 0 (constructor "producedSchema" [call "IndexedPayload" [] []]))
+      ds = [box,ctor,typ,value,rebuild,wrapper,wrapperCtor,wrapperProjection,family,familyCtor,stored,other,index,payload,receiptProjection,rebuildFamily
+        ,dependent,dependentCtor,dependentType,differentType,dependentFamily,dependentIndex,dependentEvidence,rebuildDependent
+        ,produced,producedCtor,producedField,indexedFamily,indexedCtor,indexedField,produce]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,modelRequirements = M.singleton "schema-fields" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- ds])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      calculations = A.functions expanded M.empty shapes
+  sig <- either (fail . show) pure (P.signature inv ctor)
+  check (P.parameters sig == 0 && length (P.inputs sig) == 2) "stored type field was mistaken for a declaration parameter"
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  check (all (`M.member` shapes) ["SchemaBox","FamilyBox","DependentSchemaBox"]) (show errors)
+  forM_ ["rebuildSchemaBox","rebuildFamilyBox","rebuildDependentSchemaBox","produceSchema"] $ \symbol ->
+    check (maybe False (either (const False) (const True)) (M.lookup symbol calculations)) (show (symbol,calculations))
+  let bad = inv {declarations = M.adjust (set "type" (signature [named "FamilyBox"]
+        (term (apply (variable 0 ["otherFamily"]) (variable 0 ["familyIndex"]))))) "familyPayload" (declarations inv)}
+      wrong = P.inventory (P.prepare bad)
+  check (M.notMember "FamilyBox" (fst (A.discover wrong M.empty)))
+    "projection from a different stored family was accepted"
+  let swapped = inv {declarations = M.adjust (set "type" (signature [named "DependentSchemaBox"]
+        (signature [term (variable 0 ["differentType"])] (universeAt (level 0))))) "dependentFamily" (declarations inv)}
+  check (M.notMember "DependentSchemaBox" (fst (A.discover (P.inventory (P.prepare swapped)) M.empty)))
+    "stored family accepted the wrong captured type field"
+  let recursive = inv {declarations = M.adjust (set "type"
+        (signature [named "Bool",term (call "IndexedPayload" [v 0] [])]
+          (term (call "IndexedPayload" [v 1] [])))) "indexedPayload" (declarations inv)}
+  check (maybe False (Text.isInfixOf "nonrecursive record family" . Text.pack . show)
+    (M.lookup "produceSchema" (P.failures (P.prepare recursive))))
+    "computed schema attempted to enumerate a recursive record family"
+  let callback = signature [named "Bool"] (named "Bool")
+      unbounded = inv {declarations = M.adjust (set "type"
+          (signature [named "Bool",callback] (term (call "IndexedPayload" [v 1] [])))) "indexedPayload"
+        $ M.adjust (set "type" (signature [named "Bool",term (call "IndexedPayload" [v 0] [])] callback))
+          "payloadFlag" (declarations inv)}
+      unboundedPrepared = P.prepare unbounded
+      unboundedInventory = P.inventory unboundedPrepared
+      unboundedShapes = fst (A.discover unboundedInventory M.empty)
+      unboundedCalculations = A.functions unboundedInventory M.empty unboundedShapes
+  check (M.null (P.failures unboundedPrepared)) (show (P.failures unboundedPrepared))
+  check (maybe False (either (Text.isInfixOf "Computed schema" . Text.pack . show) (const False))
+    (M.lookup "produceSchema" unboundedCalculations))
+    "computed schema invented an extent of arbitrary callback values"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("->exists" `Text.isInfixOf` T.modelText generated) "stored family membership constraint missing"
+  check (Trace.validate (T.modelText generated) (get "sourceCorrespondence" (T.correspondence generated)) == Right ())
+    "stored schema generated provenance does not resolve"
+  pure (Text.replace "package 'AgdaModel' {" "package 'SchemaRecordFixture' {" (T.modelText generated))
+
+-- Recursive lookups with indexed inputs reduce only under justified branch
+-- facts. Different caller expressions must meet at the same residual call.
+indexedLookupChecks :: Inventory -> IO ()
+indexedLookupChecks base = do
+  let ty s args = object ["term" .= call s args []]
+      v i = variable i []
+      family s cs = set "constructors" (toJSON (cs :: [Text])) $
+        declaration s "datatype" (signature [named "Bool"] (universeAt (level 0)))
+      cursor = set "induction" (String "Inductive") $ set "sourceModule" (String "CheckedLookup") $
+        family "Cursor" ["end","more"]
+      flag = family "LookupFlag" ["lookupFlag"]
+      ctor s owner ins out = set "family" (String owner) $ declaration s "constructor" (signature ins out)
+      end = ctor "end" "Cursor" [named "Bool"] (ty "Cursor" [v 0])
+      more = ctor "more" "Cursor" [named "Bool",ty "Cursor" [v 0]] (ty "Cursor" [v 1])
+      flagCtor = ctor "lookupFlag" "LookupFlag" [named "Bool"] (ty "LookupFlag" [v 0])
+      lookupCall b x = call "lookupIndex" [b,x] []
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "CheckedLookup")
+      op s ins out tree = safe $ set "type" (signature ins out) $ operation s [] "Bool" tree
+      lookupDef = op "lookupIndex" [named "Bool",ty "Cursor" [v 0]] (named "Bool")
+        (split 1 [("end",1,done 2 (v 0)),("more",2,done 3 (lookupCall (v 1) (v 0)))])
+      build = op "buildLookup" [named "Bool",ty "Cursor" [v 0]]
+        (ty "LookupFlag" [lookupCall (v 1) (v 0)])
+        (split 1 [("end",1,done 2 (constructor "lookupFlag" [v 0]))
+          ,("more",2,done 3 (call "buildLookup" [v 1,v 0] []))])
+      declarations' = [cursor,end,more,flag,flagCtor,lookupDef,build]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- declarations']) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedLookup" :: Text),"safe" .= True
+            ,"terminationCheck" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "lookup" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- declarations'])}
+      (shapes,shapeErrors) = A.discover inv M.empty
+      calculations = A.functions inv M.empty shapes
+      value b 0 = R "Cursor" (M.fromList [("constructor",E "Cursor.constructor-tag" "end")
+        ,("Cursor.index0",B b),("end.payload0",B b)])
+      value b n = R "Cursor" (M.fromList [("constructor",E "Cursor.constructor-tag" "more")
+        ,("Cursor.index0",B b),("more.payload0",B b),("more.payload1",value b (n-1))])
+  check (M.member "Cursor" shapes && M.member "LookupFlag" shapes) (show shapeErrors)
+  table <- traverse (either (fail . show) pure) calculations
+  forM_ [False,True] $ \b -> forM_ [0..8 :: Int] $ \n -> do
+    let expected = R "LookupFlag" (M.fromList [("constructor",E "LookupFlag.constructor-tag" "lookupFlag")
+          ,("LookupFlag.index0",B b),("lookupFlag.payload0",B b)])
+    check (evalWith table [B b,value b n] (A.body (table M.! "buildLookup")) == expected)
+      "computed indexed lookup lost its complete result"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null] $ \change -> do
+    let invalid = inv {declarations = M.adjust change "lookupIndex" (declarations inv)}
+    check (isLeft (A.functions invalid M.empty (fst (A.discover invalid M.empty)) M.! "buildLookup"))
+      "opaque, unchecked or absent recursive lookup justified an index"
+  let wrong = inv {declarations = M.adjust (set "compiled" (split 1
+        [("end",1,done 2 (constructor "lookupFlag" [constructor "false" []]))
+        ,("more",2,done 3 (call "buildLookup" [v 1,v 0] []))])) "buildLookup" (declarations inv)}
+  check (isLeft (A.functions wrong M.empty (fst (A.discover wrong M.empty)) M.! "buildLookup"))
+    "unknown computed index equality was guessed"
+
+-- Once carriers are established, an independently admitted calculation can
+-- also appear in a dependent contract. Its use must retain the same complete
+-- dependency and termination checks as an ordinary call.
+admittedIndexChecks :: Inventory -> IO ()
+admittedIndexChecks base = forM_ [("Ribbon","Bool",False),("Buffer","Tone",True)] $ \(prefix,element,leading) -> do
+  let name suffix = prefix <> suffix
+      chain = name "Chain"; leaf = name "Leaf"; step = name "Step"
+      observe = name "Observe"; peer = name "Peer"; token = name "Token"; tagged = name "Tagged"
+      keep = name "Keep"; relay = name "Relay"; via = name "Via"
+      v i = variable i []
+      ty s args = object ["term" .= call s args []]
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "CheckedAdmission")
+      inductive = set "induction" (String "Inductive") . set "sourceModule" (String "CheckedAdmission")
+      ctor s owner ins out = set "family" (String owner) $ declaration s "constructor" (signature ins out)
+      op s ins out body = safe $ set "type" (signature ins out) $ operation s [] element body
+      optional = [named "Bool" | leading]
+      offset = length optional
+      prefixArgs depth = [v (depth-1) | leading]
+      inspect s = op s [named chain] (named element) (split 0
+        [(leaf,1,done 1 (v 0)),(step,1,done 1 (call (if s == observe then peer else observe) [v 0] []))])
+      additions =
+        [inductive $ set "constructors" (toJSON [leaf,step]) $ declaration chain "datatype" (universeAt (level 0))
+        ,ctor leaf chain [named element] (named chain),ctor step chain [named chain] (named chain)
+        ,inductive $ set "constructors" (toJSON [tagged]) $ declaration token "datatype"
+          (signature [named element] (universeAt (level 0)))
+        ,ctor tagged token [named element] (ty token [v 0]),inspect observe,inspect peer
+        ,op keep (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (ty token [call observe [v 1] []]) (done (offset+2) (v 0))
+        ,op relay (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (named element) (done (offset+2) (call observe [v 1] []))
+        ,op via (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (ty token [call relay (prefixArgs (offset+2) ++ [v 1,v 0]) []])
+          (done (offset+2) (call keep (prefixArgs (offset+2) ++ [v 1,v 0]) []))]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedAdmission" :: Text),"safe" .= True
+            ,"terminationCheck" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "admission" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- additions])}
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover inv finite)
+      results context = A.functions context finite shapes
+      payloads = if element == "Bool" then [B False,B True] else [E "Tone" "red",E "Tone" "blue"]
+      value x 0 = R chain (M.fromList [("constructor",E (chain <> ".constructor-tag") leaf),(leaf <> ".payload0",x)])
+      value x n = R chain (M.fromList [("constructor",E (chain <> ".constructor-tag") step),(step <> ".payload0",value x (n-1))])
+      taggedValue x = R token (M.fromList [("constructor",E (token <> ".constructor-tag") tagged)
+        ,(token <> ".index0",x),(tagged <> ".payload0",x)])
+      refused context = do
+        let table = results context
+        check (all (maybe True isLeft . (`M.lookup` table)) [keep,relay,via])
+          "unadmitted calculation justified a dependent contract"
+  check (all (`M.member` shapes) [chain,token]) "independent carrier discovery failed"
+  -- The helper bodies must already work independently of their dependent users.
+  forM_ [observe,peer] $ \s -> check (either (const False) (const True) (results inv M.! s))
+    "ordinary safely recursive helper was not admitted"
+  table <- traverse (either (fail . show) pure) (results inv)
+  forM_ payloads $ \x -> forM_ [0..5 :: Int] $ \depth -> do
+    let args = [B True | leading] ++ [value x depth,taggedValue x]
+    forM_ [keep,via] $ \s -> check (evalWith table args (A.body (table M.! s)) == taggedValue x)
+      "dependent helper admission changed the complete indexed value"
+    check (evalWith table args (A.body (table M.! relay)) == x) "dependent helper chain changed its result"
+  check (S.member observe (A.dependencies (table M.! keep)) && S.member relay (A.dependencies (table M.! via)))
+    "index-only dependencies disappeared from admitted calculations"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null
+      ,set "compiled" (done 1 (call "UnavailableHelper" [v 0] []))] $ \change ->
+    refused inv {declarations = M.adjust change peer (declarations inv)}
+  refused inv {document = set "checking" (toJSON ([] :: [Value])) (document inv)}
+  -- A helper precondition cannot silently disappear when the helper is used
+  -- only in a type. Conditional helpers require a separate applicability rule.
+  refused inv {declarations = M.adjust (set "closureIndexEquations" (toJSON [object
+    ["domain" .= named "Bool","left" .= constructor "true" [],"right" .= constructor "false" []]])) observe (declarations inv)}
+  let wrong = inv {declarations = M.adjust (set "type" (signature (optional ++ [named chain,named element])
+        (ty token [call observe [v 0] []]))) keep (declarations inv)}
+  check (isLeft (results wrong M.! keep)) "computed helper accepted the wrong argument carrier"
+  let unrelated = name "Unrelated"
+      badEquality = inv {declarations = M.insert unrelated (inspect unrelated) $
+          M.adjust (set "type" (signature (optional ++ [named chain,ty token [call observe [v 0] []]])
+            (ty token [call unrelated [v 1] []]))) keep (declarations inv)
+        ,modelRequirements = M.map (S.insert (unrelated,"behavior")) (modelRequirements inv)}
+  check (isLeft (results badEquality M.! keep)) "distinct opaque recursive computations were equated"
+  -- Discovery cannot bootstrap a carrier from the helper that consumes it.
+  let cyclic = name "Cyclic"; create = name "CyclicValue"; readCyclic = name "ReadCyclic"
+      cycleDefs = [inductive $ set "constructors" (toJSON [create]) $ declaration cyclic "datatype"
+          (signature [named element] (universeAt (level 0)))
+        ,ctor create cyclic [ty cyclic [constructor (if element == "Bool" then "true" else "red") []]]
+          (ty cyclic [call readCyclic [v 0] []])
+        ,op readCyclic [ty cyclic [constructor (if element == "Bool" then "true" else "red") []]]
+          (named element) (done 1 (constructor (if element == "Bool" then "true" else "red") []))]
+      circular = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- cycleDefs]) (declarations inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [(cyclic,"structure"),(create,"structure"),(readCyclic,"behavior")]) (modelRequirements inv)}
+      circularShapes = fst (A.discover circular finite)
+  check (M.notMember cyclic circularShapes && isLeft (A.functions circular finite circularShapes M.! readCyclic))
+    "a helper justified admission of its own unsupported carrier"
+
 -- Computed finite indices require checked bodies, not merely signatures.
+indexClosureChecks :: Inventory -> IO ()
+indexClosureChecks base = do
+  let closure name body = A.Lambda [(name,A.Boolean)] A.Boolean body
+      reference name = A.Iterator name A.Boolean
+      nested outer inner = closure outer (closure inner (reference outer))
+  check (closure "x" (reference "x") == closure "y" (reference "y")) "closure comparison depends on binder spelling"
+  check (nested "outer" "inner" == nested "a" "b") "nested closure comparison lost alpha equivalence"
+  check (nested "outer" "inner" /= closure "a" (closure "b" (reference "b")))
+    "closure comparison confused an outer capture with an inner binder"
+  check (closure "x" (A.Input 0) /= closure "y" (A.Input 1)) "closure comparison discarded captured values"
+  let boolean = named "Bool"
+      v i = variable i []
+      ty s xs = object ["term" .= call s xs []]
+      callback = signature [boolean] boolean
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "IndexClosures")
+      fn s ins out body = safe $ set "type" (signature ins out) $ operation s [] "Bool" body
+      xor = safe $ operation "indexXor" ["Bool","Bool"] "Bool" $ split 0
+        [("false",0,done 1 (v 0)),("true",0,split 0
+          [("false",0,done 0 (constructor "true" [])),("true",0,done 0 (constructor "false" []))])]
+      invoke = fn "indexInvoke" [callback,boolean] boolean (done 2 (set "eliminations" (toJSON [application (v 0)]) (v 1)))
+      lambda body = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= body]]
+      partial = call "indexXor" [v 1] []
+      explicit = lambda (call "indexXor" [v 2,v 0] [])
+      index closure = call "indexInvoke" [closure,v 0] []
+      flag = set "constructors" (toJSON (["indexFlag"] :: [Text])) $
+        declaration "IndexFlag" "datatype" (signature [boolean] (universeAt (level 0)))
+      ctor = set "family" (String "IndexFlag") $ declaration "indexFlag" "constructor"
+        (signature [boolean] (ty "IndexFlag" [v 0]))
+      carry s closure = fn s [boolean,boolean,ty "IndexFlag" [index closure]]
+        (ty "IndexFlag" [call "indexInvoke" [Reduction.shift 1 closure,v 1] []]) (done 3 (v 0))
+      explicitCarry = carry "explicitIndexClosure" explicit
+      partialCarry = carry "partialIndexClosure" partial
+      betaCarry = fn "appliedIndexClosure" [boolean,boolean,ty "IndexFlag" [index explicit]]
+        (ty "IndexFlag" [call "indexXor" [v 2,v 1] []]) (done 3 (v 0))
+      additions = [xor,invoke,flag,ctor,explicitCarry,partialCarry,betaCarry]
+      inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $
+          M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "index-closures") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("index-closures" :: Text)],"definitions" .= additions]]) $
+          set "checking" (toJSON [object ["module" .= ("IndexClosures" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "closures" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- additions])}
+      env = [Just (P.Runtime (P.Named "Bool" []) (P.IndexInput 1)),Just (P.Runtime (P.Named "Bool" []) (P.IndexInput 0))]
+  explicitType <- either (fail . show) pure (P.readType inv env (index explicit))
+  partialType <- either (fail . show) pure (P.readType inv env (index partial))
+  check (explicitType == partialType) "eta-expanded index closure differs from its explicit lambda"
+  forM_ [lambda (constructor "red" []),call "indexXor" [constructor "red" []] [],
+      object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["body" .= v 0]]] $ \invalid ->
+    check (isLeft (P.readType inv env (index invalid))) "ill-typed or malformed index closure admitted"
+  let generated = T.generate inv
+  check (T.complete generated) (show (T.diagnostics generated))
+  check ("lambdaArgument" `Text.isInfixOf` T.modelText generated) "index callback was erased from its boundary constraint"
+  forM_ [set "opaque" (Bool True) xor,set "compiled" Null xor,
+      set "compiled" (done 2 (call "missingIndexBody" [v 0] [])) xor] $ \broken ->
+    check (not (T.complete (T.generate inv {declarations = M.insert "indexXor" broken (declarations inv)})))
+      "opaque or missing computation was admitted through an index closure"
+
 computedChecks :: Inventory -> IO ()
 computedChecks base = do
   let piType binds a b = object ["term" .= object ["tag" .= ("pi" :: Text)
@@ -925,8 +2152,15 @@ computedChecks base = do
       on = declaration "computedOn" "constructor" (ty "ComputedChoice" [true])
       fixedChoice = function "computedChoiceRead" (piType False (ty "ComputedChoice" [invert false]) (named "Bool"))
         (split 0 [("computedOn",0,done 0 true)])
+      omitted = set "projection" (object ["proper" .= Null,"index" .= (2 :: Int)]) $
+        function "omittedIndex" (boolPi (piType False (ty "ComputedFlag" [variable 0 []]) (named "Bool")))
+          (split 0 [("computedFlag",1,done 1 (variable 0 []))])
+      omittedTerm = call "omittedIndex" [variable 0 []] []
+      omittedCaller = function "computedFromOmitted" (boolPi
+        (piType True (ty "ComputedFlag" [variable 0 []]) (ty "ComputedFlag" [omittedTerm])))
+        (done 2 (constructor "computedFlag" [omittedTerm]))
       additions = [inversion,toneIndex,chain,flags,flagCtor,family,member,make,consume,fixed,branch,alias
-        ,choice,off,on,fixedChoice]
+        ,choice,off,on,fixedChoice,omitted,omittedCaller]
       defs = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
       added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
       inv = base {declarations = defs,modelRequirements = M.map (`S.union` added) (modelRequirements base)}
@@ -953,6 +2187,8 @@ computedChecks base = do
     check (calculate "consumeComputed" [B b,f] == f) "computed branch equality was lost during reconstruction"
     check (calculate "branchComputed" [B b] == f) "finite input branch did not reduce its index helper"
     check (calculate "fixedComputed" [B b] == flagged True) "literal index calculation did not reduce"
+    check (calculate "computedFromOmitted" [B b,flagged b] == flagged b)
+      "computed helper lost its recovered runtime index or complete result"
   check (calculate "computedChoiceRead" [R "ComputedChoice" (M.fromList
     [("constructor",E "ComputedChoice.constructor-tag" "computedOn"),("ComputedChoice.index0",B True)])] == B True)
     "computed closed index did not eliminate an impossible branch"
@@ -979,6 +2215,9 @@ computedChecks base = do
   bad (set "type" (boolPi (ty "ComputedFlag" [call "invertIndex" [] []])) branch) "partial index helper admitted"
   bad (set "type" (boolPi (ty "ComputedFlag" [invert (constructor "red" [])])) branch)
     "index helper accepted wrong argument domain"
+  bad (set "projection" Null omitted) "computed index guessed an omission without checked metadata"
+  bad (set "type" (boolPi (piType False (named "Bool") (named "Bool"))) omitted)
+    "computed index guessed an unconstrained omitted runtime parameter"
 
 -- Exercise the real rule failures and complete report assembly, rather than
 -- classifying message strings. Changing wording must never change a code.
@@ -1333,11 +2572,604 @@ naturalChecks = do
       forM_ [("add",Z (a+b)),("monus",Z (max 0 (a-b))),("multiply",Z (a*b)),("less",B (a<b)),("equal",B (a==b))] $ \(name,expected) ->
         check (evalWith table [Z a,Z b] (A.body (table M.! name)) == expected) "native arithmetic changed unbounded natural semantics"
   check (length (A.calculationContracts id (table M.! "add")) == 3) "natural boundary omitted finiteness"
+  let indexContext = reverse [Just (P.Runtime (P.Named "Nat" []) (P.IndexInput i)) | i <- [0,1]]
+  forM_ ["add","sumNatural"] $ \symbol -> do
+    let indexed = inv {declarations = M.insert symbol (primitive symbol "PrimNatPlus" "Nat") (declarations inv)}
+        addition = call symbol [variable 1 [],variable 0 []] []
+    check (P.readType indexed indexContext addition == Right
+      (P.Runtime (P.Named "Nat" []) (P.IndexCall symbol [] [P.IndexInput 0,P.IndexInput 1])))
+      "primitive addition in a dependent index was mistaken for a named carrier"
+    forM_ [[variable 0 []],[variable 1 [],variable 0 [],literal 0],[literal (-1),variable 0 []]] $ \arguments ->
+      check (isLeft (P.readType indexed indexContext (call symbol arguments [])))
+        "primitive index admitted an incomplete, excess, or invalid argument"
   let malformed = primitive "bad" "PrimNatPlus" "Bool"
       missing = set "primitive" Null (primitive "bad" "PrimNatPlus" "Nat")
       negative = operation "negative" [] "Nat" (done 0 (literal (-1)))
   forM_ [malformed,missing,negative] $ \d ->
     check (isLeft (A.function inv M.empty M.empty d)) "invalid numeric schema admitted"
+  let v i = variable i []
+      plus a b = call "add" [a,b] []
+      successor x = constructor "suc" [x]
+      indexed x = object ["term" .= call "Measured" [x] []]
+      measured = set "constructors" (toJSON (["measured"] :: [Text])) $
+        declaration "Measured" "datatype" (signature [named "Nat"] universe)
+      measuredCtor = set "family" (String "Measured") $
+        declaration "measured" "constructor" (signature [named "Nat"] (indexed (v 0)))
+      nested = set "sourceSyntax" (toJSON [object []]) $
+        set "compiled" (done 2 (constructor "measured" [successor (plus (v 1) (v 0))])) $
+        declaration "nestedAddition" "function"
+          (signature [named "Nat",named "Nat"] (indexed (plus (successor (v 1)) (v 0))))
+      branching = set "sourceSyntax" (toJSON [object []]) $
+        set "compiled" (split 0 [("zero",0,done 1 (constructor "measured" [v 0]))
+          ,("suc",1,done 2 (constructor "measured" [successor (plus (v 1) (v 0))]))]) $
+        declaration "branchAddition" "function"
+          (signature [named "Nat",named "Nat"] (indexed (plus (v 1) (v 0))))
+      additions = [measured,measuredCtor,nested,branching]
+      indexedInv = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations inv)
+        ,modelRequirements = M.insert "arithmetic-indices" (S.fromList
+          [("Measured","structure"),("measured","structure"),("nestedAddition","behavior"),("branchAddition","behavior")]) (modelRequirements inv)}
+      (shapes,errors) = A.discover indexedInv M.empty
+  check (M.null errors) (show errors)
+  nestedTable <- traverse (either (fail . show) pure) (A.functions indexedInv M.empty shapes)
+  forM_ [(0,0),(4,7),(10^(100 :: Int),10^(101 :: Int))] $ \(a,b) -> do
+    let result = R "Measured" (M.fromList [("constructor",E "Measured.constructor-tag" "measured")
+          ,("Measured.index0",Z (a+b+1)),("measured.payload0",Z (a+b+1))])
+    check (evalWith nestedTable [Z a,Z b] (A.body (nestedTable M.! "nestedAddition")) == result)
+      "addition under a successor lost its complete indexed result"
+    let branchResult = R "Measured" (M.fromList [("constructor",E "Measured.constructor-tag" "measured")
+          ,("Measured.index0",Z (a+b)),("measured.payload0",Z (a+b))])
+    check (evalWith nestedTable [Z a,Z b] (A.body (nestedTable M.! "branchAddition")) == branchResult)
+      "natural branch refinement failed to preserve its arithmetic index"
+  let wrong = indexedInv {declarations = M.adjust
+        (set "compiled" (done 2 (constructor "measured" [successor (successor (plus (v 1) (v 0)))])))
+        "nestedAddition" (declarations indexedInv)}
+  check (isLeft (A.functions wrong M.empty shapes M.! "nestedAddition"))
+    "different arithmetic result indices were treated as equal"
+  let noBranch = indexedInv {declarations = M.adjust (set "compiled" (done 2
+        (constructor "measured" [successor (plus (call "monus" [v 1,literal 1] []) (v 0))])))
+        "branchAddition" (declarations indexedInv)}
+  check (isLeft (A.functions noBranch M.empty shapes M.! "branchAddition"))
+    "predecessor/successor equality escaped its positive natural branch"
+
+constructorFibreChecks :: IO ()
+constructorFibreChecks = do
+  let piType binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      proof value = object ["term" .= call "Proof" [value] []]
+      absurd n = object ["tag" .= ("absurd" :: Text),"binders" .= replicate n Null]
+      token c fields = A.Construct "Token" (("constructor",A.Enumeration "Token.constructor-tag" c):fields)
+      witness = A.Constructor "witness" [("witness.payload0",A.Boolean)]
+        [token "packed" [("packed.payload0",A.Input 0)]]
+      tokenShape = A.Shape "Token" False [A.Constructor "packed" [("packed.payload0",A.Boolean)] [],A.Constructor "empty" [] []] []
+      proofShape = A.Shape "Proof" False [witness] [A.Named "Token"]
+      shapes = M.fromList [("Token",tokenShape),("Proof",proofShape)]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+      decoder = set "type" (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool")))
+        $ operation "unpack" [] "Bool" (split 0
+          [("packed",1,done 2 (variable 1 [])),("empty",0,absurd 1)])
+  calc <- either (fail . show) pure (A.function inv M.empty shapes decoder)
+  let lazyToken = set "lazy" (Bool True) (split 0 [("packed",1,done 2 (variable 1 []))])
+      witnessed = set "compiled" (split 1 [("witness",1,lazyToken)]) decoder
+  witnessedCalc <- either (fail . show) pure (A.function inv M.empty shapes witnessed)
+  let pairedWitness = set "type" (piType True (named "Token")
+        (piType False (proof (variable 0 []))
+          (piType False (proof (variable 0 [])) (proof (variable 0 [])))))
+        $ set "compiled" (split 1 [("witness",1,split 2
+            [("witness",1,done 3 (constructor "witness" [variable 0 []]))])]) decoder
+  pairedCalc <- either (fail . show) pure (A.function inv M.empty shapes pairedWitness)
+  let reconstruct = set "type" (signature [named "Token",proof (variable 0 [])] (proof (variable 1 []))) $
+        set "compiled" (split 0 [("packed",1,done 2 (constructor "witness" [variable 1 []]))
+          ,("empty",0,absurd 1)]) decoder
+  _ <- either (fail . show) pure (A.function inv M.empty shapes reconstruct)
+  let changed = set "type" (signature [named "Token",named "Bool",proof (variable 1 [])] (proof (variable 2 []))) $
+        set "compiled" (split 0 [("packed",1,done 3 (constructor "witness" [variable 1 []]))
+          ,("empty",0,absurd 2)]) reconstruct
+  check (isLeft (A.function inv M.empty shapes changed))
+    "constructor reconstruction ignored a changed payload"
+  let tokenList = (A.Shape "TokenList" False [A.Constructor "noTokens" [] []
+        ,A.Constructor "moreTokens" [("head",A.Named "Token"),("tail",A.Named "TokenList")] []] [])
+        {A.sequenceElement = Just (A.Named "Token")}
+      listWitness = A.Shape "TokenListWitness" False
+        [A.Constructor "tokenListWitness" [("tokens",A.Named "TokenList")] [A.Input 0]] [A.Named "TokenList"]
+      listShapes = M.insert "TokenList" tokenList $ M.insert "TokenListWitness" listWitness shapes
+      listResult n = object ["term" .= call "TokenListWitness" [variable n []] []]
+      witnessList term = constructor "tokenListWitness" [term]
+      rebuild = set "type" (signature [named "TokenList"] (listResult 0)) $ set "compiled" (split 0
+        [("noTokens",0,done 0 (witnessList (constructor "noTokens" [])))
+        ,("moreTokens",2,split 0
+          [("packed",1,done 2 (witnessList (constructor "moreTokens" [constructor "packed" [variable 1 []],variable 0 []])))
+          ,("empty",0,done 1 (witnessList (constructor "moreTokens" [constructor "empty" [],variable 0 []])))])]) decoder
+  _ <- either (fail . show) pure (A.function inv M.empty listShapes rebuild)
+  let changedHead = set "type" (signature [named "TokenList",named "Bool"] (listResult 1)) $ set "compiled" (split 0
+        [("noTokens",0,done 1 (witnessList (constructor "noTokens" [])))
+        ,("moreTokens",2,split 0
+          [("packed",1,done 3 (witnessList (constructor "moreTokens" [constructor "packed" [variable 0 []],variable 1 []])))
+          ,("empty",0,done 2 (witnessList (constructor "moreTokens" [constructor "empty" [],variable 1 []])))])]) rebuild
+  check (isLeft (A.function inv M.empty listShapes changedHead))
+    "list-index reconstruction ignored a changed head payload"
+  forM_ [False,True] $ \b -> do
+    let value = R "Token" (M.fromList [("constructor",E "Token.constructor-tag" "packed"),("packed.payload0",B b)])
+    check (eval [value,N] (A.body calc) == B b) "constructor-index refinement changed a valid payload"
+    let proofValue = R "Proof" (M.fromList [("constructor",E "Proof.constructor-tag" "witness")
+          ,("Proof.index0",value),("witness.payload0",B b)])
+    check (eval [value,proofValue] (A.body witnessedCalc) == B b)
+      "lazy match ignored the constructor established by a dependent witness"
+    check (eval [value,proofValue,proofValue] (A.body pairedCalc) == proofValue)
+      "equal constructor indices did not equate corresponding witness payloads"
+  check (isLeft (A.function inv M.empty shapes (set "compiled" lazyToken decoder)))
+    "lazy match guessed a constructor without a preceding witness split"
+  let unrelatedLazy = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool"))))
+        $ set "compiled" (split 2 [("witness",1,set "lazy" (Bool True)
+            (split 0 [("packed",1,done 3 (variable 2 []))]))]) decoder
+  check (isLeft (A.function inv M.empty shapes unrelatedLazy))
+    "a dependent witness refined an unrelated token input"
+  let inhabited = proofShape {A.variants = [witness,A.Constructor "emptyWitness" [] [token "empty" []]]}
+  check (isLeft (A.function inv M.empty (M.insert "Proof" inhabited shapes) decoder))
+    "absurd branch admitted despite an inhabitant at the selected constructor"
+  let missingPayload = set "compiled" (split 0 [("packed",1,absurd 2),("empty",0,absurd 1)]) decoder
+  check (isLeft (A.function inv M.empty shapes missingPayload))
+    "unknown payload was treated as evidence of an empty fibre"
+  let unrelated = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (proof (variable 0 [])) (named "Bool"))))
+        $ set "compiled" (split 0 [("packed",1,done 3 (variable 2 [])),("empty",0,absurd 2)]) decoder
+  check (isLeft (A.function inv M.empty shapes unrelated))
+    "constructor choice for another input justified an absurd branch"
+  let indexedToken c fields = A.Construct "IndexedToken"
+        (("constructor",A.Enumeration "IndexedToken.constructor-tag" c):("IndexedToken.index0",A.Input 0):fields)
+      indexedShape = A.Shape "IndexedToken" False
+        [A.Constructor "indexedPacked" [("indexedPacked.payload0",A.Boolean),("indexedPacked.payload1",A.Boolean)] [A.Input 0]
+        ,A.Constructor "indexedEmpty" [("indexedEmpty.payload0",A.Boolean)] [A.Input 0]] [A.Boolean]
+      indexedProof = A.Shape "IndexedProof" False
+        [A.Constructor "indexedWitness" [("indexedWitness.payload0",A.Boolean),("indexedWitness.payload1",A.Boolean)]
+          [A.Input 0,indexedToken "indexedPacked" [("indexedPacked.payload0",A.Input 0),("indexedPacked.payload1",A.Input 1)] ]]
+        [A.Boolean,A.Fibre "IndexedToken" [A.Input 0]]
+      indexedShapes = M.fromList [("IndexedToken",indexedShape),("IndexedProof",indexedProof)]
+      tokenType b = object ["term" .= call "IndexedToken" [b] []]
+      proofType b t = object ["term" .= call "IndexedProof" [b,t] []]
+      indexedDecoder = set "type" (piType True (named "Bool") (piType True (tokenType (variable 0 []))
+        (piType False (proofType (variable 1 []) (variable 0 [])) (named "Bool"))))
+        $ operation "indexedUnpack" [] "Bool" (split 1
+          [("indexedPacked",2,done 4 (variable 1 [])),("indexedEmpty",1,absurd 3)])
+  _ <- either (fail . show) pure (A.function inv M.empty indexedShapes indexedDecoder)
+  let indexedInhabited = indexedProof {A.variants = A.variants indexedProof ++
+        [A.Constructor "indexedEmptyWitness" [("indexedEmptyWitness.payload0",A.Boolean)]
+          [A.Input 0,indexedToken "indexedEmpty" [("indexedEmpty.payload0",A.Input 0)]] ]}
+  check (isLeft (A.function inv M.empty (M.insert "IndexedProof" indexedInhabited indexedShapes) indexedDecoder))
+    "indexed constructor tag separation ignored an inhabitant of the empty branch"
+  -- Required record fields can establish emptiness without destructuring the
+  -- record first. Its contextual index must come from this exact receiver.
+  let box = (A.Shape "ProofBox" True [A.Constructor "box"
+        [("boxToken",A.Named "Token"),("boxProof",A.Fibre "Proof" [A.Input 0])] [A.Input 0]] [A.Named "Token"])
+        {A.contextIndices = [0]}
+      boxAt value = object ["term" .= call "ProofBox" [value] []]
+      boxed = set "type" (piType True (named "Token") (piType False (boxAt (variable 0 [])) (named "Bool"))) decoder
+      boxedShapes = M.insert "ProofBox" box shapes
+  _ <- either (fail . show) pure (A.function inv M.empty boxedShapes boxed)
+  _ <- either (fail . show) pure (A.function inv M.empty
+    (M.insert "ProofBox" (box {A.contextIndices = []}) shapes) boxed)
+  check (isLeft (A.function inv M.empty (M.insert "Proof" inhabited boxedShapes) boxed))
+    "inhabited required record field justified absurdity"
+  let unrelatedBox = set "type" (piType False (named "Token")
+        (piType True (named "Token") (piType False (boxAt (variable 0 [])) (named "Bool")))) unrelated
+  check (isLeft (A.function inv M.empty boxedShapes unrelatedBox))
+    "record emptiness used another input's index"
+  let schema = (A.Shape "Schema" False [] []) {A.schemaExtent = True,A.sequenceElement = Just A.AnyValue}
+      cycleShape = A.Shape "Cycle" True [A.Constructor "cycle" [("next",A.Named "Cycle")] []] []
+      ordinary = A.Shape "Ordinary" True [A.Constructor "ordinary" [("value",A.Boolean)] []] []
+      requiredSchema = A.Shape "SchemaBox" True [A.Constructor "schemaBox" [("binding",A.Named "Schema")] []] []
+      empty = A.Shape "Empty" False [] []
+      optional = A.Shape "Optional" False [A.Constructor "missing" [] [],A.Constructor "present" [("value",A.Named "Empty")] []] []
+      negatives = M.fromList [(A.shapeSymbol sh,sh) | sh <- [schema,cycleShape,ordinary,requiredSchema,empty,optional]]
+      noEvidence result = case result of
+        Left reason -> D.message reason == "Absurd branch has no established empty index fibre"
+        Right _ -> False
+  forM_ ["Schema","Cycle","Ordinary","SchemaBox","Optional"] $ \owner ->
+    check (noEvidence (A.function inv M.empty negatives (operation "falseAbsurd" [owner] "Bool" (absurd 1))))
+      ("unestablished empty carrier justified absurdity: " ++ Text.unpack owner)
+  let indexedSchema = schema {A.indexTypes = [A.Boolean]}
+      indexedBinding = object ["term" .= call "Schema" [variable 0 []] []]
+  check (noEvidence (A.function inv M.empty (M.singleton "Schema" indexedSchema)
+    (set "type" (signature [named "Bool",indexedBinding] (named "Bool"))
+      (operation "falseIndexedAbsurd" [] "Bool" (absurd 2)))))
+    "indexed schema binding with no constructor metadata counted as empty"
+
+constructorScopeChecks :: IO ()
+constructorScopeChecks = do
+  let universe = universeAt (level 0)
+      arrow binds domain codomain = object ["term" .= object ["tag" .= ("pi" :: Text)
+        ,"domain" .= object ["info" .= info,"type" .= domain]
+        ,"codomain" .= object ["binds" .= binds,"body" .= codomain]]]
+      applied name args = object ["term" .= call name args []]
+      var i = object ["term" .= variable i []]
+      bool = P.Named "Bool" []
+      boolean = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" universe
+      booleanConstructor c = set "family" (String "Bool") $ declaration c "constructor" (named "Bool")
+      wrapped value = applied "Wrapped" [value]
+      wrapper = set "parameters" (Number 1) $ declaration "Wrapped" "datatype" (arrow False (named "Bool") universe)
+      mark = set "parameters" (Number 1) $ set "family" (String "Wrapped") $ declaration "mark" "constructor"
+        (arrow True (named "Bool") (arrow True (named "Bool") (wrapped (variable 1 []))))
+      indexed = declaration "Indexed" "datatype" (arrow True (named "Bool")
+        (arrow False (wrapped (variable 0 [])) universe))
+      packed = set "parameters" (Number 1) $ declaration "Packed" "record" (arrow False (named "Bool") universe)
+      projection = set "projection" (object ["proper" .= ("Packed" :: Text),"index" .= (2 :: Int)])
+        $ declaration "value" "function" (arrow True (named "Bool")
+          (arrow True (applied "Packed" [variable 0 []]) (wrapped (variable 1 []))))
+      holder = set "parameters" (Number 1) $ declaration "Holder" "datatype" (arrow True universe universe)
+      hold = set "parameters" (Number 1) $ set "family" (String "Holder") $ declaration "hold" "constructor"
+        (arrow True universe (arrow False (var 0) (applied "Holder" [variable 0 []])))
+      holding = set "parameters" (Number 1) $ declaration "Holding" "datatype" (arrow True universe
+        (arrow False (applied "Holder" [variable 0 []]) universe))
+      defs = [boolean,booleanConstructor "true",booleanConstructor "false",wrapper,mark,indexed,packed,projection,holder,hold,holding]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty M.empty
+      yes = P.IndexConstructor "true" [] []
+      no = P.IndexConstructor "false" [] []
+      member = P.Named "Wrapped" [P.Runtime bool yes]
+      term = call "Indexed" [constructor "true" [],constructor "mark" [constructor "false" []]] []
+  check (P.readType inv [] term == Right (P.Named "Indexed"
+    [P.Runtime bool yes,P.Runtime member (P.IndexConstructor "mark" [] [no])]))
+    "omitted runtime constructor parameter was not recovered from the preceding family index"
+  check (isLeft (P.readType inv [] (call "Indexed" [constructor "true" [],constructor "mark" []] [])))
+    "omitted value parameter recovery admitted a missing constructor payload"
+  check (P.readType inv [Just (P.Runtime (P.Named "Packed" [P.Runtime bool yes]) (P.IndexInput 7))]
+    (variable 0 ["value"]) == Right (P.Runtime member (P.IndexProject "value" [] (P.IndexInput 7))))
+    "record projection lost its runtime parameter or actual receiver"
+  let contextual = P.Named "Wrapped" [P.Runtime bool (P.IndexInput 0)]
+      holderTerm = call "Holding" [variable 1 [],constructor "hold" [variable 0 []]] []
+      expected = P.Named "Holding" [contextual,P.Runtime (P.Named "Holder" [contextual])
+        (P.IndexConstructor "hold" [contextual] [P.IndexInput 5])]
+  check (P.readType inv [Just (P.Runtime contextual (P.IndexInput 5)),Just contextual] holderTerm == Right expected)
+    "constructor substitution captured an index belonging to its caller's static argument"
+  check (isLeft (P.readType inv [Just (P.Runtime (P.Named "Wrapped" [P.Runtime bool (P.IndexInput 1)]) (P.IndexInput 5)),Just contextual] holderTerm))
+    "constructor substitution admitted a payload at a different caller index"
+
+-- A constructor fixes an earlier index, including occurrences nested inside a
+-- generic result. Keep a second, unrelated index distinct in the negative case.
+sharedIndexChecks :: IO ()
+sharedIndexChecks = do
+  let ty s xs = object ["term" .= call s xs []]
+      v i = variable i []
+      sameFlag = A.Shape "SameFlag" False
+        [A.Constructor "sameFlag" [("same.value",A.Boolean)] [A.Input 0,A.Input 0]] [A.Boolean,A.Boolean]
+      payload = A.Shape "FlagPayload" False
+        [A.Constructor "flagPayload" [("flag",A.Boolean),("value",A.Boolean)] [A.Input 0]] [A.Boolean]
+      shapes = M.fromList [(A.shapeSymbol s,s) | s <- [sameFlag,payload]]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+      transport = set "type" (signature [named "Bool",named "Bool",ty "SameFlag" [v 1,v 0],ty "FlagPayload" [v 2]]
+        (ty "FlagPayload" [v 2])) $ operation "transport" [] "Bool"
+        (split 2 [("sameFlag",1,done 4 (v 0))])
+  _ <- either (fail . show) pure (A.function inv M.empty shapes transport)
+  check (isLeft (A.function inv M.empty shapes (set "compiled" (done 4 (v 0)) transport)))
+    "an unsplit equality witness supplied a branch-local index equation"
+  let unrelated = set "type" (signature [named "Bool",named "Bool",ty "SameFlag" [v 0,v 0],ty "FlagPayload" [v 2]]
+        (ty "FlagPayload" [v 2])) transport
+  check (isLeft (A.function inv M.empty shapes unrelated))
+    "shared constructor fields equated unrelated inputs"
+
+nestedSequencePatternChecks :: IO ()
+nestedSequencePatternChecks = do
+  let list xs = A.Construct "List" [("items",A.Sequence xs)]
+      listShape = (A.Shape "List" False [A.Constructor "nil" [] [],A.Constructor "cons"
+        [("head",A.Boolean),("tail",A.Named "List")] []] []) {A.sequenceElement = Just A.Boolean}
+      classification = A.Shape "ListClass" False
+        [A.Constructor "emptyClass" [] [list []]
+        ,A.Constructor "oneClass" [("one.head",A.Boolean)] [list [A.Input 0]]
+        ,A.Constructor "manyClass" [("many.head",A.Boolean),("many.second",A.Boolean),("many.tail",A.Named "List")]
+          [list [A.Input 0,A.Input 1,A.Project (A.Input 2) "items"]]] [A.Named "List"]
+      shapes = M.fromList [(A.shapeSymbol s,s) | s <- [listShape,classification]]
+      ty = signature [named "List"] (object ["term" .= call "ListClass" [variable 0 []] []])
+      body = split 0 [("nil",0,done 0 (constructor "emptyClass" [])),("cons",2,split 1
+        [("nil",0,done 1 (constructor "oneClass" [variable 0 []]))
+        ,("cons",2,done 3 (constructor "manyClass" [variable 2 [],variable 1 [],variable 0 []]))])]
+      op = set "type" ty $ operation "classifyList" [] "Bool" body
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]) M.empty M.empty M.empty
+  calc <- either (fail . show) pure (A.function inv M.empty shapes op)
+  forM_ [[],[False],[True],[True,False],[False,True,False]] $ \xs -> do
+    let actual = eval [R "List" (M.singleton "items" (Seq (map B xs)))] (A.body calc)
+        tag = if null xs then "emptyClass" else if length xs == 1 then "oneClass" else "manyClass"
+    case actual of
+      R "ListClass" fields -> check (M.lookup "constructor" fields == Just (E "ListClass.constructor-tag" tag))
+        "nested list pattern selected the wrong classification"
+      _ -> fail "nested list pattern did not return its complete witness"
+  let wrong = set "compiled" (split 0 [("nil",0,done 0 (constructor "emptyClass" []))
+        ,("cons",2,done 2 (constructor "oneClass" [variable 1 []]))]) op
+  check (isLeft (A.function inv M.empty shapes wrong))
+    "list tail was assumed empty without its constructor branch"
+  let singletonWitness = object ["term" .= call "ListClass"
+        [constructor "cons" [variable 0 [],constructor "nil" []]] []]
+      selectOne = set "type" (signature [named "Bool",singletonWitness] (named "Bool")) $
+        operation "selectOne" [] "Bool" (split 1 [("oneClass",1,done 2 (variable 0 []))])
+      constructorInv = inv {declarations = M.fromList
+        [("nil",set "family" (String "List") (declaration "nil" "constructor" (named "List")))
+        ,("cons",set "family" (String "List") (declaration "cons" "constructor" (signature [named "Bool",named "List"] (named "List"))))]}
+  _ <- either (fail . show) pure (A.function constructorInv M.empty shapes selectOne)
+  let unknown = set "type" (signature [named "List",object ["term" .= call "ListClass" [variable 0 []] []]] (named "Bool")) selectOne
+  check (isLeft (A.function constructorInv M.empty shapes unknown))
+    "unknown sequence length justified omitting a constructor branch"
+  let starts = A.Shape "Starts" False
+        [A.Constructor "startsTrue" [("rest",A.Named "List")] [list [A.Literal True,A.Project (A.Input 0) "items"]]
+        ,A.Constructor "startsFalse" [("rest",A.Named "List")] [list [A.Literal False,A.Project (A.Input 0) "items"]]] [A.Named "List"]
+      extended = M.insert "Starts" starts shapes
+      registry = object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text),"false" .= ("false" :: Text)]
+      source = constructorInv {document = set "builtins" registry (document constructorInv)}
+      startsAt head tail = object ["term" .= call "Starts" [constructor "cons" [head,tail]] []]
+      selectTrue = set "type" (signature [named "List",startsAt (constructor "true" []) (variable 0 [])] (named "Bool")) $
+        operation "selectTrue" [] "Bool" (split 1 [("startsTrue",1,done 2 (constructor "true" []))])
+  _ <- either (fail . show) pure (A.function source M.empty extended selectTrue)
+  let unknownHead = set "type" (signature [named "Bool",named "List",startsAt (variable 1 []) (variable 0 [])] (named "Bool")) $
+        set "compiled" (split 2 [("startsTrue",1,done 3 (constructor "true" []))]) selectTrue
+  check (isLeft (A.function source M.empty extended unknownHead))
+    "unknown list head justified omitting an indexed constructor"
+
+earlierIndexChecks :: IO ()
+earlierIndexChecks = do
+  let bool = P.Named "Bool" []
+      flag i = P.Runtime bool i
+      witness i = P.Named "AtFlag" [flag i]
+      box i value = P.Named "Wrapper" [P.Named "NestedWitness"
+        [flag i,P.Runtime (witness i) value]]
+      yes = P.IndexConstructor "yesFlag" [] []
+  check (P.typeKey (box (P.IndexInput 0) yes) == P.typeKey (box (P.IndexInput 0) (P.IndexInput 1)))
+    "a closed constructor with a dependent domain was frozen outside its branch context"
+  check (P.typeKey (box (P.IndexConstructor "true" [] []) yes)
+      /= P.typeKey (box (P.IndexConstructor "false" [] []) yes))
+    "distinct closed fibres were merged without runtime membership indices"
+  let u = universeAt (level 0)
+      ty s xs = object ["term" .= call s xs []]
+      v i = variable i []
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True)
+        . set "sourceModule" (String "Checked")
+      atFlag b = ty "AtFlag" [b]
+      wrap t = ty "Wrapper" [get "term" t]
+      flag = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" u
+      witness = set "constructors" (toJSON (["yesFlag","noFlag"] :: [Text])) $
+        declaration "AtFlag" "datatype" (signature [named "Bool"] u)
+      ctor s b = set "family" (String "AtFlag") $ declaration s "constructor" (atFlag (constructor b []))
+      wrapper = set "parameters" (Number 1) $ set "constructors" (toJSON (["wrapped"] :: [Text])) $
+        declaration "Wrapper" "datatype" (signature [u] u)
+      wrapped = set "parameters" (Number 1) $ set "family" (String "Wrapper") $
+        declaration "wrapped" "constructor" (signature [u,object ["term" .= v 0]] (wrap (object ["term" .= v 1])))
+      body = split 1 [("yesFlag",0,done 1 (constructor "wrapped" [constructor "yesFlag" []]))
+                    ,("noFlag",0,done 1 (constructor "wrapped" [constructor "noFlag" []]))]
+      wrapWitness = safe $ set "type" (signature [named "Bool",atFlag (v 0)] (wrap (atFlag (v 1)))) $
+        operation "wrapWitness" [] "Bool" body
+      defs = [flag,declaration "true" "constructor" (named "Bool"),declaration "false" "constructor" (named "Bool")
+             ,witness,ctor "yesFlag" "true",ctor "noFlag" "false",wrapper,wrapped,wrapWitness]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text),"true" .= ("true" :: Text),"false" .= ("false" :: Text)]
+        ,"checking" .= [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "fixture" (S.fromList [(string (get "name" d),
+          if get "name" d == String "wrapWitness" then "behavior" else "structure") | d <- defs]))
+      results source =
+        let ready = P.inventory (P.prepare source)
+            finite = M.mapMaybe (either (const Nothing) Just . F.domain ready) (declarations ready)
+        in A.functions ready finite (fst (A.discover ready finite))
+  check (maybe False (either (const False) (const True)) (M.lookup "wrapWitness" (results inv)))
+    ("earlier constructor index was not refined: " ++ show (P.failures (P.prepare inv),results inv))
+  let unrelated = safe $ set "type" (signature [named "Bool",named "Bool",atFlag (v 0)] (wrap (atFlag (v 2)))) $
+        operation "wrapWitness" [] "Bool" (split 2
+          [("yesFlag",0,done 2 (constructor "wrapped" [constructor "yesFlag" []]))
+          ,("noFlag",0,done 2 (constructor "wrapped" [constructor "noFlag" []]))])
+  check (not (maybe False (either (const False) (const True))
+      (M.lookup "wrapWitness" (results (inv {declarations = M.insert "wrapWitness" unrelated (declarations inv)})))))
+    "constructor branch refined an unrelated earlier index"
+
+interleavedParameterChecks :: Inventory -> IO ()
+interleavedParameterChecks base = do
+  let universe = universeAt (level 0)
+      var i = object ["term" .= variable i []]
+      safe = set "terminates" (Bool True) . set "sourceModule" (String "Checked")
+      -- flag, A, a, choose, B, left, right: the case-tree positions still
+      -- count the two static binders; generated value positions do not.
+      mixed = safe $ set "type" (signature [named "Bool",universe,var 0,named "Bool",universe,var 0,var 1] (var 2)) $
+        operation "mixedParameters" [] "Bool" (split 3
+          [("true",0,done 6 (variable 1 [])),("false",0,done 6 (variable 0 []))])
+      callArgs = [variable 4 [],get "term" (named "Bool"),variable 3 [],variable 2 [],get "term" (named "Bool"),variable 1 [],variable 0 []]
+      caller = safe $ operation "mixedCaller" (replicate 5 "Bool") "Bool" (done 5 (call "mixedParameters" callArgs []))
+      additions = [mixed,caller]
+      inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $
+          M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("Checked" :: Text),"safe" .= True,"terminationCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "mixed" (S.fromList [("mixedCaller","behavior"),("mixedParameters","behavior")])}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      finite = M.fromList [(s,d) | (s,v) <- M.toList (declarations expanded),Right d <- [F.domain expanded v]]
+      shapes = fst (A.discover expanded finite)
+      calculations = A.functions expanded finite shapes
+      table = M.mapMaybe (either (const Nothing) Just) calculations
+  sig <- either (fail . show) pure (P.signature inv mixed)
+  check (P.argumentSlots sig == [P.ValuePosition 0,P.TypePosition 0,P.ValuePosition 1,P.ValuePosition 2,P.TypePosition 1,P.ValuePosition 3,P.ValuePosition 4]
+    && P.inputs sig == [P.Named "Bool" [],P.Parameter 0,P.Named "Bool" [],P.Parameter 1,P.Parameter 1]
+    && P.output sig == P.Parameter 1) "mixed telescope lost source positions or static identities"
+  check (M.notMember "mixedCaller" (P.failures prepared)) (show (P.failures prepared))
+  calculation <- either (fail . show) pure (calculations M.! "mixedCaller")
+  forM_ [False,True] $ \flag -> forM_ [False,True] $ \a -> forM_ [False,True] $ \choose ->
+    forM_ [False,True] $ \left -> forM_ [False,True] $ \right ->
+      check (evalWith table (map B [flag,a,choose,left,right]) (A.body calculation) == B (if choose then left else right))
+        "mixed argument application or case split changed the result"
+  let wrongArgs = [variable 4 [],get "term" (named "Tone"),variable 3 [],variable 2 [],get "term" (named "Bool"),variable 1 [],variable 0 []]
+      wrong = inv {declarations = M.adjust (set "compiled" (done 5 (call "mixedParameters" wrongArgs []))) "mixedCaller" (declarations inv)}
+  check (M.member "mixedCaller" (P.failures (P.prepare wrong))) "mixed static argument admitted a value of another type"
+  let identity = operation "indexRecord" ["Pair"] "Pair" (done 1 (variable 0 []))
+      indexInv = inv {declarations = M.insert "indexRecord" identity (declarations inv)}
+      receiver = P.Runtime (P.Named "Pair" []) (P.IndexInput 0)
+      readIndex term = P.readType indexInv [Just receiver] term
+  check (readIndex (call "indexRecord" [variable 0 []] ["flag"]) ==
+    Right (P.Runtime (P.Named "Bool" []) (P.IndexProject "flag" [] (P.IndexCall "indexRecord" [] [P.IndexInput 0]))))
+    "complete computed record index did not compose with its checked projection"
+  check (isLeft (readIndex (call "indexRecord" [] ["flag"])))
+    "partial computed record call accepted a projection as its missing input"
+  check (isLeft (readIndex (call "indexRecord" [variable 0 [],variable 0 []] [])))
+    "computed record index admitted extra value arguments"
+  let foreignOwner = indexInv {declarations = M.adjust
+        (set "projection" (object ["proper" .= ("OtherRecord" :: Text),"index" .= (1 :: Int)])) "flag" (declarations indexInv)}
+  check (isLeft (P.readType foreignOwner [Just receiver] (call "indexRecord" [variable 0 []] ["flag"])))
+    "computed record index admitted another record's projection"
+  let valueIndex = set "parameters" (Number 1) $ set "constructors" (toJSON (["indexedValue"] :: [Text]))
+        $ declaration "ValueIndex" "datatype"
+        (signature [universe,var 0] universe)
+      indexedValue = set "parameters" (Number 1) $ set "family" (String "ValueIndex")
+        $ declaration "indexedValue" "constructor" (signature [universe,var 0]
+          (object ["term" .= call "ValueIndex" [variable 1 [],variable 0 []] []]))
+      apply f xs = set "eliminations" (toJSON (map application xs)) (variable f [])
+      computed = safe $ set "type" (signature
+        [universe,signature [var 0] (var 1),var 1]
+        (object ["term" .= call "ValueIndex" [variable 2 [],apply 1 [variable 0 []]] []]))
+        $ operation "computedContract" [] "Bool" (done 3 (constructor "indexedValue" [apply 1 [variable 0 []]]))
+      indexInventory = inv {declarations = M.insert "ValueIndex" valueIndex
+        $ M.insert "indexedValue" indexedValue
+        $ M.insert "computedContract" computed (declarations inv)}
+      identity = object ["tag" .= ("lambda" :: Text),"abstraction" .= object
+        ["binds" .= True,"body" .= variable 0 []]]
+      consume = safe $ set "type" (signature
+        [universe,signature [var 0] (var 1),var 1
+        ,object ["term" .= call "ValueIndex" [variable 2 [],apply 1 [variable 0 []]] []]] (named "Bool"))
+        $ operation "consumeComputed" [] "Bool" (done 4 (constructor "true" []))
+      consuming = indexInventory {declarations = M.insert "consumeComputed" consume (declarations indexInventory)}
+      -- Caller names and slot numbers are independent of the helper's. A
+      -- supplied type can itself capture a caller runtime index.
+      callerTypes = map P.Parameter [0,1,7,31] ++
+        [P.Named "CallerIndexed" [P.Runtime (P.Named "Bool" []) (P.IndexInput slot)] | slot <- [0,2,9]]
+  forM_ callerTypes $ \outer -> forM_ [0,2,9] $ \position -> do
+    let domain = P.Callable [outer] outer
+        supplied = P.IndexLambda [0] domain (P.IndexLocal 0)
+        value = P.IndexInput position
+    computedType <- either (fail . show) pure (P.readType indexInventory
+      [Just (P.Runtime outer value),Just outer]
+      (call "computedContract" [variable 1 [],identity,variable 0 []] []))
+    check (computedType == P.Runtime (P.Named "ValueIndex" [outer,P.Runtime outer
+        (P.IndexApply (P.IndexTyped domain supplied) value)])
+        (P.IndexCall "computedContract" [outer] [P.IndexTyped domain supplied,value]))
+      "callee substitution rewrote the caller's callback types or captured value indices"
+    let consumeAt actualDomain ix = P.readType consuming
+          [Just (P.Runtime (P.Named "ValueIndex" [actualDomain,P.Runtime actualDomain ix]) (P.IndexInput 17))
+          ,Just (P.Runtime outer value),Just outer]
+          (call "consumeComputed" [variable 2 [],identity,variable 1 [],variable 0 []] [])
+    check (not (isLeft (consumeAt outer value)))
+      "a beta-reduced callback index was refused at its dependent input contract"
+    check (isLeft (consumeAt outer (P.IndexInput (position+1))))
+      "callback index comparison erased a mismatched runtime value"
+    check (isLeft (consumeAt (P.Named "Unrelated" []) value))
+      "callback index comparison erased a mismatched carrier"
+    -- Adding a leading runtime binder changes template positions but must not
+    -- change the caller's type or value identities.
+    let shifted = set "compiled" (done 4 (constructor "indexedValue" [apply 1 [variable 0 []]]))
+          $ set "type" (signature [named "Bool"] (get "type" computed)) computed
+        shiftedInventory = indexInventory {declarations = M.insert "computedContract" shifted (declarations indexInventory)}
+    shiftedType <- either (fail . show) pure (P.readType shiftedInventory
+      [Just (P.Runtime outer value),Just outer]
+      (call "computedContract" [constructor "true" [],variable 1 [],identity,variable 0 []] []))
+    check (shiftedType == P.Runtime (P.Named "ValueIndex" [outer,P.Runtime outer
+        (P.IndexApply (P.IndexTyped domain supplied) value)])
+        (P.IndexCall "computedContract" [outer] [P.IndexConstructor "true" [] [],P.IndexTyped domain supplied,value]))
+      "interleaving a runtime binder with static parameters captured caller positions"
+
+recordIndexNormalizationChecks :: IO ()
+recordIndexNormalizationChecks = forM_ ["IndexPacket","IndexEnvelope"] $ \owner -> do
+  let universe = universeAt (level 0)
+      ty name args = object ["term" .= call name args []]
+      v i = variable i []
+      variableType i = object ["term" .= v i]
+      ctor = owner <> ".make"
+      first = owner <> ".key"
+      second = owner <> ".evidence"
+      witness a x = ty "IndexWitness" [a,x]
+      witnessDecl = set "parameters" (Number 1) $ declaration "IndexWitness" "datatype"
+        (signature [universe,variableType 0] universe)
+      accept = set "parameters" (Number 1) $ declaration "IndexAccept" "datatype"
+        (signature [universe,variableType 0,witness (v 1) (v 0)] universe)
+      record = set "parameters" (Number 2) $ set "constructor" (String ctor)
+        $ set "fields" (toJSON [first,second]) $ declaration owner "record"
+          (signature [universe,named "Bool"] universe)
+      constructorDecl = set "parameters" (Number 2) $ set "family" (String owner)
+        $ declaration ctor "constructor" (signature
+          [universe,named "Bool",variableType 1,witness (v 2) (v 0)] (ty owner [v 3,v 2]))
+      projection name out = set "projection" (object ["proper" .= owner,"index" .= (3 :: Int)])
+        $ declaration name "function" (signature [universe,named "Bool",ty owner [v 1,v 0]] out)
+      keyDecl = projection first (variableType 2)
+      evidenceDecl = projection second (witness (v 2) (variable 0 [first]))
+      inv = Inventory (object []) (M.fromList [(string (get "name" d),d)
+        | d <- [witnessDecl,accept,record,constructorDecl,keyDecl,evidenceDecl]]) M.empty M.empty
+      checkIndices inventory domain left right =
+        let evidence = P.Named "IndexWitness" [domain,P.Runtime domain right]
+            inputs = [Just (P.Runtime evidence (P.IndexInput 99)),Just (P.Runtime domain left),Just domain]
+        in P.readType inventory inputs (call "IndexAccept" [v 2,v 1,v 0] [])
+      key = P.IndexInput 4
+      proof = P.IndexInput 5
+  forM_ [P.Named "Bool" [],P.Parameter 7] $ \domain -> do
+    let args = [domain]
+        value = P.IndexConstructor ctor args [P.IndexInput 9,key,proof]
+        keyIndex = P.IndexProject first args value
+        proofIndex = P.IndexProject second args value
+        proofDomain = P.Named "IndexWitness" [domain,P.Runtime domain key]
+        nested = P.IndexProject first args (P.IndexConstructor ctor args [P.IndexInput 8,keyIndex,proof])
+        admitted ty left right = case checkIndices inv ty left right of
+          Right (P.Named "IndexAccept" [actual,P.Runtime _ retained,_]) -> actual == ty && retained == left
+          _ -> False
+    check (admitted domain keyIndex key && admitted domain key keyIndex && admitted domain nested key)
+      "checked constructor projection was not normalized at an index boundary"
+    check (admitted proofDomain proofIndex proof)
+      "dependent field projection failed to preserve its complete evidence"
+    forM_ [P.IndexInput 9,proof] $ \wrong ->
+      check (isLeft (checkIndices inv domain keyIndex wrong)) "record index normalization selected the wrong payload"
+    forM_ [(owner,set "constructor" (String "unrelated") record)
+          ,(owner,set "fields" (toJSON [first,first]) record)
+          ,(owner,set "fields" Null record)
+          ,(owner,set "kind" (String "datatype") record)
+          ,(owner,set "abstract" (Bool True) record)
+          ,(ctor,set "family" (String "unrelated") constructorDecl)
+          ,(ctor,set "abstract" (Bool True) constructorDecl)
+          ,(ctor,set "parameters" (Number 1) constructorDecl)
+          ,(first,set "projection" (object ["proper" .= ("unrelated" :: Text),"index" .= (3 :: Int)]) keyDecl)
+          ,(first,set "projection" (object ["proper" .= owner,"index" .= (2 :: Int)]) keyDecl)
+          ,(first,set "abstract" (Bool True) keyDecl)
+          ,(first,set "opaque" (Bool True) keyDecl)] $ \(name,broken) ->
+      check (isLeft (checkIndices inv {declarations = M.insert name broken (declarations inv)} domain keyIndex key))
+        "record index normalization trusted incompatible declaration metadata"
+    forM_ [P.IndexProject first [] value
+          ,P.IndexProject first args (P.IndexConstructor ctor args [key,proof])
+          ,P.IndexProject first args (P.IndexCall "unknown" args [key,proof])
+          ,P.IndexProject second args value] $ \invalid ->
+      check (isLeft (checkIndices inv domain invalid key)) "record index normalization guessed a field or helper result"
+
+-- Constructor inference relates template slots to symbolic caller slots. The
+-- caller's level atoms and family identity must survive that relation intact.
+symbolicFamilyScopeChecks :: IO ()
+symbolicFamilyScopeChecks = forM_ ["ScopePacket","ScopeEnvelope"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      term x = object ["term" .= x]
+      variableLevel i = object ["constant" .= (0 :: Int),"maximum" .=
+        [object ["offset" .= (0 :: Int),"term" .= variable i []]]]
+      domains = [named "Level",named "Level",universeAt (variableLevel 1)
+        ,signature [term (variable 0 [])] (universeAt (variableLevel 2))]
+      args = map (\i -> variable i []) [3,2,1,0]
+      box = term (call (name "Box") args [])
+      carrier = set "parameters" (Number 4) $ declaration (name "Box") "datatype"
+        (signature domains (universeAt (level 0)))
+      ctor = set "family" (String (name "Box")) $ declaration (name "box") "constructor"
+        (signature domains box)
+      indexed = set "parameters" (Number 4) $ declaration (name "Indexed") "datatype"
+        (signature (domains ++ [box]) (universeAt (level 0)))
+      inv = Inventory (object ["builtins" .= object ["level" .= ("Level" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- [carrier,ctor,indexed]]) M.empty M.empty
+      source = call (name "Indexed") (args ++ [constructor (name "box") []]) []
+  forM_ [(7,2,P.BoundLevel 2),(2,3,P.BoundLevel 0),(11,9,P.RigidLevel 3)] $ \(typeSlot,familySlot,atom) -> do
+    let levelA = P.LevelExpr 0 (M.singleton (P.BoundLevel 1) 0)
+        levelB = P.LevelExpr 0 (M.singleton atom 0)
+        domain = P.Parameter typeSlot
+        family = P.FamilyParameter familySlot [domain] levelB
+        actuals = [P.Level levelA,P.Level levelB,domain,family]
+        context = map Just (reverse actuals)
+        value = P.Runtime (P.Named (name "Box") actuals) (P.IndexConstructor (name "box") actuals [])
+    check (P.readType inv context source == Right (P.Named (name "Indexed") (actuals ++ [value])))
+      "symbolic inference captured caller type, family or universe slots"
+    forM_ [P.FamilyParameter familySlot [P.Parameter (typeSlot+1)] levelB
+          ,P.FamilyParameter familySlot [domain] (P.LevelExpr 1 M.empty)
+          ,P.FamilyParameter familySlot [domain,domain] levelB] $ \wrong ->
+      check (isLeft (P.readType inv (Just wrong:tail context) source))
+        "symbolic inference accepted an incompatible family domain, universe or arity"
 
 familyParameterChecks :: IO ()
 familyParameterChecks = do
@@ -1354,7 +3186,7 @@ familyParameterChecks = do
       inv = Inventory (object []) M.empty M.empty M.empty
       bool = P.Named "Bool" []
       schema = P.FamilyParameter 0 [bool] (P.LevelExpr 0 M.empty)
-      family = P.OpenFamily 0 [bool] 0
+      family = P.OpenFamily 0 [bool] (P.LevelExpr 0 M.empty)
       value = P.Runtime bool (P.IndexInput 0)
       applicationTerm = get "term" resultType
   sig <- either (fail . show) pure (P.signature inv declaration')
@@ -1372,6 +3204,201 @@ familyParameterChecks = do
   let dependent = arrow True (named "Bool") (arrow False (variableType 0 []) universe)
       unsupported = set "type" (arrow True dependent (named "Bool")) declaration'
   check (isLeft (P.signature inv unsupported)) "dependent family argument domain silently flattened"
+  -- A family telescope has its own bound indices, distinct from the caller's
+  -- inputs and a callback's arguments. Partial application closes only the
+  -- supplied prefix and retains the dependency in the remaining domain.
+  let z = P.LevelExpr 0 M.empty
+      indexFamily = P.FamilyParameter 0 [bool] z
+      localTag = P.Runtime bool (P.IndexFamilyArgument 0)
+      localIndex = P.FamilyApplication indexFamily [localTag]
+      memberFamily = P.FamilyParameter 1 [bool,localIndex] z
+      memberDomain = arrow True (named "Bool")
+        (arrow False (variableType 1 [variable 0 []]) universe)
+      dependentSignature = declaration "dependentFamily" "function"
+        (arrow True familyDomain (arrow True memberDomain
+          (arrow True (named "Bool") (arrow True (variableType 2 [variable 0 []])
+            (variableType 2 [variable 1 [],variable 0 []])))))
+      atTag ix = P.FamilyApplication indexFamily [P.Runtime bool ix]
+      callerTag = P.IndexInput 7
+      callerIndex = P.Runtime (atTag callerTag) (P.IndexInput 11)
+      partial = P.FamilyExpression (atTag callerTag) 0
+        (P.FamilyApplication memberFamily
+          [P.Runtime bool callerTag,P.Runtime (atTag callerTag) (P.IndexLocal 0)]) z
+      env = [Just callerIndex,Just (P.Runtime bool callerTag),Just memberFamily]
+  dep <- either (fail . show) pure (P.signature inv dependentSignature)
+  check (P.parameters dep == 2 && P.parameterKinds dep ==
+    [P.FamilyKind [bool] z,P.FamilyKind [bool,localIndex] z])
+    "dependent family telescope lost an earlier bound index"
+  check (P.inputs dep == [bool,atTag (P.IndexInput 0)] && P.output dep ==
+    P.FamilyApplication memberFamily [P.Runtime bool (P.IndexInput 0),
+      P.Runtime (atTag (P.IndexInput 0)) (P.IndexInput 1)])
+    "dependent family signature confused caller and family positions"
+  check (P.readType inv env (get "term" (variableType 2 [variable 1 []])) == Right partial)
+    "partial family application lost the dependent residual domain"
+  let fullyApplied = P.FamilyApplication memberFamily [P.Runtime bool callerTag,callerIndex]
+  check (P.readType inv env (get "term" (variableType 2 [variable 1 [],variable 0 []])) == Right fullyApplied)
+    "dependent application failed to instantiate the later argument domain"
+  check (P.readType inv [Just callerIndex,Just partial]
+    (get "term" (variableType 1 [variable 0 []])) == Right fullyApplied)
+    "applying a residual family changed the supplied prefix"
+  check (isLeft (P.readType inv
+    [Just (P.Runtime (atTag (P.IndexInput 8)) (P.IndexInput 11)),Just (P.Runtime bool callerTag),Just memberFamily]
+    (get "term" (variableType 2 [variable 1 [],variable 0 []]))))
+    "dependent family admitted a later index belonging to another tag"
+  let openIndex = P.OpenFamily 3 [bool] z
+      openMember = P.OpenFamily 4 [bool,P.FamilyApplication openIndex [localTag]] z
+  check (P.substitute [openIndex,openMember] fullyApplied == Right
+    (P.FamilyApplication openMember [P.Runtime bool callerTag,
+      P.Runtime (P.FamilyApplication openIndex [P.Runtime bool callerTag]) (P.IndexInput 11)]))
+    "family substitution captured a nested family's own index binder"
+  let indexSymbol = P.typeKey openIndex
+      memberSymbol = P.typeKey openMember
+      nativeFamily family slot domains = object ["name" .= P.typeKey family,"nativeFamily" .= (slot :: Int)
+        ,"familyDomains" .= domains,"specializationArguments" .= [P.typeValue family]]
+      domainAtTag = object ["term" .= call indexSymbol [variable 0 []] []]
+      familyInv = inv {document = object ["builtins" .= object ["bool" .= ("Bool" :: Text)]]
+        ,declarations = M.fromList [(indexSymbol,nativeFamily openIndex 3 [named "Bool"])
+          ,(memberSymbol,nativeFamily openMember 4 [named "Bool",domainAtTag])]}
+      (familyShapes,_) = A.discover familyInv M.empty
+  shape <- maybe (fail "dependent open family was not admitted") pure (M.lookup memberSymbol familyShapes)
+  check (A.indexTypes shape == [A.Boolean,A.Fibre indexSymbol [A.Input 0]]
+    && A.familyParameters shape == [(3,indexSymbol),(4,memberSymbol)])
+    "native family lost its earlier index or the domain's family binding"
+  let rowSymbol = memberSymbol <> ".relation-row"
+  row <- maybe (fail "dependent family relation row missing") pure (M.lookup rowSymbol familyShapes)
+  check (A.relationRowOf row == Just memberSymbol && null (A.familyParameters row))
+    "relation row stored an unbound parent family extent"
+  -- An index constructor omits its family argument. Recover that argument
+  -- while reading a symbolic signature, before open-root instantiation.
+  let wrapper familyArg = object ["term" .= call "FamilyWrapper" [get "term" familyArg] []]
+      wrapperType = set "parameters" (Number 1) $ declaration "FamilyWrapper" "datatype"
+        (arrow True familyDomain universe)
+      wrapperConstructor = set "family" (String "FamilyWrapper") $ declaration "familyWrap" "constructor"
+        (arrow True familyDomain (wrapper (variableType 0 [])))
+      indexedType = set "parameters" (Number 1) $ declaration "FamilyIndexed" "datatype"
+        (arrow True familyDomain (arrow False (wrapper (variableType 0 [])) universe))
+      symbolicInv = inv {declarations = M.fromList
+        [("FamilyWrapper",wrapperType),("familyWrap",wrapperConstructor),("FamilyIndexed",indexedType)]}
+      indexedTerm = call "FamilyIndexed" [get "term" (variableType 0 []),constructor "familyWrap" []] []
+      expectedIndex = P.Runtime (P.Named "FamilyWrapper" [schema]) (P.IndexConstructor "familyWrap" [schema] [])
+  check (P.readType symbolicInv [Just schema] indexedTerm == Right (P.Named "FamilyIndexed" [schema,expectedIndex]))
+    "symbolic family equality did not recover the omitted index-constructor argument"
+  -- The constructor's family slot belongs to its own telescope, not to the
+  -- caller. Different slot numbers must still infer the same supplied family.
+  forM_ [2,7] $ \slot -> do
+    let caller = P.FamilyParameter slot [bool] z
+        value = P.Runtime (P.Named "FamilyWrapper" [caller]) (P.IndexConstructor "familyWrap" [caller] [])
+    check (P.readType symbolicInv [Just caller] indexedTerm == Right (P.Named "FamilyIndexed" [caller,value]))
+      "constructor inference confused callee and caller family slots"
+  let twins f = object ["term" .= call "FamilyTwins" [get "term" f] []]
+      twinsType = set "parameters" (Number 1) $ declaration "FamilyTwins" "datatype"
+        (signature [familyDomain] universe)
+      twinsConstructor = set "family" (String "FamilyTwins") $ declaration "familyTwins" "constructor"
+        (signature [familyDomain,wrapper (variableType 0 []),wrapper (variableType 1 [])]
+          (twins (variableType 2 [])))
+      twinsInv = symbolicInv {declarations = M.union (M.fromList
+        [("FamilyTwins",twinsType),("familyTwins",twinsConstructor)]) (declarations symbolicInv)}
+      caller = P.FamilyParameter 7 [bool] z
+      twinsTerm = constructor "familyTwins" [variable 1 [],variable 0 []]
+      twinsContext other = [Just (P.Runtime (P.Named "FamilyWrapper" [other]) (P.IndexInput 6))
+        ,Just (P.Runtime (P.Named "FamilyWrapper" [caller]) (P.IndexInput 4))]
+  check (P.readType twinsInv (twinsContext caller) twinsTerm == Right
+    (P.Runtime (P.Named "FamilyTwins" [caller]) (P.IndexConstructor "familyTwins" [caller] [P.IndexInput 4,P.IndexInput 6])))
+    "repeated symbolic family inference lost the caller's identity or payloads"
+  check (isLeft (P.readType twinsInv (twinsContext (P.FamilyParameter 9 [bool] z)) twinsTerm))
+    "repeated symbolic family inference merged distinct caller families"
+  let atBit x = object ["term" .= call "AtBit" [x] []]
+      bitType = declaration "AtBit" "datatype" (signature [named "Bool"] universe)
+      dependentDomain = signature [named "Bool",named "Bool",atBit (variable 1 [])] universe
+      dependentWrapper = set "type" (signature [dependentDomain] universe) wrapperType
+      dependentWrap = set "type" (signature [dependentDomain] (wrapper (variableType 0 []))) wrapperConstructor
+      dependentIndexed = set "type" (signature [dependentDomain,wrapper (variableType 0 [])] universe) indexedType
+      domainInv = symbolicInv {declarations = M.fromList [(string (get "name" d),d)
+        | d <- [bitType,dependentWrapper,dependentWrap,dependentIndexed]]}
+      atArgument i = P.Named "AtBit" [P.Runtime bool (P.IndexFamilyArgument i)]
+      dependentCaller i = P.FamilyParameter 7 [bool,bool,atArgument i] z
+      correctFamily = dependentCaller 0
+      correctValue = P.Runtime (P.Named "FamilyWrapper" [correctFamily])
+        (P.IndexConstructor "familyWrap" [correctFamily] [])
+  check (P.readType domainInv [Just correctFamily] indexedTerm == Right
+    (P.Named "FamilyIndexed" [correctFamily,correctValue]))
+    "symbolic inference lost a dependent family telescope index"
+  check (isLeft (P.readType domainInv [Just (dependentCaller 1)] indexedTerm))
+    "symbolic inference equated families depending on different bound indices"
+  forM_ [P.FamilyParameter 0 [P.Named "Other" []] (P.LevelExpr 0 M.empty),
+         P.FamilyParameter 0 [bool] (P.LevelExpr 1 M.empty)] $ \incompatible ->
+    check (isLeft (P.readType symbolicInv [Just incompatible] indexedTerm))
+      "symbolic family inference merged incompatible domains or universes"
+  let payload f w = object ["term" .= call "FamilyPayload" [get "term" f,get "term" w] []]
+      payloadType = set "parameters" (Number 1) $ declaration "FamilyPayload" "datatype"
+        (arrow True familyDomain (arrow False (wrapper (variableType 0 [])) universe))
+      payloadConstructor = set "family" (String "FamilyPayload") $ declaration "familyPayload" "constructor"
+        (arrow True familyDomain (arrow True (wrapper (variableType 0 []))
+          (payload (variableType 1 []) (variableType 0 []))))
+      dependentType = set "parameters" (Number 1) $ declaration "DependentIndices" "datatype"
+        (arrow True familyDomain (arrow True (wrapper (variableType 0 []))
+          (arrow False (payload (variableType 1 []) (variableType 0 [])) universe)))
+      otherConstructor = set "name" (String "otherWrap") wrapperConstructor
+      dependentInv = symbolicInv {declarations = M.union (declarations symbolicInv) (M.fromList
+        [("FamilyPayload",payloadType),("familyPayload",payloadConstructor),
+         ("DependentIndices",dependentType),("otherWrap",otherConstructor)])}
+      dependentTerm second = call "DependentIndices"
+        [get "term" (variableType 0 []),constructor "familyWrap" [],
+         constructor "familyPayload" [constructor second []]] []
+      member = P.Runtime (P.Named "FamilyPayload" [schema,expectedIndex])
+        (P.IndexConstructor "familyPayload" [schema] [P.IndexConstructor "familyWrap" [schema] []])
+  check (P.readType dependentInv [Just schema] (dependentTerm "familyWrap")
+      == Right (P.Named "DependentIndices" [schema,expectedIndex,member]))
+    "later index domain did not retain the preceding constructor value"
+  check (isLeft (P.readType dependentInv [Just schema] (dependentTerm "otherWrap")))
+    "dependent index admitted a member at a different preceding value"
+  let pairType = set "parameters" (Number 2) $ declaration "DependentPair" "record"
+        (arrow True universe (arrow True (arrow False (variableType 0 []) universe) universe))
+      pairInv = inv {declarations = M.singleton "DependentPair" pairType}
+      lambda slot = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True
+        ,"body" .= get "term" (variableType 1 [get "term" (variableType slot [])])]]
+      pairTerm body = get "term" (set "term" (call "DependentPair" [get "term" (named "Bool"),body] []) (object []))
+      contextual = P.Runtime bool (P.IndexInput 0)
+  parsed <- either (fail . show) pure (P.readType pairInv [Just family] (pairTerm (lambda 0)))
+  case parsed of
+    P.Named "DependentPair" [_,closure] -> do
+      resolved <- either (fail . show) pure (P.substitute [closure]
+        (P.FamilyApplication (P.FamilyParameter 0 [bool] (P.LevelExpr 0 M.empty)) [contextual]))
+      check (resolved == P.FamilyApplication family [contextual]) "first-order family beta substitution lost its member index"
+    _ -> fail "type-family lambda did not retain its domain and member"
+  check (isLeft (P.readType pairInv [Just family] (pairTerm (lambda 1))))
+    "type-family binder confused its own argument with the preceding family parameter"
+  let closure slot = P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool (P.IndexLocal slot)]) (P.LevelExpr 0 M.empty)
+  check (P.typeKey (closure 0) == P.typeKey (closure 7)) "alpha-renaming a family binder changed its instance identity"
+  check (P.typeKey (closure 0) /= P.typeKey (P.FamilyExpression bool 0
+    (P.FamilyApplication (P.OpenFamily 1 [bool] (P.LevelExpr 0 M.empty)) [P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)))
+    "distinct family bindings were merged"
+  let callback = P.Callable [bool] bool
+      contextualFamily input slot = P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool (P.IndexApply (P.IndexTyped callback input) (P.IndexLocal slot))])
+        (P.LevelExpr 0 M.empty)
+      carrier input slot = P.Named "DependentPair" [bool,contextualFamily input slot]
+  check (P.typeKey (carrier (P.IndexInput 0) 0) == P.typeKey (carrier (P.IndexInput 7) 3))
+    "a free callback under a family binder leaked its caller position into the carrier identity"
+  check (P.typeKey (carrier (P.IndexInput 0) 0) /= P.typeKey (P.Named "DependentPair" [bool,closure 0]))
+    "a computed family refinement was merged with a direct family selection"
+  let nested = P.FamilyExpression bool 0 (P.Named "Nested"
+        [closure 0,P.Runtime bool (P.IndexLocal 0)]) (P.LevelExpr 0 M.empty)
+  case P.readType inv [Just contextual,Just nested]
+      (get "term" (variableType 1 [variable 0 []])) of
+    Right (P.Named "Nested" [inner,result]) -> do
+      check (P.typeKey inner == P.typeKey (closure 0))
+        "applying an outer family replaced a shadowed inner binder"
+      check (result == contextual) "applying an outer family lost its own argument"
+    value -> fail ("nested family application failed: " ++ show value)
+  let appliedFamily f x slot = P.Named "DependentPair" [bool,P.FamilyExpression bool slot
+        (P.FamilyApplication family [P.Runtime bool
+          (P.IndexApply (P.IndexApply (P.IndexTyped (P.Callable [bool,bool] bool) f) x) (P.IndexLocal slot))])
+        (P.LevelExpr 0 M.empty)]
+  check (P.typeKey (appliedFamily (P.IndexInput 0) (P.IndexInput 1) 0)
+      == P.typeKey (appliedFamily (P.IndexInput 5) (P.IndexInput 8) 7))
+    "a callback's free applied argument was not captured under a family binder"
 
 reductionChecks :: IO ()
 reductionChecks = do
@@ -1394,6 +3421,15 @@ reductionChecks = do
   check (reduce (call "short" [local 0] []) == Just (local 0)) "eta-short checked wrapper did not reduce"
   check (reduce (call "make" [local 0] ["value"]) == Just (local 0)) "projection evaluated or retained an unused field"
   check (reduce (call "make" [local 0] ["evidence"]) /= Just (local 0)) "proof field was identified with the computational field"
+  let copied = set "moduleInstanceCopy" (Bool True) $ set "canonicalConstructor" (String "box")
+        $ set "name" (String "copiedBox") ctor
+      aliases = inv {declarations = M.insert "copiedBox" copied (declarations inv)}
+      aliased = constructor "copiedBox" [local 0,bottom]
+  check ((fst <$> Reduction.reduceHead aliases aliased) == Just (constructor "box" [local 0,bottom]))
+    "canonical constructor identity did not preserve the exact payload spine"
+  forM_ [set "moduleInstanceCopy" (Bool False),set "abstract" (Bool True),set "canonicalConstructor" Null] $ \change ->
+    check (Reduction.reduceHead (aliases {declarations = M.adjust change "copiedBox" (declarations aliases)}) aliased == Nothing)
+      "constructor alias reduced without checked identity evidence"
   let untrusted = inv {document = Null}
   check (Reduction.reduceHead untrusted (call "wrap" [local 0] []) == Nothing) "unchecked termination flag justified unfolding"
   let opaque = inv {declarations = M.adjust (set "opaque" (Bool True)) "wrap" (declarations inv)}
@@ -1419,6 +3455,28 @@ closureChecks base = do
         ,"body" .= call "xor" [variable 2 [],variable 0 []] []]]
       lambdaCaller = safe $ operation "lambdaCaller" ["Bool","Bool"] "Bool" $ done 2
         (call "applyOnce" [get "term" (named "Bool"),lambda,variable 0 []] [])
+      bodyOnlyType = safe $ set "type" (piType True (universeAt (level 0))
+        (fn (named "Callbacks") (universeAt (level 0))))
+        $ operation "bodyOnlyType" [] "Bool"
+          (set "eta" (object ["constructor" .= ("callbacks" :: Text),"fields" .= (["callback"] :: [Text])
+            ,"branch" .= object ["arity" .= (1 :: Int),"tree" .= done 2
+              (call "chooseSchema" [variable 1 [],invoke (variable 0 []) [constructor "true" []]] [])]]) (split 1 []))
+      chooseSchema = safe $ set "type" (piType True (universeAt (level 0)) (fn (named "Bool") (universeAt (level 0))))
+        $ operation "chooseSchema" [] "Bool" (split 1
+          [("true",0,done 1 (call "BodyPayload" [variable 0 []] []))
+          ,("false",0,done 1 (call "BodyPayload" [get "term" (named "Bool")] []))])
+      bodyOnlyCaller = safe $ set "type" (piType True (universeAt (level 0)) (fn (named "Bool") (universeAt (level 0))))
+        $ operation "bodyOnlyCaller" [] "Bool" (done 2
+          (call "bodyOnlyType" [variable 1 [],constructor "callbacks" [call "xor" [variable 0 []] []]] []))
+      bodyPayload = set "parameters" (Number 1) $ set "induction" (String "Nothing")
+        $ set "constructor" (String "bodyPayload") $ set "fields" (toJSON (["bodyPayloadValue"] :: [Text]))
+        $ declaration "BodyPayload" "record" (piType True (universeAt (level 0)) (universeAt (level 0)))
+      bodyPayloadCtor = set "parameters" (Number 1) $ set "family" (String "BodyPayload")
+        $ declaration "bodyPayload" "constructor" (piType True (universeAt (level 0))
+          (piType True (varType 0) (object ["term" .= call "BodyPayload" [variable 1 []] []])))
+      bodyPayloadField = set "projection" (object ["proper" .= ("BodyPayload" :: Text),"index" .= (2 :: Int)])
+        $ declaration "bodyPayloadValue" "function" (piType True (universeAt (level 0))
+          (piType True (object ["term" .= call "BodyPayload" [variable 0 []] []]) (varType 1)))
       nat = set "constructors" (toJSON (["zero","suc"] :: [Text])) (declaration "Nat" "datatype" (universeAt (level 0)))
       zeroDef = set "family" (String "Nat") (declaration "zero" "constructor" (named "Nat"))
       sucDef = set "family" (String "Nat") (declaration "suc" "constructor" (signature [named "Nat"] (named "Nat")))
@@ -1429,7 +3487,36 @@ closureChecks base = do
             [variable 3 [],variable 2 [],variable 1 [],invoke (variable 2 []) [variable 0 []]] []))]
       iterated = safe $ operation "iterated" ["Bool","Nat","Bool"] "Bool" $ done 3
         (call "iterate" [get "term" (named "Bool"),call "xor" [variable 2 []] [],variable 1 [],variable 0 []] [])
-      additions = [applyOnce,xor,caller,lambdaCaller,nat,zeroDef,sucDef,iterateFn,iterated]
+      callbacks = set "induction" (String "Nothing") $ set "constructor" (String "callbacks")
+        $ set "fields" (toJSON (["callback"] :: [Text])) (declaration "Callbacks" "record" (universeAt (level 0)))
+      callbackCtor = set "family" (String "Callbacks") $ declaration "callbacks" "constructor"
+        (fn (fn (named "Bool") (named "Bool")) (named "Callbacks"))
+      runCallback = safe $ operation "runCallback" ["Callbacks","Bool"] "Bool"
+        (set "eta" (object ["constructor" .= ("callbacks" :: Text),"fields" .= (["callback"] :: [Text])
+          ,"branch" .= object ["arity" .= (1 :: Int),"tree" .= done 2 (invoke (variable 1 []) [variable 0 []])]]) (split 0 []))
+      recordCaller = safe $ operation "recordCaller" ["Bool","Bool"] "Bool" $ done 2
+        (call "runCallback" [constructor "callbacks" [call "xor" [variable 1 []] []],variable 0 []] [])
+      treeType = set "constructors" (toJSON (["leaf","branch"] :: [Text])) (declaration "CallbackTree" "datatype" (universeAt (level 0)))
+      leafCtor = set "family" (String "CallbackTree") $ declaration "leaf" "constructor"
+        (fn (fn (named "Bool") (named "Bool")) (named "CallbackTree"))
+      branchCtor = set "family" (String "CallbackTree") $ declaration "branch" "constructor"
+        (signature [fn (named "Bool") (named "Bool"),named "CallbackTree",named "CallbackTree"] (named "CallbackTree"))
+      -- The case tree retains a runtime predicate result, while callback
+      -- nodes are known. This cannot be solved by head reduction alone.
+      evaluateTree = safe $ operation "evaluateTree" ["CallbackTree","Bool"] "Bool" $ split 0
+        [("leaf",1,done 2 (invoke (variable 1 []) [variable 0 []]))
+        ,("branch",3,done 4 (call "selectTree" [invoke (variable 3 []) [variable 0 []]
+          ,variable 2 [],variable 1 [],variable 0 []] []))]
+      selectTree = safe $ operation "selectTree" ["Bool","CallbackTree","CallbackTree","Bool"] "Bool" $ split 0
+        [("true",0,done 3 (call "evaluateTree" [variable 2 [],variable 0 []] []))
+        ,("false",0,done 3 (call "evaluateTree" [variable 1 [],variable 0 []] []))]
+      treeCaller = safe $ operation "treeCaller" ["Bool","Bool","Bool"] "Bool" $ done 3
+        (call "evaluateTree" [constructor "branch" [call "xor" [variable 2 []] []
+          ,constructor "leaf" [call "xor" [variable 1 []] []]
+          ,constructor "leaf" [object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= variable 0 []]]]]
+          ,variable 0 []] [])
+      additions = [applyOnce,xor,caller,lambdaCaller,bodyOnlyType,bodyOnlyCaller,chooseSchema,bodyPayload,bodyPayloadCtor,bodyPayloadField,nat,zeroDef,sucDef,iterateFn,iterated
+        ,callbacks,callbackCtor,runCallback,recordCaller,treeType,leafCtor,branchCtor,evaluateTree,selectTree,treeCaller]
       added = S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- additions]
       registry = set "nat" (String "Nat") $ set "zero" (String "zero") $ set "suc" (String "suc") (get "builtins" (document base))
       inv = base {declarations = M.adjust (set "constructors" (toJSON (["true","false"] :: [Text]))) "Bool" $ M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
@@ -1441,12 +3528,86 @@ closureChecks base = do
       shapes = fst (A.discover expanded finite)
       calculations = A.functions expanded finite shapes
       table = M.mapMaybe (either (const Nothing) Just) calculations
-  check (M.null (P.failures prepared)) (show (P.failures prepared))
-  forM_ ["closureCaller","lambdaCaller"] $ \name -> do
+  check (all (`M.notMember` P.failures prepared) ["closureCaller","lambdaCaller","iterated","recordCaller","treeCaller"]) (show (P.failures prepared))
+  forM_ ["closureCaller","lambdaCaller","recordCaller"] $ \name -> do
     calculation <- either (fail . show) pure (calculations M.! name)
     forM_ [False,True] $ \captured -> forM_ [False,True] $ \argument ->
       check (evalWith table [B captured,B argument] (A.body calculation) == B (captured /= argument)) "closure specialization lost a capture or argument"
-  check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 2) "closure templates were merged or specialized by runtime value"
+  check (length [i | i <- P.instances prepared,P.origin i == "applyOnce"] == 1)
+    "native callback arguments unnecessarily cloned their shared helper"
+  let bodyOnlyInventory = inv
+        { document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture")
+            $ set "modules" (toJSON [object ["name" .= ("Checked" :: Text)
+              ,"source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= [bodyOnlyCaller]]]) (document inv)
+        , modelRequirements = modelRequirements inv }
+      bodyOnlyPrepared = P.prepare bodyOnlyInventory
+      bodyOnlyExpanded = P.inventory bodyOnlyPrepared
+      bodyOnlyInstances = [d | d <- M.elems (declarations bodyOnlyExpanded)
+        ,get "higherOrderOrigin" d == String "bodyOnlyType"]
+  check (not (null bodyOnlyInstances) && all ((== [0]) . P.nativeParameters) bodyOnlyInstances)
+    ("static body-only extent was omitted because it is absent from the closure signature: "
+      ++ show (map (\d -> (get "name" d,P.nativeParameters d,get "closureSpecialization" d)) bodyOnlyInstances,P.failures bodyOnlyPrepared))
+  let bodyOnlyShapes = fst (A.discover bodyOnlyExpanded finite)
+      bodyOnlyCalculations = A.functions bodyOnlyExpanded finite bodyOnlyShapes
+  forM_ bodyOnlyInstances $ \d -> do
+    calculation <- either (fail . show) pure (bodyOnlyCalculations M.! string (get "name" d))
+    let rendered = Text.unlines (A.renderCalculation bodyOnlyExpanded bodyOnlyShapes id calculation)
+    check ("in 'typeArgument0'" `Text.isInfixOf` rendered)
+      "schema-builder calculation failed to declare its body-only extent"
+  treeCalculation <- either (fail . show) pure (calculations M.! "treeCaller")
+  forM_ [False,True] $ \guardCapture -> forM_ [False,True] $ \effectCapture -> forM_ [False,True] $ \argument ->
+    check (evalWith table [B guardCapture,B effectCapture,B argument] (A.body treeCalculation)
+      == B (if guardCapture /= argument then effectCapture /= argument else argument))
+      "static tree specialization changed predicate/effect captures or branch choice"
+  check (all (maybe False isLeft . (`M.lookup` calculations)) ["runCallback","evaluateTree"])
+    "a missing field declaration or unchecked recursive carrier reached native admission"
+  let monomorphicInventory = inv {modelRequirements = M.singleton "monomorphic"
+        (S.fromList [("recordCaller","behavior"),("runCallback","behavior"),("xor","behavior"),("Callbacks","structure"),("Bool","structure")])}
+      monomorphicPrepared = P.prepare monomorphicInventory
+      monomorphicExpanded = P.inventory monomorphicPrepared
+      monomorphicShapes = fst (A.discover monomorphicExpanded finite)
+      monomorphicCalculations = A.functions monomorphicExpanded finite monomorphicShapes
+  check (M.notMember "recordCaller" (P.failures monomorphicPrepared)
+    && either (const False) (const True) (monomorphicCalculations M.! "recordCaller"))
+    "a monomorphic callback record incorrectly depended on an unrelated generic template"
+  let malformed = inv {declarations = M.adjust (set "compiled" (done 2
+        (call "runCallback" [constructor "leaf" [lambda],variable 0 []] []))) "recordCaller" (declarations inv)}
+  check (M.member "recordCaller" (P.failures (P.prepare malformed))) "wrong-carrier static constructor was admitted"
+  let altered declarationName change = inv {declarations = M.adjust change declarationName (declarations inv)}
+      badArity = altered "recordCaller" (set "compiled" (done 2
+        (call "runCallback" [constructor "callbacks" [],variable 0 []] [])))
+  check (M.member "recordCaller" (P.failures (P.prepare badArity))) "static record payload arity was guessed"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null] $ \change ->
+    check (M.member "recordCaller" (P.failures (P.prepare (altered "runCallback" change))))
+      "opaque, unchecked or missing callback computation was admitted"
+  let bindingEvidence = set "closureSpecialization" (object ["types" .= map P.typeValue
+        [P.Open 2 (P.LevelExpr 0 M.empty),P.OpenFamily 1 [P.Open 0 (P.LevelExpr 0 M.empty)] (P.LevelExpr 0 M.empty)]]) (object [])
+  check (P.nativeParameters bindingEvidence == [0,2] && map fst (P.nativeFamilies bindingEvidence) == [1])
+    "generated callback signature lost open capture/result bindings"
+  let constrained = set "closureIndexEquations" (toJSON [object ["domain" .= named "Bool"
+        ,"left" .= variable 0 [],"right" .= constructor "true" []]])
+        (safe $ operation "constrained" ["Bool"] "Bool" (done 1 (variable 0 [])))
+      constrainedInv = inv {declarations = M.insert "constrained" constrained (declarations inv)
+        ,modelRequirements = M.singleton "constraint" (S.singleton ("constrained","behavior"))}
+      constrainedOutput = T.generate constrainedInv
+  check (isLeft (F.function constrainedInv finite constrained)) "finite lowering discarded a static container precondition"
+  check ("assert constraint" `Text.isInfixOf` T.modelText constrainedOutput
+    && " == true" `Text.isInfixOf` T.modelText constrainedOutput)
+    "Boolean lowering discarded a static container precondition"
+  let onlyInConstraint = set "closureIndexEquations" (toJSON [object ["domain" .= named "Bool"
+        ,"left" .= call "xor" [variable 1 [],variable 0 []] [],"right" .= constructor "true" []]])
+        (safe $ operation "constrained" ["Bool","Bool"] "Bool" (done 2 (variable 0 [])))
+      refs names = object ["symbols" .= (names :: [Text])]
+      selectedDocument = set "models" (object ["constraint" .= object ["state" .= refs ["Bool"]
+        ,"commands" .= refs ["Bool"],"transition" .= object ["entry" .= refs ["constrained"]]]]) (document inv)
+      selectedInventory = constrainedInv {document = selectedDocument
+        ,declarations = M.insert "constrained" onlyInConstraint (declarations inv)
+        ,modelRequirements = M.singleton "constraint" (S.fromList [("Bool","structure"),("constrained","behavior")
+          ,("xor","behavior"),("applyOnce","behavior")])}
+      selectedPrepared = P.prepare selectedInventory
+  check (S.member "xor" (P.runtimeClosure selectedPrepared))
+    ("a computation used only by a static container precondition disappeared from the runtime closure: "
+      ++ show (P.failures selectedPrepared,P.runtimeClosure selectedPrepared))
 
   iteration <- either (fail . show) pure (calculations M.! "iterated")
   forM_ [False,True] $ \captured -> forM_ [0..7] $ \n -> forM_ [False,True] $ \value ->
@@ -1505,6 +3666,163 @@ sequenceChecks base = do
   check (isLeft (A.functions unchecked M.empty shapes M.! "shift")) "recursive function flag alone admitted a call cycle"
   check (isLeft (A.functions broken M.empty shapes M.! "shift")) "recursive cycle concealed a refused external dependency"
 
+  -- A list inside a recursive data cycle uses the same finite constructor
+  -- encoding as its peer datatype. Ordinary lists keep their sequence form.
+  let inductive = set "induction" (String "Inductive") . set "sourceModule" (String "CheckedTree")
+      tree = inductive $ set "constructors" (toJSON (["leaf","branch"] :: [Text])) $
+        declaration "Tree" "datatype" (universeAt (level 0))
+      trees = inductive $ set "nativeSequence" (named "Tree") $
+        set "constructors" (toJSON (["noTrees","moreTrees"] :: [Text])) $
+        declaration "Trees" "datatype" (universeAt (level 0))
+      ctor name owner domains = set "family" (String owner) $
+        declaration name "constructor" (signature (map named domains) (named owner))
+      treeDefs = [tree,trees,ctor "leaf" "Tree" ["Nat"],ctor "branch" "Tree" ["Trees"]
+        ,ctor "noTrees" "Trees" [],ctor "moreTrees" "Trees" ["Tree","Trees"]]
+      recursive = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- treeDefs]) (declarations inv)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedTree" :: Text),"safe" .= True,"positivityCheck" .= True]]) (document inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),"structure") | d <- treeDefs]) (modelRequirements inv)}
+      (treeShapes,treeErrors) = A.discover recursive M.empty
+      constructors = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations recursive treeShapes]
+      construct name args = evalWith constructors args (A.body (constructors M.! name))
+      nodeCount (R owner fields) = fields M.! (owner <> ".node-count")
+      nodeCount _ = error "recursive constructor lost its record"
+  check (M.null treeErrors) (show treeErrors)
+  forM_ ["Tree","Trees"] $ \name -> do
+    let sh = treeShapes M.! name
+    check (A.sequenceElement sh == Nothing && S.fromList (A.recursivePeers sh) == S.fromList ["Tree","Trees"])
+      "recursive list escaped its finite constructor component"
+  check (A.sequenceElement (treeShapes M.! "ListNat") == Just A.Natural)
+    "recursive list fallback changed an ordinary list"
+  let empty = construct "noTrees" []
+      leaf = construct "leaf" [Z (10^(80 :: Int))]
+      repeated = construct "moreTrees" [leaf,construct "moreTrees" [leaf,empty]]
+      nested = construct "branch" [repeated]
+  check (map nodeCount [empty,leaf,repeated,nested] == map Z [1,1,5,6])
+    "recursive list node counts lost a repeated child or constructor"
+  forM_ [recursive {document = document base}
+    ,recursive {declarations = M.adjust (set "induction" (String "CoInductive")) "Trees" (declarations recursive)}
+    ,recursive {declarations = M.adjust (set "type" (signature [named "Nat",named "Trees"] (named "Trees"))) "moreTrees" (declarations recursive)}
+    ,recursive {declarations = M.adjust (set "type" (signature [signature [named "Trees"] (named "Tree")] (named "Tree"))) "branch" (declarations recursive)}] $ \bad ->
+      check (all (`M.notMember` fst (A.discover bad M.empty)) ["Tree","Trees"])
+        "recursive sequence fallback bypassed positivity, constructor or callable checks"
+
+  -- Recognize structural equations at arbitrary identities, not a library
+  -- function name. The consuming family is admitted only after its helper.
+  forM_ ["join","combine"] $ \helper -> do
+    let joinedType index = object ["term" .= call "Joined" [index] []]
+        joined = set "constructors" (toJSON (["joined"] :: [Text])) $
+          declaration "Joined" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        constructorDef = set "family" (String "Joined") $
+          declaration "joined" "constructor" (signature [named "ListNat",named "ListNat"]
+            (joinedType (call helper [variable 1 [],variable 0 []] [])))
+        helperDef headValue = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat","ListNat"] "ListNat" (split 0
+            [("nil",0,done 1 (variable 0 [])),("cons",2,done 3 (constructor "cons"
+              [headValue,call helper [variable 1 [],variable 0 []] []]))])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [joined,constructorDef,helperDef (variable 2 [])]
+        (admitted,refused) = A.discover valid M.empty
+        calcs = A.functions valid M.empty admitted
+    check (M.member "Joined" admitted && M.notMember "Joined" refused) "structural index helper failed stratified admission"
+    helperCalc <- either (fail . show) pure (calcs M.! helper)
+    native <- traverse (either (fail . show) pure) calcs
+    forM_ [[],[0],[2,2,0]] $ \left -> forM_ [[],[1],[2,2]] $ \right ->
+      check (evalWith native [list left,list right] (A.body helperCalc) == list (left ++ right)) "named structural helper changed concatenation"
+    let one = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= (1 :: Integer)]]
+        modified = add [joined,constructorDef,helperDef (call "add" [variable 2 [],one] [])]
+        noEvidence = valid {document = document base}
+        signatureOnly = valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}
+    forM_ [modified,noEvidence,signatureOnly] $ \invalid ->
+      check (M.notMember "Joined" (fst (A.discover invalid M.empty))) "unjustified recursive index equation admitted"
+    let joinedSchema = joinedType (call helper [variable 1 [],variable 0 []] [])
+        implicitRead = set "projection" (object ["proper" .= Null,"index" .= (3 :: Int)]) $
+          set "type" (signature [named "ListNat",named "ListNat",joinedSchema] (named "Nat")) $
+          operation "implicitRead" [] "Nat" (done 1 one)
+        fixedSchema = joinedType (call helper [constructor "nil" [],constructor "nil" []] [])
+        recoverCaller = set "type" (signature [fixedSchema] (named "Nat")) $
+          operation "recoverJoined" [] "Nat" (done 1 (call "implicitRead" [variable 0 []] []))
+        recovery = add [joined,constructorDef,helperDef (variable 2 []),implicitRead,recoverCaller]
+        recoveryShapes = fst (A.discover recovery M.empty)
+    check (isLeft (A.functions recovery M.empty recoveryShapes M.! "recoverJoined"))
+      "concatenation result was used to recover an unjustified split of its inputs"
+
+  -- Parameters are invariant across recursive map calls, including when the
+  -- selected list is not the first argument.
+  let shifted = set "constructors" (toJSON (["shifted"] :: [Text])) $
+        declaration "Shifted" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+      shiftedCtor = set "family" (String "Shifted") $ declaration "shifted" "constructor"
+        (signature [named "Nat",named "ListNat"]
+          (object ["term" .= call "Shifted" [call "shift" [variable 1 [],variable 0 []] []] []]))
+      shiftedInv = inv {declarations = M.union (M.fromList [("Shifted",shifted),("shifted",shiftedCtor)]) (declarations inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [("Shifted","structure"),("shifted","structure")]) (modelRequirements inv)}
+  check (M.member "Shifted" (fst (A.discover shiftedInv M.empty)))
+    "invariant runtime parameter prevented list-map admission"
+  let changedParameter = shiftedInv {declarations = M.adjust (set "compiled" (split 1
+        [("nil",0,done 1 (constructor "nil" [])),("cons",2,done 3 (constructor "cons"
+          [call "add" [variable 2 [],variable 1 []] [],call "shift" [variable 1 [],variable 0 []] []]))])) "shift" (declarations shiftedInv)}
+  check (M.notMember "Shifted" (fst (A.discover changedParameter M.empty)))
+    "list-map certificate ignored a changing recursive parameter"
+
+  forM_ ["retainPositive","compactValues"] $ \helper -> do
+    let resultType index = object ["term" .= call "Filtered" [index] []]
+        filtered = set "constructors" (toJSON (["filtered"] :: [Text])) $
+          declaration "Filtered" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        filteredCtor = set "family" (String "Filtered") $ declaration "filtered" "constructor"
+          (signature [named "ListNat"] (resultType (call helper [variable 0 []] [])))
+        recurse t = call helper [t] []
+        helperDef = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat"] "ListNat" (split 0
+            [("nil",0,done 0 (constructor "nil" [])),("cons",2,split 0
+              [("zero",0,done 1 (recurse (variable 0 [])))
+              ,("suc",1,done 2 (constructor "cons"
+                [constructor "suc" [variable 1 []],recurse (variable 0 [])]))])])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [filtered,filteredCtor,helperDef]
+        admitted = fst (A.discover valid M.empty)
+    check (M.member "Filtered" admitted) "constructor-based list filtering failed computed-index admission"
+    native <- traverse (either (fail . show) pure) (A.functions valid M.empty admitted)
+    forM_ [[],[0],[0,2,2,0,1],[10^(80 :: Int),0,3,3]] $ \values ->
+      check (evalWith native [list values] (A.body (native M.! helper)) == list (filter (>0) values))
+        "computed-index filtering changed order, multiplicity, or kept payloads"
+    let wrongTail = set "compiled" (split 0 [("nil",0,done 0 (constructor "nil" [])),("cons",2,
+          done 2 (recurse (constructor "cons" [variable 1 [],variable 0 []])))]) helperDef
+        inspectTail = set "compiled" (split 0 [("nil",0,done 0 (constructor "nil" [])),("cons",2,split 1
+          [("nil",0,done 1 (constructor "nil" [])),("cons",2,done 3 (recurse (variable 0 [])))])]) helperDef
+    forM_ [add [filtered,filteredCtor,wrongTail],add [filtered,filteredCtor,inspectTail]
+      ,valid {document = document base}
+      ,valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}] $ \invalid ->
+        check (M.notMember "Filtered" (fst (A.discover invalid M.empty)))
+          "list filtering admitted an unproved tail, branch, body or termination condition"
+
+  forM_ ["bump","incrementList"] $ \helper -> do
+    let mappedType index = object ["term" .= call "MappedList" [index] []]
+        mapped = set "constructors" (toJSON (["mappedList"] :: [Text])) $
+          declaration "MappedList" "datatype" (signature [named "ListNat"] (universeAt (level 0)))
+        mappedCtor = set "family" (String "MappedList") $ declaration "mappedList" "constructor"
+          (signature [named "ListNat"] (mappedType (call helper [variable 0 []] [])))
+        one = object ["tag" .= ("literal" :: Text),"literal" .= object ["tag" .= ("natural" :: Text),"value" .= (1 :: Integer)]]
+        helperDef tailArgument = set "terminates" (Bool True) $ set "sourceModule" (String "Checked") $
+          operation helper ["ListNat"] "ListNat" (split 0
+            [("nil",0,done 0 (constructor "nil" [])),("cons",2,done 2 (constructor "cons"
+              [call "add" [variable 1 [],one] [],call helper [tailArgument] []]))])
+        add definitions = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- definitions]) (declarations inv)
+          ,modelRequirements = M.map (`S.union` S.fromList [(string (get "name" d),if get "kind" d == String "function" then "behavior" else "structure") | d <- definitions]) (modelRequirements inv)}
+        valid = add [mapped,mappedCtor,helperDef (variable 0 [])]
+        admitted = fst (A.discover valid M.empty)
+    check (M.member "MappedList" admitted) "structural list map failed computed-index admission"
+    native <- traverse (either (fail . show) pure) (A.functions valid M.empty admitted)
+    forM_ [[],[0],[2,2,0],[10^(80 :: Int),3,3]] $ \values ->
+      check (evalWith native [list values] (A.body (native M.! helper)) == list (map (+1) values))
+        "computed-index list map lost values, order, or repeated positions"
+    let wrongTail = add [mapped,mappedCtor,helperDef (constructor "cons" [variable 1 [],variable 0 []])]
+        uncheckedMap = valid {document = document base}
+        missingBody = valid {declarations = M.adjust (set "compiled" Null) helper (declarations valid)}
+    forM_ [wrongTail,uncheckedMap,missingBody] $ \invalid ->
+      check (M.notMember "MappedList" (fst (A.discover invalid M.empty)))
+        "unjustified recursion was admitted by the structural list-map rule"
+
 -- Default selection must cover independent definitions and must not infer proof
 -- roles from a declaration's spelling or from a local annotation.
 automaticSelectionChecks :: IO ()
@@ -1547,3 +3865,217 @@ automaticSelectionChecks = do
   annotated <- either (fail . Text.unpack) pure (prepare overlay inputAnnotated)
   check (needs `S.isSubsetOf` required annotated && S.member ("step-preserves","behavior") (required annotated))
     "a local theorem annotation removed a default computational requirement"
+
+-- A composed callback can mention an intermediate type only in an index's
+-- checked type evidence. Every emitted reference must still have a binding.
+callbackBindingChecks :: IO Text
+callbackBindingChecks = fmap Text.unlines $ mapM fixture ["BindingPacket","BindingEnvelope"]
+  where
+    fixture owner = do
+      let universe = universeAt (level 0)
+          v i = variable i []
+          term x = object ["term" .= x]
+          apply f xs = set "eliminations" (toJSON (map application xs)) f
+          lambda x = object ["tag" .= ("lambda" :: Text),"abstraction" .= object ["binds" .= True,"body" .= x]]
+          make = owner <> ".make"
+          wrap = owner <> ".wrap"
+          pair a b = term (call owner [a,b] [])
+          carrier = set "parameters" (Number 2) $ set "constructors" (toJSON [make])
+            $ declaration owner "datatype" (signature [universe,signature [term (v 0)] universe] universe)
+          ctor = set "parameters" (Number 2) $ set "family" (String owner)
+            $ declaration make "constructor" (signature
+              [universe,signature [term (v 0)] universe,term (v 1),term (apply (v 1) [v 0])]
+              (pair (v 3) (v 2)))
+          composite = lambda (apply (v 5) [apply (v 4) [apply (v 3) [v 0]]])
+          operationType = signature
+            [universe,universe,universe,signature [term (v 0)] universe
+            ,signature [term (v 2)] (term (v 2)),signature [term (v 4)] (term (v 4))
+            ,term (v 5),term (apply (v 3) [apply (v 2) [apply (v 1) [v 0]]])]
+            (pair (v 7) composite)
+          operationDecl = set "type" operationType $ operation wrap [] owner (done 8 (constructor make [v 1,v 0]))
+          defs = [carrier,ctor,operationDecl]
+          inv = Inventory (object ["selectionProfile" .= ("declarations" :: Text),"library" .= ("bindings" :: Text)
+              ,"modules" .= [object ["source" .= object ["library" .= ("bindings" :: Text)],"definitions" .= [operationDecl]]]])
+            (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+            (M.singleton "bindings" (S.fromList [(wrap,"behavior"),(owner,"structure"),(make,"structure")]))
+          prepared = P.prepare inv
+          expanded = P.inventory prepared
+          (shapes,errors) = A.discover expanded M.empty
+          calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+          instances = [d | d <- M.elems (declarations expanded),get "specializationOrigin" d == String make]
+      check (M.null (P.failures prepared) && not (null instances))
+        ("composed callback fixture failed preparation: " ++ show (P.failures prepared,errors))
+      forM_ instances $ \d -> do
+        check (P.nativeParameters d == [0,1,2])
+          ("intermediate callback type lost its native binding: " ++ show (P.nativeParameters d))
+        let name = string (get "name" d)
+        calc <- maybe (fail ("missing callback constructor " ++ show name)) pure (M.lookup name calculations)
+        let rendered = Text.unlines (A.renderCalculation expanded shapes id calc)
+        check ("in 'typeArgument1' : Base::Anything [0..*];" `Text.isInfixOf` rendered
+          && "::'typeArgument1'" `Text.isInfixOf` rendered)
+          "callback contract references an undeclared intermediate extent"
+      let output = T.generate inv
+      check (T.complete output) (show (T.diagnostics output))
+      pure (Text.replace "package 'AgdaModel'" ("package '" <> owner <> "'") (T.modelText output))
+
+-- Static carrier arguments can capture runtime values. The constructor used
+-- inside another index must carry those values as well as all source fields.
+constructorCaptureChecks :: IO ()
+constructorCaptureChecks = forM_ ["CapturePacket","CaptureEnvelope"] $ \owner -> do
+  let universe = universeAt (level 0)
+      v i = variable i []
+      ty name args = object ["term" .= call name args []]
+      bool = named "Bool"
+      boolean = set "constructors" (toJSON (["true","false"] :: [Text])) $ declaration "Bool" "datatype" universe
+      bit c = set "family" (String "Bool") $ declaration c "constructor" bool
+      item = set "parameters" (Number 1) $ set "constructors" (toJSON (["item"] :: [Text]))
+        $ declaration "Item" "datatype" (signature [bool] universe)
+      itemCtor = set "parameters" (Number 1) $ set "family" (String "Item") $ declaration "item" "constructor"
+        (signature [bool,bool] (ty "Item" [v 1]))
+      make = owner <> ".make"
+      fieldName = owner <> ".value"
+      box = set "induction" (String "Nothing") $ set "parameters" (Number 1) $ set "constructor" (String make)
+        $ set "fields" (toJSON [fieldName]) $ declaration owner "record" (signature [universe] universe)
+      boxCtor = set "parameters" (Number 1) $ set "family" (String owner) $ declaration make "constructor"
+        (signature [universe,object ["term" .= v 0]] (ty owner [v 1]))
+      fieldDecl = set "projection" (object ["proper" .= owner,"index" .= (2 :: Int)])
+        $ declaration fieldName "function" (signature [universe,ty owner [v 0]] (object ["term" .= v 1]))
+      indexed = set "parameters" (Number 1) $ set "constructors" (toJSON (["atBox"] :: [Text]))
+        $ declaration "AtBox" "datatype" (signature [universe,ty owner [v 0]] universe)
+      indexedCtor = set "parameters" (Number 1) $ set "family" (String "AtBox") $ declaration "atBox" "constructor"
+        (signature [universe,ty owner [v 0]] (ty "AtBox" [v 1,v 0]))
+      inspect = set "type" (signature [bool,ty "Item" [v 0],
+          ty "AtBox" [call "Item" [v 1] [],constructor make [v 0]]] bool)
+        $ operation "inspectCapture" [] "Bool" (done 3 (v 2))
+      defs = [boolean,bit "true",bit "false",item,itemCtor,box,boxCtor,fieldDecl,indexed,indexedCtor,inspect]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "constructor-captures" (S.fromList [(string (get "name" d),
+          if get "kind" d == String "function" then "behavior" else "structure") | d <- defs]))
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      (shapes,errors) = A.discover expanded M.empty
+      results = A.functions expanded M.empty shapes
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  calc <- either (\r -> fail (show (r,errors,M.keys shapes))) pure (maybe (Left (D.refusal D.Syntax (Text.pack (show errors)))) id
+    (M.lookup "inspectCapture" results))
+  case A.inputs calc of
+    [A.Boolean,A.Fibre _ _,A.Fibre _ indices] -> case reverse indices of
+      expression:_ -> forM_ [False,True] $ \flag -> do
+        let payload = R "OpaquePayload" (M.fromList [("tag",B (not flag)),("evidence",Z (10^(40 :: Int)))])
+        case eval [B flag,payload] expression of
+          R typ fields -> case A.variants (shapes M.! typ) of
+            [con] -> check (fields == M.fromList
+              ((typ <> ".index0",B flag):zip (map fst (A.payload con)) [B flag,payload]))
+                "indexed constructor lost its capture or complete payload"
+            _ -> fail "capture record has no unique checked constructor"
+          value -> fail ("expected a constructed record index: " ++ show value)
+      _ -> fail "constructor index disappeared"
+    inputs -> fail ("constructor capture inputs changed: " ++ show inputs)
+  let changeCaptures replace (Object fields) =
+        let walked = Object (fmap (changeCaptures replace) fields)
+            captures = array (get "nativeIndexCaptures" walked)
+        in if null captures then walked else set "nativeIndexCaptures" (toJSON (replace captures)) walked
+      changeCaptures replace (Array values) = Array (fmap (changeCaptures replace) values)
+      changeCaptures _ value = value
+      natural = object ["tag" .= ("literal" :: Text),"literal" .= object
+        ["tag" .= ("natural" :: Text),"value" .= (0 :: Int)]]
+  forM_ [const [],\xs -> xs ++ xs,const [natural]] $ \change ->
+    check (isLeft (A.function expanded M.empty shapes
+      (changeCaptures change (declarations expanded M.! "inspectCapture"))))
+      "constructed index admitted missing, duplicated or ill-typed captures"
+
+-- The expected domain of a constructor passed to an index helper is the
+-- helper's instantiated input, even when the enclosing index is a Boolean.
+constructorContextChecks :: IO ()
+constructorContextChecks = forM_ ["ContextPacket","ContextEnvelope"] $ \owner -> do
+  let v i = variable i []
+      ty name args = object ["term" .= call name args []]
+      ctor = owner <> ".make"
+      helper = owner <> ".observe"
+      bool = named "Bool"
+      constructorDecl = set "runtimeParameters" (Number 1) $ declaration ctor "constructor"
+        (signature [bool,bool] (ty owner [v 1]))
+      observe = set "type" (signature [bool,ty owner [v 0]] bool)
+        $ operation helper [] "Bool" (done 2 (v 1))
+      inspect term = set "type" (signature [bool,ty "FlagIndex" [call helper [v 0,term] []]] bool)
+        $ operation "inspectContext" [] "Bool" (done 2 (v 1))
+      sh = A.Shape owner False [A.Constructor ctor [("parameter",A.Boolean),("payload",A.Boolean)] [A.Input 0]] [A.Boolean]
+      flag = A.Shape "FlagIndex" False [] [A.Boolean]
+      shapes = M.fromList [(owner,sh),("FlagIndex",flag)]
+      defs = [constructorDecl,observe]
+      inv = Inventory (object ["builtins" .= object ["bool" .= ("Bool" :: Text)]])
+        (M.fromList [(string (get "name" d),d) | d <- defs]) M.empty
+        (M.singleton "context" (S.singleton (helper,"behavior")))
+  let table = M.mapMaybe (either (const Nothing) Just) (A.functions inv M.empty shapes)
+  calculation <- either (fail . show) pure (A.function inv M.empty shapes (inspect (constructor ctor [v 0])))
+  case A.inputs calculation of
+    [A.Boolean,A.Fibre "FlagIndex" [index]] -> forM_ [False,True] $ \b ->
+      check (evalWith table [B b] index == B b) "index helper lost its argument's contextual constructor parameter"
+    _ -> fail "contextual constructor changed helper index type"
+  forM_ [constructor ctor [],constructor ctor [v 0,v 0],constructor ctor [call "unknown" [] []]] $ \bad ->
+    check (isLeft (A.function inv M.empty shapes (inspect bad)))
+      "contextual constructor recovery admitted malformed payloads"
+
+  -- A datatype may have both explicit captures and an omitted source value
+  -- parameter. Recover only the latter, at its original telescope position.
+  let capturedShape = A.Shape owner False [A.Constructor ctor
+        [("capture",A.Boolean),("parameter",A.Boolean),("payload",A.Boolean)] [A.Input 0,A.Input 1]] [A.Boolean,A.Boolean]
+      capturedDecl = set "runtimeParameters" (Number 2) $ set "type"
+        (signature [bool,bool,bool] (ty owner [v 2,v 1])) constructorDecl
+      capturedHelper = set "type" (signature [bool,bool,ty owner [v 1,v 0]] bool)
+        $ set "compiled" (done 3 (v 1)) observe
+      capturedInventory = inv {declarations = M.fromList [(ctor,capturedDecl),(helper,capturedHelper)]}
+      capturedShapes = M.insert owner capturedShape shapes
+      captures = [v 1]
+      supplied = set "nativeIndexCaptures" (toJSON captures) (constructor ctor [v 0])
+      capturedOperation term = set "type" (signature [bool,bool,
+        ty "FlagIndex" [call helper [v 1,v 0,term] []]] bool)
+        $ operation "inspectCapturedContext" [] "Bool" (done 3 (v 1))
+      capturedTable = M.mapMaybe (either (const Nothing) Just) (A.functions capturedInventory M.empty capturedShapes)
+  captured <- either (fail . show) pure (A.function capturedInventory M.empty capturedShapes (capturedOperation supplied))
+  case A.inputs captured of
+    [A.Boolean,A.Boolean,A.Fibre "FlagIndex" [index]] -> forM_ [False,True] $ \first -> forM_ [False,True] $ \second ->
+      check (evalWith capturedTable [B first,B second] index == B second)
+        "explicit capture displaced an omitted datatype parameter"
+    _ -> fail "captured datatype changed the helper input telescope"
+  check (isLeft (A.function capturedInventory M.empty capturedShapes
+      (capturedOperation (set "nativeIndexCaptures" (toJSON [v 0]) supplied))))
+    "datatype capture recovery equated unrelated caller inputs"
+
+-- A callback annotation repeats the already checked Runtime domain. It must
+-- not change dependent membership, and must never equate different callbacks.
+indexAnnotationChecks :: IO ()
+indexAnnotationChecks = forM_ ["AnnotatedPacket","AnnotatedEnvelope"] $ \owner -> do
+  let bool = P.Named "Bool" []
+      callback = P.Callable [bool] bool
+      otherCallback = P.Callable [bool,bool] bool
+      fn = P.IndexInput 7
+      typed = P.IndexTyped callback fn
+      member ix = P.Named owner [P.Runtime callback ix]
+      accept = owner <> ".accept"
+      declarationType = signature [universeAt (level 0),object ["term" .= variable 0 []]] (universeAt (level 0))
+      inv = Inventory (object []) (M.singleton accept (set "parameters" (Number 1)
+        (declaration accept "datatype" declarationType))) M.empty M.empty
+      checkMember expected actual = P.readType inv
+        [Just (P.Runtime actual (P.IndexInput 9)),Just expected]
+        (call accept [variable 1 [],variable 0 []] [])
+      wrappers = [id,\ty -> P.Named "Sequence" [ty],\ty -> P.Callable [ty] ty]
+  forM_ wrappers $ \wrap -> do
+    let bare = wrap (member fn)
+        annotated = wrap (member typed)
+    check (P.typeValue bare == P.typeValue annotated)
+      "redundant index type evidence changed the canonical specialization identity"
+    check (checkMember bare annotated == Right (P.Named accept [bare,P.Runtime annotated (P.IndexInput 9)]))
+      "redundant callback annotation changed the checked dependent domain"
+    check (checkMember annotated bare == Right (P.Named accept [annotated,P.Runtime bare (P.IndexInput 9)]))
+      "dependent-domain annotation comparison was asymmetric"
+    forM_ [P.IndexTyped callback (P.IndexInput 8),P.IndexTyped otherCallback fn] $ \wrong ->
+      check (isLeft (checkMember bare (wrap (member wrong)) ))
+        "annotation normalization equated distinct callbacks or incompatible type evidence"
+  let nested = P.Callable [member typed] (member typed)
+      bareNested = P.Callable [member fn] (member fn)
+      annotatedNested = P.Named owner [P.Runtime nested (P.IndexTyped nested (P.IndexInput 3))]
+      plainNested = P.Named owner [P.Runtime bareNested (P.IndexInput 3)]
+  check (not (isLeft (checkMember plainNested annotatedNested)))
+    "nested callback domains were not normalized before checking redundant annotations"

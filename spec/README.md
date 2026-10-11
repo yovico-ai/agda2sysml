@@ -40,9 +40,9 @@ library descriptor declares this directory as its include path. Generated
 interface files are ignored. A separately installed Agda 2.8.0 can also run the
 aggregate directly.
 
-The aggregate command is the formal gate. The Nix check also runs the Haskell
+The aggregate command checks the complete formal specification. The Nix check also runs the Haskell
 and CLI integration suites and the independent target evaluator. Passing the
-formal gate alone does not imply that a SysML emitter has been tested.
+Agda check alone does not imply that a SysML emitter has been tested.
 
 ## Proof coverage
 
@@ -61,6 +61,8 @@ formal gate alone does not imply that a SysML emitter has been tested.
 | [FiniteLowering](Agda2SysML/FiniteLowering.agda) | Exhaustive finite constructor cases preserve every input substitution; native ordered equality tests select the same branch | Concrete enum identities and textual rendering must satisfy the finite carrier correspondence |
 | [DependentFamilies](Agda2SysML/DependentFamilies.agda) | Every dependent family is equivalent to the fibres of its own indexed carrier, in both directions and without K | Native domain types and index constraints must implement that carrier and its projection; arbitrary proof erasure is not justified |
 | [AlgebraicValues](Agda2SysML/AlgebraicValues.agda) | Typed products and admissible sums preserve fields, payload binding, round trips, distinct constructors, tag preservation, inactive-slot absence, and dispatch | Checked schemas and native field multiplicities must implement the abstract carriers |
+| [StructuredIndices](Agda2SysML/StructuredIndices.agda) | Ordered index transport round-trips, preserves and reflects equality, and preserves complete dependent members | Checked constructor payloads, sequence order and repeated positions must survive extraction and rendering |
+| [SchemaConcatenation](Agda2SysML/SchemaConcatenation.agda) | Checked empty/prepend equations characterize concatenation; source/native calculations agree, and regrouping preserves ordered contents | Index-helper admission must establish the equations independently of consuming families and retain calls and bindings in emitted constraints |
 | [FirstOrder](Agda2SysML/FirstOrder.agda) | Every function in a finite program preserves evaluation under lowering, including ordered nested calls | Bodies can call only preceding definitions; compiler extraction and native invocation must implement the typed expressions, with separate preservation evidence for primitive operations |
 | [Specialization](Agda2SysML/Specialization.agda) | Type substitution preserves interpretation for arbitrary families; closed instantiation preserves values in both directions and transports first-order operations | Concrete-use discovery, checked binder interpretation, identity generation, and native lowering must instantiate these laws; open parameters and dependent value indices are outside the rule |
 
@@ -105,7 +107,7 @@ reason. The inventory can represent the inspected corpus or the required
 semantic closure; those must remain separately identified in output. Display
 roles such as supporting lemma are orthogonal to representation status.
 
-`Evidence : Id → Set` is deliberately a parameter. The completeness gate proves
+`Evidence : Id → Set` is deliberately a parameter. The completeness theorem proves
 that evidence is carried, not that an arbitrary producer chose a sufficiently
 strong evidence predicate. An implementation correspondence argument must
 connect this predicate to the actual source and target semantics. Instantiating
@@ -142,6 +144,13 @@ dispatch preservation for arbitrary branch functions. Native field cardinality,
 exact-type constraints, and checked compiler telescope order instantiate these
 laws; the Agda proof does not parse or execute SysML.
 
+`StructuredIndices` quantifies over arbitrary atom carriers with an invertible
+representation. Mapping atoms through an ordered schema preserves every
+position and repeated occurrence. Equality reflection prevents distinct schemas
+from being merged, and dependent transport preserves the entire member. The
+implementation tests execute field encoding, decoding and positional projection
+from parsed SysML; they also reject mismatched layouts and member indices.
+
 `FiniteLowering` generalizes exhaustive nullary constructor cases to every finite
 domain size. Its lowering law quantifies over arbitrary input substitutions;
 `native-select-preserves` justifies ordered equality tests with an exhaustive
@@ -174,7 +183,10 @@ fibre use must satisfy the required index equality.
 `DependentRecords` extends the family/fibre correspondence to records whose
 members depend on arbitrary preceding field tuples. It proves both round trips,
 unchanged prefix values, dependent field preservation, and operation preservation.
-The accepted compiler fragment restricts the projected indices to finite domains.
+The accepted compiler fragment includes supported finite, natural, structured,
+and callback-computed indices; see the [translation rules](../docs/translation-rules.md)
+for its current admission conditions. These laws are more general than the
+implemented fragment.
 
 `SpecializedFamilies` composes static interpretation equality with native fibre
 encoding inside dependent records. It quantifies over arbitrary static keys,

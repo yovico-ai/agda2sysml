@@ -18,6 +18,10 @@ their actual checked references. Names do not decide whether a function is a
 proof: a signature ending in Agda's registered equality type can be retained
 as an equality contract; other functions keep computational requirements.
 Proof-source retention does not erase an additional computational use.
+Supported equality statements also receive native constraint definitions.
+`correspondence.json.nativeStatements` distinguishes translated statements from
+textual fallbacks and gives each fallback's reason. These counts are separate
+from native calculation coverage; proof bodies remain source contracts.
 Postulates retain their statement and assumption provenance, while still
 requiring structural evidence for a postulated type or behavioral evidence for
 a postulated operation. Assumption retention cannot claim executable support.
@@ -31,6 +35,12 @@ and conflicting annotation roots fail before producing a bundle.
 
 All relative project paths are interpreted relative to the mapping file.
 The output directory must not already exist. Input source is never edited.
+
+Generation emits one `model.sysml` and one `correspondence.json` for the selected
+scope. Detailed source-to-target tracing is always computed and included;
+there is currently no option to omit it or split these artifacts by module.
+The full self-specification report can be hundreds of megabytes. See the
+[current checkpoint](current-state.md) for measured sizes and runtime limits.
 Commands perform no publication or upload. They operate on the configured local
 libraries and pinned validator installation.
 
@@ -173,7 +183,24 @@ Closed universe-level arguments appear in `specializations[].arguments` as
 `{"level": 2}`, interleaved with type arguments in checked telescope order.
 Equivalent closed level expressions use the same identity. The
 `static.universe-level` rule records compiler level dependencies without a runtime
-target; unresolved or ambiguous levels prevent complete generation.
+target; unsolved or ambiguous level constraints prevent complete generation.
+
+Open declaration schemas retain symbolic levels in the same argument list as
+`{"levelExpression":{"constant":0,"parameters":[],"openParameters":[[0,0]]}}`.
+Each pair identifies a level slot and successor offset; `parameters` are
+substitutable template slots and `openParameters` are bound schema slots.
+The expression is the maximum of its constant and all offset level terms.
+Open type/family argument metadata uses the same expression object in its
+`universe` field, while closed universes retain their numeric format.
+These levels affect checked compatibility and specialization identity, but
+do not add runtime SysML inputs. Native type and family bindings remain explicit.
+
+An unused function-valued module parameter appears in specialization arguments
+as `{"unusedModuleParameter": true}`. It retains its source telescope position
+for traceability and contributes no native input. The inventory's
+`moduleParameters` count comes from Agda; carrier module copies also retain their
+checked `moduleAlias` clause. The dependency and alias checks are described in
+the [translation rules](translation-rules.md#unused-higher-order-module-parameters).
 
 For finite indexed families, `algebraicCarriers[].indices` records each index's
 position, native domain and field target. Constructors record `resultIndices`,
@@ -560,3 +587,8 @@ arguments/capture types. A closure instance has ordinary runtime inputs and no
 runtime closure object; its source link refers to the original checked helper.
 `specializations[].arguments` continues to describe type arguments, while closure
 arguments are described separately in `preparationEvidence`.
+
+Computed indices may include `closureInputs`, `closureType`, and `body` in
+specialization argument metadata. These describe checked lexical binders and
+their callback contract. The emitted model uses native calculation expressions
+with captured inputs; this metadata is not a runtime Agda evaluator.

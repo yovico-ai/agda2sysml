@@ -14,6 +14,29 @@ import tempfile
 from open_parameters import verify_open_parameters
 from dependent_evidence import verify_dependent_evidence
 from recursive_core import verify_recursive_core
+from structured_indices import verify_structured_indices
+from callbacks import verify_callbacks
+from dependent_record_path import verify_dependent_record_path
+from family_scope import verify_family_scope
+from natural_values import verify_natural_values
+from tagged_sums import verify_tagged_sums
+from report_accounting import verify_report_accounting
+from native_callbacks import verify_native_callbacks
+from callable_fields import verify_callable_fields
+from equality_statements import verify_equality_statements
+from symbolic_levels import verify_symbolic_levels
+from dependent_callbacks import verify_dependent_callbacks
+from multi_callbacks import verify_multi_callbacks
+from schema_records import verify_schema_records
+from dependent_schemas import verify_dependent_schemas
+from arithmetic_indices import verify_arithmetic_indices
+from dependent_patterns import verify_dependent_patterns
+from contextual_indices import verify_contextual_indices
+from dependent_family_parameters import verify_dependent_family_parameters
+from specialized_callbacks import verify_specialized_callbacks
+from index_closures import verify_index_closures
+from indexed_validation import verify_indexed_validation
+from computed_lists import verify_computed_lists
 
 
 def check(condition, message):
@@ -289,6 +312,132 @@ models:
     self_inventory = json.loads((self_output / "inventory.json").read_text())
     check_source_catalog(self_inventory)
     self_report = json.loads((self_output / "correspondence.json").read_text())
+    natural_evidence = verify_natural_values(self_output)
+    check(natural_evidence == {'operations': 8, 'comparisons': 344, 'invalidCasesRejected': 6},
+          "finite-natural adapters lack complete arithmetic results and inconsistent-evidence refusals")
+    sum_evidence = verify_tagged_sums(self_output)
+    accounting_evidence = verify_report_accounting(self_output)
+    native_callback_evidence = verify_native_callbacks(self_output)
+    callable_field_evidence = verify_callable_fields(self_output)
+    statement_evidence = verify_equality_statements(self_output)
+    level_evidence = verify_symbolic_levels(self_output)
+    dependent_callback_evidence = verify_dependent_callbacks(self_output)
+    multi_callback_evidence = verify_multi_callbacks(self_output)
+    schema_record_evidence = verify_schema_records(self_output)
+    dependent_schema_evidence = verify_dependent_schemas(self_output)
+    arithmetic_index_evidence = verify_arithmetic_indices(self_output)
+    pattern_evidence = verify_dependent_patterns(self_output)
+    contextual_evidence = verify_contextual_indices(self_output)
+    family_evidence = verify_dependent_family_parameters(self_output)
+    specialized_evidence = verify_specialized_callbacks(self_output)
+    closure_evidence = verify_index_closures(self_output)
+    validation_evidence = verify_indexed_validation(self_output)
+    list_evidence = verify_computed_lists(self_output)
+    check(list_evidence['operations'] == 8 and list_evidence['statements'] == 3
+          and list_evidence['comparisons'] >= 366
+          and list_evidence['invalidCasesRejected'] >= 128
+          and list_evidence['bodyMutationsDetected'] == 6,
+          'computed lists lack complete environment/member conversions and refusal checks')
+    check(validation_evidence['operations'] == 7 and validation_evidence['statements'] == 1
+          and validation_evidence['comparisons'] >= 155
+          and validation_evidence['invalidCasesRejected'] >= 80
+          and validation_evidence['bodyMutationsDetected'] == 3,
+          'indexed validation lacks complete decisions, witnesses, refusal or mutation checks')
+    check(closure_evidence['operations'] == 3 and closure_evidence['statements'] == 4
+          and closure_evidence['comparisons'] >= 117
+          and closure_evidence['invalidCasesRejected'] >= 11
+          and closure_evidence['bodyMutationsDetected'] == 3
+          and closure_evidence['functionIdentityNotStored'],
+          'dependent-index closures lack complete conversion, operation, law or refusal checks')
+    check(specialized_evidence['operations'] == 3
+          and specialized_evidence['comparisons'] >= 48
+          and specialized_evidence['invalidCasesRejected'] >= 11
+          and specialized_evidence['bodyMutationsDetected'] == 3
+          and specialized_evidence['emptyConstraintMutationDetected'],
+          'recursive substitution and closed instantiation lack complete results or refusal checks')
+    check(family_evidence['operations'] == 7
+          and family_evidence['comparisons'] >= 68
+          and family_evidence['invalidCasesRejected'] >= 19
+          and family_evidence['mutationsDetected'] == 7,
+          'dependent and partial families lack complete operations or mismatch checks')
+    check(contextual_evidence['operations'] == 11
+          and contextual_evidence['nativeStatements'] == 4
+          and contextual_evidence['comparisons'] >= 92
+          and contextual_evidence['invalidCasesRejected'] >= 19
+          and contextual_evidence['mutationsDetected'] == 15,
+          'computed dependent membership lacks complete operations or mismatch checks')
+    check(pattern_evidence['operations'] == 8
+          and pattern_evidence['statements'] == 7
+          and pattern_evidence['comparisons'] >= 1000
+          and pattern_evidence['invalidCasesRejected'] >= 18
+          and pattern_evidence['bodyMutationsDetected'] == 15
+          and pattern_evidence['differentContextSizes'] > 0
+          and pattern_evidence['completeEvidencePreserved'],
+          'dependent pattern matches lack complete operations, evidence preservation, or refusal checks')
+    check(arithmetic_index_evidence['operations'] == 7
+          and arithmetic_index_evidence['statements'] == 8
+          and arithmetic_index_evidence['comparisons'] >= 1000
+          and arithmetic_index_evidence['invalidCasesRejected'] == 12
+          and arithmetic_index_evidence['bodyMutationsDetected'] == 15
+          and arithmetic_index_evidence['differentContextSizes'] > 0
+          and arithmetic_index_evidence['completeEvidencePreserved'],
+          'arithmetic indices lack complete values, preserved bounds, or rejection checks')
+    check(dependent_schema_evidence['operations'] == 11
+          and dependent_schema_evidence['comparisons'] >= 102
+          and dependent_schema_evidence['invalidCasesRejected'] >= 160
+          and dependent_schema_evidence['bodyMutationsDetected'] == 24
+          and dependent_schema_evidence['structuredStates']
+          and dependent_schema_evidence['completeEvidencePreserved'],
+          'dependent schema construction and relation conversions lack complete behavior or refusal checks')
+    check(schema_record_evidence['operations'] == 13
+          and schema_record_evidence['statements'] == 10
+          and schema_record_evidence['statementMutationsDetected'] == 20
+          and schema_record_evidence['comparisons'] >= 342
+          and schema_record_evidence['invalidBindingsRejected'] >= 62
+          and schema_record_evidence['bodyMutationsDetected'] == 34
+          and schema_record_evidence['proofCallbackChecks'] == 24,
+          'stored schema conversions lack complete values, binding refusals, or mutation checks')
+    check(multi_callback_evidence['operations'] == 7
+          and multi_callback_evidence['comparisons'] >= 230
+          and multi_callback_evidence['invalidBindingsRejected'] >= 11
+          and multi_callback_evidence['bodyMutationsDetected'] == 7
+          and multi_callback_evidence['dependentArguments']
+          and multi_callback_evidence['completeResultsAndOriginsPreserved'],
+          'multiargument callbacks lack complete behavior, dependent binding or mutation checks')
+    check(dependent_callback_evidence == {'operations': 6, 'comparisons': 360,
+          'evidenceCallbacksExercised': 12, 'invalidBindingsRejected': 15,
+          'bodyMutationsDetected': 6},
+          'indexed callbacks lack complete evaluator, evidence, refusal or mutation checks')
+    check(level_evidence['operations'] == 10 and level_evidence['comparisons'] >= 700
+          and level_evidence['invalidCasesRejected'] >= 30
+          and level_evidence['nativeStatementsExercised'] == 4 and level_evidence['bodyMutationDetected'],
+          'symbolic universe operations lack complete behavior and refusal checks')
+    check(statement_evidence['expectedStatements'] == 33
+          and statement_evidence['executedStatements'] == 33
+          and statement_evidence['computedIndexMutationsDetected'] == 5
+          and statement_evidence['conclusionMutationDetected']
+          and statement_evidence['premiseMutationDetected']
+          and statement_evidence['proofSourcesRetained'],
+          'native theorem statements lack behavior, input evidence or provenance checks')
+    check(callable_field_evidence['operations'] == 6
+          and callable_field_evidence['comparisons'] >= 5000
+          and callable_field_evidence['invalidCasesRejected'] >= 15
+          and callable_field_evidence['capturedLambdaComparisons'] >= 1656
+          and callable_field_evidence['nativeStatements'] == 4
+          and callable_field_evidence['lambdaMutationsDetected'] == 2,
+          'decision-tree normalization, captured guards, or rule-list behavior was not verified')
+    check(native_callback_evidence['operations'] == 8 and native_callback_evidence['comparisons'] >= 400
+          and native_callback_evidence['invalidCasesRejected'] >= 15,
+          'native unary callbacks lack complete results and invalid-binding checks')
+    check(accounting_evidence['operations'] == 4 and accounting_evidence['comparisons'] >= 200
+          and accounting_evidence['invalidCasesRejected'] == 28 and accounting_evidence['unusedRuntimeInputs'] == 0,
+          'existing report accounting lacks complete counts, identity preservation or invalid-input refusals')
+    check(sum_evidence['operations'] == 7 and sum_evidence['tabulationComparisons'] == 30
+          and sum_evidence['comparisons'] >= 100 and sum_evidence['invalidCasesRejected'] == 36
+          and sum_evidence['constructionComparisons'] >= 100 and sum_evidence['lookupComparisons'] >= 100
+          and sum_evidence['computedSchemaRefusals'] == 18
+          and sum_evidence['repeatedConstructorSchemas'] > 0 and sum_evidence['completePayloadsAndEvidencePreserved'],
+          "tagged-sum adapters lack complete results, distinct equal-schema constructors or validity refusals")
     open_evidence = verify_open_parameters(self_output)
     check(open_evidence["comparisons"] >= 700 and open_evidence["invalidBindingsRejected"] == 5,
           "open algorithms lack parsed-target behavior and parameter checks")
@@ -298,6 +447,22 @@ models:
     recursive_evidence = verify_recursive_core(self_output)
     check(recursive_evidence["totalComparisons"] >= 1000 and recursive_evidence["invalidCasesRejected"] >= 10,
           "recursive core lacks parsed results and index/finiteness/capture checks")
+    structured_evidence = verify_structured_indices(self_output)
+    check(structured_evidence["comparisons"] == 18116 and structured_evidence["appendComparisons"] == 9160
+          and structured_evidence["invalidSchemasRejected"] == 17
+          and structured_evidence["repeatedPositions"] > 1000 and structured_evidence["reorderedBindings"] == 3,
+          "structured indices lack ordered schemas, complete members, or invalid-index refusals")
+    callback_evidence = verify_callbacks(self_output)
+    check(callback_evidence == {'comparisons': 220, 'invalidCasesRejected': 6, 'operations': 5},
+          "callback consumers lack complete outcomes and binding/schema refusals")
+    record_path_evidence = verify_dependent_record_path(self_output)
+    check(record_path_evidence == {'comparisons': 150, 'invalidCasesRejected': 20, 'operations': 5,
+                                  'nativeStatements': 6, 'statementComparisons': 210, 'bodyMutationsDetected': 14},
+          "dependent-record path lacks complete members and projected index refusals")
+    family_scope_evidence = verify_family_scope(self_output)
+    check(family_scope_evidence == {'nativeStatements': 2, 'comparisons': 30,
+                                   'invalidBindingsRejected': 30, 'bodyMutationsDetected': 30},
+          "dependent computation laws lack cross-scope family and callback checks")
     self_manifest = json.loads((self_output / "manifest.json").read_text())
     check(self_manifest["mappingDigest"] is None and self_manifest["mappingVersion"] is None
           and self_manifest["selectionProfile"] == "declarations", "default generation required a hidden mapping")

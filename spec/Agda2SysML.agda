@@ -19,6 +19,8 @@ import Agda2SysML.DependentFamilies
 import Agda2SysML.FiniteLowering
 
 import Agda2SysML.AlgebraicValues
+import Agda2SysML.StructuredIndices
+import Agda2SysML.SchemaConcatenation
 import Agda2SysML.NaturalValues
 import Agda2SysML.NaturalIndices
 import Agda2SysML.SequenceValues

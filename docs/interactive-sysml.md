@@ -5,10 +5,19 @@ source-aware exploration, and a SysML environment for inspecting declarations,
 visualizing model elements, and evaluating supported calculations. Both use the
 same `model.sysml`; validation does not imply universal execution support.
 
+The [register workflow](examples/register-workflow.sysml) is a small complete
+example; the [self model](examples/self.sysml.gz) contains the much larger partial
+translation. Both passed the pinned validator. Each defines its own
+`AgdaModel` package; use separate fresh kernels.
+The [checkpoint](current-state.md) records the exact validation and execution
+evidence for these files. Regenerate a full bundle for the browser review.
+
 ## Browser review: no additional installation
 
-Generate the self-model as described in the [alpha walkthrough](alpha.md), then
-open `/tmp/agda2sysml-alpha-self/review.html` in a browser.
+Generate a bundle as described in the [alpha walkthrough](alpha.md), then open
+`/tmp/agda2sysml-alpha-self/review.html` or
+`/tmp/agda2sysml-alpha-register/review.html` in a browser. A failed validation
+does not produce a completed bundle or review.
 
 Search by name, checked source, or diagnostic text. Filter by module and by
 **Has native SysML**, **Retained proof contracts**, or **Needs translation**.
@@ -32,7 +41,8 @@ a full Java 21+ JDK/JRE with font support, Python 3 with `venv`/pip, `curl`,
 `unzip`, and Graphviz's `dot` on your path. A headless Java package can suffice
 for validation but lack the font libraries needed for diagrams. These
 interactive tools are optional; the generator already includes its own
-validator through Nix.
+validator through the [Cabal/Java or Nix installation](installation.md).
+Python and Jupyter are optional interactive tooling, not generator dependencies.
 
 On Linux or macOS, outside the application checkout:
 
@@ -69,6 +79,12 @@ in a text editor, copy its complete contents into the first notebook cell,
 and run that cell with **Shift+Enter**. For the self-model, use
 `/tmp/agda2sysml-alpha-self/model.sysml`. The cell defines the `AgdaModel`
 package. Wait for parsing and validation before running further cells.
+
+For planning, allow roughly 30 seconds to one minute for the small register
+model and tens of minutes for the full self model's validation. The exact
+notebook import time can differ from the headless validator. See the
+[timing estimates](../validator/README.md#runtime-estimates) and recorded
+checkpoint measurements. These estimates do not describe calculation execution.
 
 Keep the whole file together: copied fragments can depend on generated types
 or helpers declared elsewhere in the bundle. Start a fresh kernel when switching
@@ -119,6 +135,27 @@ and generated self-model. Notebook visualization displays SVG using Graphviz.
 If a diagram reports a renderer exception, check that `dot` is installed and
 that the configured path points to its executable. If a reference is unresolved,
 check that the entire model cell ran successfully and use its exact target name.
+
+## Inspect theorem constraints
+
+In a newly generated self-model, find a translated row in
+`correspondence.json.nativeStatements` and use its exact `target` with `%show`.
+For example:
+
+```text
+%show AgdaModel::'Agda2SysML.NaturalValues.source-roundtrip.law'
+```
+
+Its `constraint def` exposes the theorem's input and its equality conclusion.
+Other laws also take explicit type/family bindings and premise witnesses. Supply
+all of those when evaluating a constraint; a proof-valued input must satisfy
+its complete carrier and index contracts. Read the original theorem and proof
+through the corresponding source links in the review page.
+
+A translated statement is usable as a model constraint, independently of
+whether Pilot can execute its particular expression dependencies. The pinned
+Pilot's execution limits below still apply. Validator acceptance and a few
+successful evaluations do not establish a universally quantified proof.
 
 ## Explore the mapped state-update model
 
@@ -176,6 +213,96 @@ record construction with invocation-dependent fields, every type-extent
 quantifier, or arbitrary-precision natural arithmetic. A result that remains
 an expression or feature reference is **unevaluated**, not a successful value.
 Evaluate small supported examples and inspect the returned result explicitly.
+
+Pilot 0.58.0 also returns `false` in the following comparisons of equivalent
+constructed attribute values. Both identical field order and reordered values
+of an unordered field reproduce the limitation:
+
+```sysml
+attribute def Unordered {
+  attribute values : ScalarValues::Boolean [0..*];
+}
+```
+
+```text
+%eval new Unordered(values=(true,false)) == new Unordered(values=(false,true))
+%eval new Unordered(values=(true,false)) == new Unordered(values=(true,false))
+```
+
+Consequently, an equality law involving constructed records may evaluate to
+`false` in Pilot even for equivalent values. These checks do not establish the
+underlying evaluator cause. The independent
+test interpreter follows the declared ordering and uniqueness of each field,
+including all payloads and evidence. This follows the data-value and feature
+semantics in [KerML 1.0, sections 7.4.2 and 8.4.3.4](https://www.omg.org/spec/KerML/1.0/PDF).
+Native constraint validation and independent behavior checks are reported
+separately from Pilot execution; the latter is not claimed for every law.
+
+Native unary and multiargument callback inputs use `in calc` and invoke the bound calculation
+directly. Stored callable members use `ref calc` inside immutable attribute
+definitions. The generated `DecisionTree.evaluate`, `evaluatePartial`, `select`,
+and `withFallback` accept supplied trees and rule lists, including their callable
+members. Inspect the constructor helpers, selected payloads, member signatures,
+and recursive calculation bodies in the model. Reconstruction retains the
+supplied callable references and full result values.
+
+`DecisionTree.restrict` and `normalize` also construct callbacks. Inspect the
+body expressions inside their returned rule records: each has typed lambda
+arguments and references to its enclosing calculation's captured values or
+guards. `normalize` emits positive rules before negative rules. The associated
+`restrict-true`, `restrict-false`, `normalization-preserves-evaluation`, and
+`normalization-sound` constraint definitions expose the preservation statements
+and their full premise evidence. These are available for interactive inspection;
+the Pilot callback-execution limitation below applies to constructed callbacks
+as well as supplied callbacks.
+
+The generated `FirstOrder.lookup`, `nativeLookup`, `evaluate`, `evaluateArgs`,
+`nativeEvaluate`, and `nativeEvaluateArgs` also retain indexed callback signatures.
+Inspect the `Table`/`NativeTable` constructors and `Operation`'s three `ref calc`
+members. Their contracts connect argument schemas, result indices, and the
+complete equality evidence returned by `operation-preserves`. The `.invoke`
+helpers expose member calls as ordinary typed calculations. These signatures and
+contracts are available for interactive inspection; the Pilot execution
+limitation below applies to these callbacks too.
+
+For multiargument callbacks, inspect the ordered `argument`, `argument1`, and
+subsequent inputs inside `in calc` or `ref calc`. `ComputedIndices.replace`
+shows a callback whose position argument and expression result share the first
+argument's type index. `Derivations.Trace.combine` and the sequence case operations
+show ordinary binary callbacks. Partial runtime application is explicitly refused.
+
+For stored schema fields, find `OpenParameters.Binding` or
+`FamilyRelations.Binding` in the review and follow its generated carrier.
+Inspect the schema field, its unordered `items` relation rows, and the member
+carrier's binding, index, and payload fields. The membership constraint requires
+a matching complete row. Schema rows and membership values use native `new`
+construction; the Agda records also have their emitted constructor calculations.
+Follow `Transport.encodeValue`/`decodeValue` and their
+list operations, or `Transport.encodeAt`/`decodeAt`, `select`, and `reindex`.
+Their contracts retain the chosen binding and indices; reindexing requires
+actual equality evidence. Lists whose element type captures a runtime binding
+may use recursive constructor carriers rather than a single `items` field;
+use the emitted constructors and their capture parameters when inspecting them.
+
+`Relations.RelationRule` shows a family whose witness domain comes from an
+earlier field. Follow `emitRule` to see native collection expressions constructing
+an edge's constraint rows from the supplied state and witness extents. Each row
+retains a complete `EndpointConditions` record: both endpoint equations and the
+admission evidence. The binding and rows also retain their captured witness
+schema. `emit` preserves the order and repeated positions of the rule list.
+Follow `relation-complete` and `relation-sound` to inspect the recursive
+calculations converting complete relation evidence in both directions. Their
+behavior is independently checked with distinct evidence values and structured
+states. The callback execution limitation below also applies to these operations.
+
+Pilot 0.58.0 accepts these models but may leave callback invocations
+unevaluated, including forwarded bindings whose direct calculations evaluate
+successfully. Inspect their signatures, bodies and contracts interactively;
+do not treat an unresolved `InvocationExpression` as the callback's result.
+The independent parsed-model tests cover these operations; they are not evidence
+that Pilot can execute the same bindings. See the
+[callback rule and limitations](translation-rules.md#native-unary-and-multiargument-callback-inputs)
+and [callable members](translation-rules.md#native-callable-members).
 
 The project's independent tests parse emitted SysML and compare complete results
 for supported algorithms, including recursive and parameterized ones. That

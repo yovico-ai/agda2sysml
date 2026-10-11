@@ -248,13 +248,16 @@ definition d = object $ ["name" .= name (defName d), "displayName" .= prettyShow
             Right p -> object ["proper" .= fmap name (projProper p)
               , "original" .= name (projOrig p), "index" .= projIndex p])]
       Datatype{..} -> ["kind" .= ("datatype" :: T.Text), "parameters" .= dataPars, "constructors" .= map name dataCons
+        ,"moduleAlias" .= fmap clause dataClause
         -- Agda's Datatype alternative is inductive. Coinduction is recorded
         -- separately on Record; there is no coinductive Datatype alternative.
         ,"induction" .= ("Inductive" :: T.Text)]
       Record{..} -> ["kind" .= ("record" :: T.Text), "parameters" .= recPars
+        ,"moduleAlias" .= fmap clause recClause
         ,"constructor" .= name (conName recConHead), "fields" .= map (name . unDom) recFields
         ,"induction" .= show recInduction, "etaEquality" .= show recEtaEquality']
-      Constructor{..} -> ["kind" .= ("constructor" :: T.Text), "family" .= name conData, "parameters" .= conPars]
+      Constructor{..} -> ["kind" .= ("constructor" :: T.Text), "family" .= name conData, "parameters" .= conPars
+        ,"canonicalConstructor" .= name (conName conSrcCon)]
       Axiom{} -> ["kind" .= ("axiom" :: T.Text)]
       Primitive{..} -> ["kind" .= ("primitive" :: T.Text), "primitive" .= show primName]
       PrimitiveSort{} -> ["kind" .= ("primitiveSort" :: T.Text)]

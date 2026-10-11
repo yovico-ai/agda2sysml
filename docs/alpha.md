@@ -11,22 +11,28 @@ provide project-specific executable code or replace Agda behavior. The
 [README](../README.md#implemented-functionality) lists implemented features,
 and the [translation rules](translation-rules.md) state their exact boundaries.
 
-## 1. Get and build the alpha
+This page describes the current development snapshot. The original
+`v0.1.0-alpha.1` tag remains a historical release with less translation support.
+The [current checkpoint](current-state.md) provides measured results and
+generated `.sysml` files without requiring a local build.
 
-You need Git and Nix with the `nix-command` and `flakes` experimental features
-enabled. The flake supplies pinned Agda 2.8.0, GHC, Cabal, Java, and the SysML
-validator. You do not need a separately installed Agda standard library for
-this project's builtin-only specification.
+## 1. Get and build
+
+Use the [installation instructions](installation.md) for Cabal and Java without
+Nix, or the optional pinned Nix build below. The flake supplies Agda 2.8.0, GHC,
+Cabal, Java, and the SysML validator. This project's builtin-only specification
+does not require the Agda standard library.
 
 ```sh
 git clone https://github.com/yovico-ai/agda2sysml.git
 cd agda2sysml
 nix build
+export PATH="$PWD/result/bin:$PATH"
 ./result/bin/agda2sysml --version
 ./result/bin/agda2sysml --help
 ```
 
-For the release snapshot, check out `v0.1.0-alpha.1` before building. The CLI
+For the historical release snapshot, check out `v0.1.0-alpha.1` before building. The CLI
 reports `agda2sysml 0.1.0 (Agda 2.8.0)`; the release's alpha status describes
 its maturity. This is a source release: Nix builds the application locally.
 The first build can download or compile substantial dependencies and run the
@@ -43,16 +49,15 @@ nix develop --command cabal build all
 nix develop --command cabal run agda2sysml -- --help
 ```
 
-You can substitute `nix develop --command cabal run agda2sysml --` for
-`nix develop --command ./result/bin/agda2sysml` in the self-specification and
-public-contract commands below.
+The commands below use the installed `agda2sysml` on `PATH`. For a development
+build, use `cabal list-bin exe:agda2sysml` to locate and reuse the built executable.
 
 ## 2. Generate from the project's own Agda files
 
 From the repository root:
 
 ```sh
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --library spec/agda2sysml-spec.agda-lib \
   --root Agda2SysML \
   --diagnostic \
@@ -67,19 +72,19 @@ The library descriptor selects `spec/`; the entry module imports the formal
 modules. The generator checks that import closure and selects every declaration
 owned by this library. It follows required dependencies into imported libraries.
 An unimported Agda file is outside this invocation's scope. No YAML is needed.
-The Nix shell supplies an empty installed-library registry for these builtin-only
-inputs. Invoking the packaged CLI outside that shell uses your normal Agda
-registry, which must contain valid library paths even if this input needs no
-additional libraries.
+The Unix command supplies an empty installed-library registry for these
+builtin-only inputs. Without this setting, Agda uses its normal user registry,
+which must contain valid paths even when this input needs no additional libraries.
 
-**Expect exit status 2.** The full self-specification is currently incomplete
-as a native translation. `--diagnostic` requests a usable partial bundle,
-including a model accepted by the pinned SysML validator. Exit 2 here is the
-documented result, not a failed Agda compilation. If running under `set -e` or
-in automation, handle it explicitly:
+The self specification still translates partially. When its model passes
+validation, expect **exit status 2**: `--diagnostic` requests a usable partial
+bundle. The [checkpoint](current-state.md) records the observed generation and
+validation results. Use the register workflow in section 5 for a complete
+example. In automation, distinguish incomplete translation from failed Agda
+checking or target validation:
 
 ```sh
-if nix develop --command ./result/bin/agda2sysml generate \
+if AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
     --library spec/agda2sysml-spec.agda-lib \
     --root Agda2SysML --diagnostic \
     --output /tmp/agda2sysml-alpha-self-next; then
@@ -109,7 +114,8 @@ and completeness in automation.
 
 ## 3. Read the result
 
-The generation directory contains:
+When generation succeeds, including a validated partial translation with exit 2,
+the generation directory contains:
 
 | File | Use |
 | --- | --- |
@@ -120,16 +126,32 @@ The generation directory contains:
 | `diagnostics.json` | Reasons for unresolved translation requirements or failures. |
 | `manifest.json` | Toolchain and input identities, artifact hashes, scope, validation result, and completeness. |
 
-The alpha self-model snapshot has `complete: false`,
-`targetValidation: "accepted"`, 74 native project functions, and 740 unresolved
-requirements. The counts can change with the specification or entry modules;
-they are not a percentage of implementation completion. Source/proof retention
-is accounted for separately from executable translation.
+`agda2sysml generate` always writes `correspondence.json`, including detailed
+source-to-target tracing. It currently provides no option to omit that detail
+or split the model/report by module. For the current self specification, the
+model is about 16.6 MB and the full report about 600 MB; generation and validation
+can take many minutes. The [checkpoint](current-state.md) supplies a compressed
+model and compact evidence for download; the full report is local output and
+is excluded from Git.
+
+The [file-size table](current-state.md#file-sizes) distinguishes compressed
+downloads from generated files, including the 38.2 MB checked inventory and
+the much smaller register example. These are snapshot measurements, not limits.
+
+The current self-model has 423 native calculation functions and 247 native
+equality statements among 722 project function declarations. With 27 in both
+groups, 643/722 (89.1%) have either representation. There are 79 without either
+representation and 174 unresolved requirements; `complete` is false. The
+[checkpoint](current-state.md) records Pilot's result and exact artifact hashes.
+These counts include generated and module-copied declarations. They are not a
+percentage of implementation completion or behavior verified. Source/proof
+retention is accounted for separately from native translation. The original
+alpha's 74 native functions and 740 unresolved requirements are historical.
 
 For a quick summary, from the repository root:
 
 ```sh
-nix develop --command python3 - <<'PY'
+python3 - <<'PY'
 import json
 from pathlib import Path
 bundle = Path('/tmp/agda2sysml-alpha-self')
@@ -145,6 +167,8 @@ for item in report['obligations']:
 PY
 ```
 
+This optional reporting snippet uses only Python's standard library; the
+generator does not require Python. You can read the same data in the browser.
 The final line shows one unresolved requirement; the JSON and browser list the
 others. A translated declaration can have additional unresolved requirements,
 so a native fragment alone does not establish completeness of its whole scope.
@@ -184,7 +208,7 @@ updates while retaining the complete intermediate state.
 Generate its deliberately selected, complete model:
 
 ```sh
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --mapping contracts/register-workflow.yaml \
   --output /tmp/agda2sysml-alpha-register
 ```
@@ -215,7 +239,7 @@ declaration scope; it cannot hide unsupported ordinary calculations. See the
 Use the same command form with your `.agda-lib` and entry module:
 
 ```sh
-./result/bin/agda2sysml generate \
+agda2sysml generate \
   --library /absolute/path/to/project/project.agda-lib \
   --root Project \
   --diagnostic \
@@ -248,7 +272,7 @@ independent comparisons of parsed emitted SysML. The recursive core contributes
 24,542 result comparisons, including unequal source/target contexts, ten
 invalid-case rejections, and a removed-constraint mutation.
 
-Open universe levels, arbitrary higher-order values, unsupported recursive
+Unsolved universe constraints, arbitrary higher-order values, unsupported recursive
 families, general dependent computation, and some source correspondence remain
 unfinished. The formal laws are general, but they do not constitute an
 end-to-end proof of the Haskell adapter or renderer. SysML validation and actual

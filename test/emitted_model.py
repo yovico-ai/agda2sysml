@@ -24,6 +24,40 @@ class Extent:
     member: object
 
 
+@dataclass(frozen=True)
+class CalculationValue:
+    """A native calculation usage bound to a parsed calculation definition."""
+    symbol: str
+
+
+@dataclass(frozen=True)
+class CallableSignature:
+    arguments: tuple
+    result: str
+    assertions: tuple
+
+    @property
+    def argument(self):
+        assert len(self.arguments) == 1
+        return self.arguments[0]
+
+
+@dataclass
+class BoundCalculation:
+    value: object
+    signature: CallableSignature
+    scope: str
+    environment: dict
+
+
+@dataclass
+class BodyCalculation:
+    arguments: tuple
+    result: str
+    body: object
+    environment: dict
+
+
 def sequence(value):
     return value if isinstance(value, tuple) else (value,)
 
@@ -91,11 +125,52 @@ class Parser:
             parts.append(name(self.pop()))
         return '::'.join(parts)
 
+    def multiplicity(self):
+        low = high = 1
+        if self.take('['):
+            low = int(self.pop())
+            high = low
+            if self.take('..'):
+                value = self.pop()
+                high = None if value == '*' else int(value)
+            self.expect(']')
+        return low, high
+
+    def callable_body(self):
+        self.expect('{')
+        domains = []
+        while self.take('in'):
+            assert self.qualified() == ('argument' if not domains else 'argument' + str(len(domains)))
+            self.expect(':'); domains.append(self.qualified())
+            assert self.multiplicity() == (1, 1); self.expect(';')
+        assert domains, 'empty callback argument telescope'
+        self.expect('return'); assert self.qualified() == 'result'; self.expect(':')
+        codomain = self.qualified()
+        assert self.multiplicity() == (1, 1); self.expect(';')
+        contracts = []
+        while self.take('assert'):
+            self.expect('constraint'); self.expect('{')
+            contracts.append(self.expression()); self.expect('}')
+        self.expect('}')
+        return CallableSignature(tuple(domains), codomain, tuple(contracts))
+
     PRECEDENCE = {'or': 1, 'and': 2, '==': 3, '!=': 3, '<': 4, '>': 4,
                   '<=': 4, '>=': 4, 'hastype': 4, 'istype': 4, 'as': 4, '+': 5, '-': 5, '*': 6}
 
     def expression(self, minimum=0):
-        if self.take('if'):
+        if self.take('{'):
+            arguments = []
+            while self.take('in'):
+                binder = self.qualified(); self.expect(':'); carrier = self.qualified()
+                assert self.multiplicity() == (1, 1); self.expect(';')
+                arguments.append((binder, carrier))
+            assert arguments, 'empty body-expression telescope'
+            self.expect('return'); assert self.qualified() == 'result'; self.expect(':')
+            result = self.qualified()
+            assert self.multiplicity() == (1, 1); self.expect(';')
+            body = self.expression(); self.expect('}')
+            left = ('body', tuple(arguments), result, body)
+        elif self.take('if'):
             condition = self.expression()
             self.expect('?')
             yes = self.expression()
@@ -143,16 +218,25 @@ class Parser:
         while True:
             if self.take('.'):
                 left = ('project', left, self.qualified())
+            elif self.take('('):
+                arguments = []
+                if not self.take(')'):
+                    while True:
+                        arguments.append(self.expression())
+                        if self.take(')'):
+                            break
+                        self.expect(',')
+                left = ('apply', left, arguments)
             elif self.take('->'):
                 quantifier = self.pop()
-                assert quantifier in ('forAll', 'exists'), ('unsupported native quantifier', quantifier)
+                assert quantifier in ('forAll', 'exists', 'collect'), ('unsupported native quantifier', quantifier)
                 self.expect('{')
                 self.expect('in')
                 binder = name(self.pop())
                 self.expect(';')
                 condition = self.expression()
                 self.expect('}')
-                left = ('forall' if quantifier == 'forAll' else 'exists', left, binder, condition)
+                left = ({'forAll': 'forall', 'exists': 'exists', 'collect': 'collect'}[quantifier], left, binder, condition)
             elif self.peek() in self.PRECEDENCE and self.PRECEDENCE[self.peek()] >= minimum:
                 op = self.pop()
                 right = ('reference', self.qualified()) if op in ('as', 'istype', 'hastype') else self.expression(self.PRECEDENCE[op] + 1)
@@ -178,6 +262,7 @@ class Model:
         self.carriers = {}
         self.results = {}
         self.constraints = set()
+        self.field_modes = {}
         for kind, symbol, body in definition_blocks(text):
             if kind == 'enum':
                 self.carriers[symbol] = ('enum', [name(body[i+1]) for i in range(len(body)-1) if body[i] == 'enum'], [])
@@ -192,7 +277,15 @@ class Model:
                     parser.expect('{')
                     assertions.append(parser.expression())
                     parser.expect('}')
-                elif parser.take('in') or parser.take('attribute'):
+                elif parser.peek() in ('in', 'attribute', 'ref'):
+                    prefix = parser.pop()
+                    assert prefix != 'ref' or parser.peek() == 'calc', 'unsupported reference field'
+                    if parser.take('calc'):
+                        field = parser.qualified()
+                        low, high = parser.multiplicity()
+                        carrier = parser.callable_body()
+                        (fields if kind == 'attribute' else inputs).append((field, carrier, low, high))
+                        continue
                     if parser.take('redefines'):
                         while parser.pop() != ';':
                             pass
@@ -208,10 +301,22 @@ class Model:
                             value = parser.pop()
                             high = None if value == '*' else int(value)
                         parser.expect(']')
+                    qualifiers = set()
                     while not parser.take(';'):
-                        assert parser.pop() in ('ordered', 'nonunique'), 'unsupported multiplicity qualifier'
+                        qualifier = parser.pop()
+                        assert qualifier in ('ordered', 'nonunique'), 'unsupported multiplicity qualifier'
+                        qualifiers.add(qualifier)
+                    if kind == 'attribute':
+                        self.field_modes[symbol, field] = ('ordered' in qualifiers, 'nonunique' in qualifiers)
                     (fields if kind == 'attribute' else inputs).append((field, carrier, low, high))
                 elif parser.take('return'):
+                    if parser.take('ref'):
+                        parser.expect('calc'); assert parser.qualified() == 'result'
+                        assert parser.multiplicity() == (1, 1)
+                        parser.expect('=')
+                        result = parser.expression()
+                        self.results[symbol] = parser.callable_body()
+                        continue
                     parser.qualified()
                     parser.expect(':')
                     self.results[symbol] = parser.qualified()
@@ -232,6 +337,62 @@ class Model:
                 assert result is not None, ('missing native body', symbol)
                 self.calculations[symbol] = (inputs, result, assertions)
 
+        def check_reference(node):
+            if not isinstance(node, (tuple, list)):
+                return
+            if len(node) == 2 and node[0] == 'reference' and isinstance(node[1], str):
+                owner, separator, field = node[1].removeprefix('AgdaModel::').rpartition('::')
+                if separator and owner in self.calculations:
+                    inputs = self.calculations[owner][0]
+                    assert field == 'result' or any(name == field for name, *_ in inputs), \
+                        ('reference to undeclared calculation input', owner, field)
+            for child in node:
+                check_reference(child)
+        for _, body, assertions in self.calculations.values():
+            check_reference(body)
+            check_reference(assertions)
+
+    def equal(self, left, right):
+        """Data-value equality respects declared feature ordering (KerML 7.4.2).
+
+        In particular an unordered extent is not an ordered source list. Keep
+        all declared payload/evidence fields; do not erase metadata by name.
+        """
+        if type(left) is not type(right):
+            return False
+        if same(left, right):
+            return True
+        if isinstance(left, tuple):
+            return len(left) == len(right) and all(self.equal(x, y) for x, y in zip(left, right))
+        if not isinstance(left, Record) or left.type not in self.carriers:
+            return same(left, right)
+        if left.type != right.type:
+            return False
+        for field, _, _, _ in self.carriers[left.type][1]:
+            x, y = left.get(field), right.get(field)
+            if isinstance(x, Extent) or isinstance(y, Extent):
+                if not same(x, y): return False
+                continue
+            xs, ys = sequence(x), sequence(y)
+            ordered, nonunique = self.field_modes.get((left.type, field), (False, False))
+            if ordered:
+                if not self.equal(xs, ys): return False
+            elif nonunique:
+                remaining = list(ys)
+                for value in xs:
+                    match = next((i for i, other in enumerate(remaining) if self.equal(value, other)), None)
+                    if match is None: return False
+                    remaining.pop(match)
+                if remaining: return False
+            elif not (self.includes(xs, ys) and self.includes(ys, xs)):
+                return False
+        return True
+
+    def includes(self, extent, values):
+        if isinstance(extent, Extent):
+            return includes(extent, values)
+        return all(any(self.equal(value, member) for member in sequence(extent)) for value in sequence(values))
+
     def invoke(self, symbol, arguments, check=True, depth=0):
         assert depth < 500, 'native recursion did not terminate'
         symbol = symbol.removeprefix('AgdaModel::')
@@ -239,10 +400,17 @@ class Model:
         assert len(inputs) == len(arguments), ('native arity mismatch', symbol, len(arguments), len(inputs))
         env = {field: value for (field, _, _, _), value in zip(inputs, arguments)}
         env.update({symbol + '::' + field: value for field, value in list(env.items())})
+        for (field, carrier, _, _), value in zip(inputs, arguments):
+            if isinstance(carrier, CallableSignature):
+                assert isinstance(value, (CalculationValue, BoundCalculation, BodyCalculation)), 'callable binding is not a calculation'
+                binding = BoundCalculation(value, carrier, symbol + '::' + field, dict(env))
+                env[field] = env[symbol + '::' + field] = binding
         if check and symbol not in self.constraints:
             for (_, carrier, low, high), value in zip(inputs, arguments):
                 self.boundary(carrier, low, high, value, depth)
         result = self.evaluate(body, env, check, depth)
+        if isinstance(self.results[symbol], CallableSignature):
+            result = BoundCalculation(result, self.results[symbol], symbol + '::result', dict(env))
         env['result'] = env[symbol + '::result'] = result
         if check:
             self.boundary(self.results[symbol], 1, 1, result, depth)
@@ -250,6 +418,20 @@ class Model:
         return result
 
     def boundary(self, carrier, low, high, value, depth=0):
+        if isinstance(carrier, CallableSignature):
+            values = sequence(value)
+            assert len(values) >= low and (high is None or len(values) <= high), 'callback cardinality mismatch'
+            for callback in values:
+                assert isinstance(callback, (CalculationValue, BoundCalculation, BodyCalculation)), 'callable binding is not a calculation'
+                while isinstance(callback, BoundCalculation):
+                    callback = callback.value
+                inputs = callback.arguments if isinstance(callback, BodyCalculation) else self.calculations[callback.symbol][0]
+                result = callback.result if isinstance(callback, BodyCalculation) else self.results[callback.symbol]
+                assert len(inputs) == len(carrier.arguments), 'callback arity mismatch'
+                for expected, actual in [*zip(carrier.arguments, (i[1] for i in inputs)),
+                                         (carrier.result, result)]:
+                    assert expected == 'Base::Anything' or actual == 'Base::Anything' or expected == actual, 'callback type mismatch'
+            return
         if carrier in ('Boolean', 'Natural'):
             carrier = 'ScalarValues::' + carrier
         if isinstance(value, Extent):
@@ -274,6 +456,7 @@ class Model:
     def evaluate(self, ast, env, check=True, depth=0):
         op, *args = ast
         ev = lambda node: self.evaluate(node, env, check, depth)
+        if op == 'body': return BodyCalculation(args[0], args[1], args[2], dict(env))
         if op == 'literal': return args[0]
         if op == 'reference': return env.get(args[0], args[0])
         if op == 'project':
@@ -282,7 +465,15 @@ class Model:
                 assert len(value) == 1, ('projection multiplicity', value)
                 value = value[0]
             assert isinstance(value, Record), ('projection from non-record', value)
-            return value.get(args[1])
+            member = value.get(args[1])
+            fields = self.carriers.get(value.type, (None, [], []))[1]
+            signature = next((typ for field, typ, _, _ in fields if field == args[1]), None)
+            if isinstance(signature, CallableSignature) and member != ():
+                context = dict(value.fields)
+                context.update({value.type + '::' + f: v for f, v in value.fields})
+                context['self'] = context[value.type + '::self'] = value
+                return BoundCalculation(member, signature, value.type + '::' + args[1], context)
+            return member
         if op == 'new': return Record(args[0], tuple((field, ev(value)) for field, value in args[1]))
         if op == 'if': return ev(args[1] if ev(args[0]) else args[2])
         if op == 'not': return not ev(args[0])
@@ -291,13 +482,25 @@ class Model:
             values = ev(args[0])
             combine = all if op == 'forall' else any
             return combine(self.evaluate(args[2], {**env, args[1]: value}, check, depth) for value in sequence(values))
+        if op == 'collect':
+            values = ev(args[0])
+            assert not isinstance(values, Extent), 'test oracle cannot enumerate a symbolic infinite extent'
+            return tuple(element for value in sequence(values)
+                         for element in sequence(self.evaluate(args[2], {**env, args[1]: value}, check, depth)))
         if op == 'call':
             symbol, nodes = args
             values = [ev(node) for node in nodes]
+            if symbol in env:
+                return self.invoke_callback_many(env[symbol], values, check, depth + 1)
             if symbol.startswith('SequenceFunctions::'):
                 method = symbol.split('::')[-1]
-                if method == 'includes': return includes(*values)
-                if method == 'includesOnly': return same_extent(*values)
+                if method == 'includes': return self.includes(*values)
+                if method == 'includesOnly':
+                    if any(isinstance(value, Extent) for value in values): return same_extent(*values)
+                    return self.includes(*values) and self.includes(*reversed(values))
+                if method == 'equals':
+                    left, right = map(sequence, values)
+                    return len(left) == len(right) and all(self.equal(x, y) for x, y in zip(left, right))
                 seq = sequence(values[0])
                 if method == 'head': return seq[0] if seq else ()
                 if method == 'tail': return seq[1:]
@@ -305,16 +508,20 @@ class Model:
                 if method == 'isEmpty': return not seq
                 raise AssertionError(('unsupported native library operation', symbol))
             return self.invoke(symbol, values, check, depth + 1)
+        if op == 'apply':
+            return self.invoke_callback_many(ev(args[0]), [ev(x) for x in args[1]], check, depth + 1)
         if op in ('as', 'hastype', 'istype'):
             value, typ = ev(args[0]), args[1][1]
-            matches = typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)
+            matches = (typ == 'Base::Anything' or (isinstance(value, Record) and value.type == typ)
+                       or (typ == 'ScalarValues::Boolean' and type(value) is bool)
+                       or (typ == 'ScalarValues::Natural' and type(value) is int and value >= 0))
             return value if matches and op == 'as' else (() if op == 'as' else matches)
         left = ev(args[0])
         if op == 'and': return bool(left and ev(args[1]))
         if op == 'or': return bool(left or ev(args[1]))
         right = ev(args[1])
-        if op == '==': return same(left, right)
-        if op == '!=': return not same(left, right)
+        if op == '==': return self.equal(left, right)
+        if op == '!=': return not self.equal(left, right)
         if op == '<': return left < right
         if op == '>': return left > right
         if op == '<=': return left <= right
@@ -323,3 +530,34 @@ class Model:
         if op == '-': return left - right
         if op == '*': return left * right
         raise AssertionError(('unsupported native expression', ast))
+
+    def invoke_callback(self, binding, argument, check=True, depth=0):
+        return self.invoke_callback_many(binding, [argument], check, depth)
+
+    def invoke_callback_many(self, binding, arguments, check=True, depth=0):
+        if isinstance(binding, BodyCalculation):
+            assert len(arguments) == len(binding.arguments), 'body-expression arity mismatch'
+            local = dict(binding.environment)
+            for (binder, carrier), argument in zip(binding.arguments, arguments):
+                if check: self.boundary(carrier, 1, 1, argument, depth)
+                local[binder] = argument
+            result = self.evaluate(binding.body, local, check, depth + 1)
+            if check: self.boundary(binding.result, 1, 1, result, depth)
+            return result
+        if isinstance(binding, CalculationValue):
+            return self.invoke(binding.symbol, arguments, check, depth)
+        assert isinstance(binding, BoundCalculation), 'invocation target is not callable'
+        signature = binding.signature
+        assert len(arguments) == len(signature.arguments), 'callback invocation arity mismatch'
+        if check:
+            for carrier, argument in zip(signature.arguments, arguments):
+                self.boundary(carrier, 1, 1, argument, depth)
+        result = self.invoke_callback_many(binding.value, arguments, check, depth)
+        if check:
+            self.boundary(signature.result, 1, 1, result, depth)
+            env = {**binding.environment, 'result': result, binding.scope + '::result': result}
+            for i, argument in enumerate(arguments):
+                name = 'argument' if i == 0 else 'argument' + str(i)
+                env[name] = env[binding.scope + '::' + name] = argument
+            assert all(self.evaluate(c, env, True, depth) is True for c in signature.assertions), 'callback contract failed'
+        return result

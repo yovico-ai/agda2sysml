@@ -11,10 +11,21 @@ You can generate directly from an Agda library and entry module. An optional
 YAML mapping identifies local modeling roles, such as state, commands, and
 transitions. Unsupported constructs remain visible as incomplete requirements.
 
+The translator targets independent Agda projects through general rules for
+checked language constructs. Its own specification supplies a reproducible
+walkthrough and regression corpus. Compatibility with another project depends
+on the supported constructs and their composition; self-specification coverage
+alone does not establish that compatibility.
+
 Start with the [alpha walkthrough](docs/alpha.md). It explains how to run the
 generator on **its own Agda specification**, what output to expect, and how to
 explore it. The [interactive SysML guide](docs/interactive-sysml.md) covers the
 browser review and the official SysML notebook tools.
+
+The [current implementation checkpoint](docs/current-state.md) records coverage,
+remaining problems, verification results, and downloadable generated models.
+The original alpha release and the current development snapshot have different
+capabilities; the checkpoint identifies the measured implementation.
 
 ## Implemented functionality
 
@@ -24,18 +35,56 @@ browser review and the official SysML notebook tools.
   payloads, Boolean and finite-domain calculations, first-order helper calls,
   finite natural arithmetic, and ordered lists.
 - Retain supported dependent indices, type parameters, indexed family
-  parameters, concrete type/universe specializations, and safe inductive
+  parameters, concrete and symbolic static universe levels, and safe inductive
   recursive carriers. Checked recursive calculations preserve their inputs.
+  Natural-sum indices support vector concatenation, captured/runtime slot
+  injection, and shifting bounded spans with their complete order evidence.
 - Specialize supported concrete higher-order calls and perform checked
   definitional reduction at generation time.
+- Translate supported unary and multiargument callback inputs, including indexed and dependent
+  signatures, as native SysML
+  calculations, including invocation and forwarding through recursive helpers.
+  Store these callbacks in records and constructor payloads: supplied decision
+  trees and ordered rule lists can retain guards, complete outcomes, and fallback
+  behavior through `evaluate`, `evaluatePartial`, `select`, and `withFallback`.
+  Supported lambdas retain their captured values and callbacks: `restrict`
+  constructs combined guards, and `normalize` converts decision trees to ordered
+  rules while preserving complete outcomes.
+  `AlgebraicValues.tabulate` also constructs complete fields from an indexed
+  callback, preserving distinct positions even when field types repeat.
+  The self specification's first-order evaluator also translates table lookup,
+  expression evaluation, argument lists, and evidence-producing operation members.
+  Supplied calculations can compute dependent record and constructor indices;
+  input and result constraints check the selected membership while retaining
+  complete payloads and equality evidence.
+  Supported signatures can interleave runtime inputs with type and universe
+  parameters, including a later callback result type. Dependent sum dispatch
+  passes the complete tag and payload to the supplied calculation.
+  Callback behavior is independently tested; the pinned Pilot cannot execute
+  the callback bindings reliably.
+- Translate supported indexed validation procedures with their complete evidence.
+  The self model classifies reports, accepts only fully translated reports, and
+  validates mapping candidates, distinguishing missing, ambiguous, and incompatible
+  choices. Constructor and list patterns retain their dependent input contracts.
+- Translate supported typed collection conversions that filter static slots,
+  preserve dynamic payloads, and adjust positions. Checked map/filter helpers can
+  compute dependent indices, including callback-based member conversion.
+- Retain supported type and indexed-family fields in records as runtime schema
+  bindings. Conversion, selection, and reindexing preserve complete domain
+  values and membership evidence, with constraints linking them to their binding.
+  Index domains can depend on earlier record fields. Supported nonrecursive
+  record families construct bindings using native collection expressions and
+  the supplied domain extents, preserving witnesses and evidence.
 - Describe **state machines** using Agda state/command types and transition
   functions or supported finite relations. YAML roles connect the state,
   commands, transition, outcomes, and selected contracts in the correspondence
   report. The alpha emits their native types, calculations, and constraints;
   automatic SysML `state def` synthesis and state-transition diagrams are
   future work.
-- Retain formal statements and proofs as inspectable source contracts.
-  Retention is distinguished from executable translation.
+- Emit supported equality theorem statements as native SysML constraints,
+  retaining their inputs, hypotheses, index contracts, and proof-source links.
+  Unsupported statements and proof bodies remain inspectable source contracts;
+  native statements and executable calculations have separate coverage counts.
 - Write validated SysML, completeness diagnostics, source correspondence,
   artifact hashes, and a self-contained `review.html` with search and filters.
 
@@ -45,51 +94,60 @@ also have supported representations.
 
 ## Quick start: this project's specification
 
-Install Nix with flakes enabled and Git, then:
+Install the application and pinned validator using the
+[build instructions](docs/installation.md). Nix is an optional reproducible
+build environment; generation itself is a Haskell application invoking Java.
+With the installed executables on `PATH`, run from this checkout:
 
 ```sh
-git clone https://github.com/yovico-ai/agda2sysml.git
-cd agda2sysml
-nix build
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --library spec/agda2sysml-spec.agda-lib \
   --root Agda2SysML \
   --diagnostic \
   --output /tmp/agda2sysml-alpha-self
 ```
 
-The Nix shell supplies an empty Agda dependency registry for this builtin-only
-specification. Use an output directory that does not already exist. **Exit 2 is expected for
-this example**: the whole self-specification is only partially translated.
-The diagnostic bundle still contains validated SysML and identifies the
-unresolved requirements. Exit 0 means the requested scope is complete; exit 1
-means configuration, checking, validation, or I/O failed.
+On Unix, `/dev/null` supplies an empty Agda dependency registry for this builtin-only
+specification. Use an output directory that does not already exist.
+The self specification still contains unsupported constructs. A partial
+translation whose model passes validation exits **2** and retains its diagnostic
+bundle. See the [checkpoint results](docs/current-state.md) for measured coverage
+and validation evidence.
+Exit 0 means the requested scope is complete; exit 1 means configuration,
+checking, validation, or I/O failed.
 
-Open `/tmp/agda2sysml-alpha-self/review.html` in a browser. For a small, complete
+Explore a generated bundle through `review.html`. For a small, complete
 state-update model, run:
 
 ```sh
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --mapping contracts/register-workflow.yaml \
   --output /tmp/agda2sysml-alpha-register
 ```
 
-This mapped example should exit 0. See the
+This mapped example exits 0; open `/tmp/agda2sysml-alpha-register/review.html`
+in a browser. See the
 [full walkthrough](docs/alpha.md) for commands, expected artifacts, and examples
 of native and untranslated self-specification declarations.
 
 ## Alpha limitations
 
 The alpha is useful for model inspection and for supported executable
-fragments. It does **not** translate arbitrary Agda completely. Open universe
-levels, arbitrary higher-order values, unsupported recursive families, general
+fragments. It does **not** translate arbitrary Agda completely. Unsolved universe
+constraints, arbitrary higher-order values, unsupported recursive families, general
 dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
-The default self model currently has 74 native project functions and 740
-unresolved requirements. These are coverage observations, not a completion
-percentage or an end-to-end correctness claim. Formal proof contracts can be
-retained even when associated ordinary calculations remain unsupported.
+The default self model has 423 native calculation functions out of 722 (58.6%)
+and 247 native equality statements, including compiler-generated or module-copied helpers.
+Twenty-seven functions have both representations: 643/722 function declarations (89.1%)
+have a native calculation or statement constraint. This is declaration
+coverage, not a percentage of application behavior or a correctness claim.
+There are still 174 unresolved requirements. Source-only proof retention is
+excluded from native coverage.
+See the [checkpoint](docs/current-state.md) for the exact uncovered declarations
+and the distinction between declaration coverage, requirement completion, and
+Pilot validation.
 
 SysML validation checks parsing, names, and types. It does not prove
 equivalence or guarantee that a downstream tool can execute every calculation.
@@ -102,8 +160,12 @@ which interactive examples work and how to recognize unevaluated results.
 ```sh
 nix develop
 cabal build all
+cabal test all --test-options=--compiler-only --test-show-details=direct
 nix flake check --print-build-logs
 ```
+
+The compiler-only test command runs all eight Haskell suites without starting
+Pilot. The default test options and the full flake checks still include Pilot.
 
 CI checks the safe Agda aggregate, eight Haskell suites, native SysML validation,
 CLI behavior, reproducibility, the browser review, and independent comparisons

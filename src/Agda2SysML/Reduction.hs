@@ -88,7 +88,19 @@ reduceHead inv original = do
                   | get "tag" term == String "definition" = do
         let s = string (get "symbol" term)
         d <- definition s
-        if get "kind" d /= String "function" || not (terminationChecked inv d)
+        if get "moduleInstanceCopy" d == Bool True && get "abstract" d == Bool False
+          && get "kind" d `elem` map String ["datatype","record"] then do
+          alias <- fld "moduleAlias" d
+          let patterns = map (get "value") (array (get "patterns" alias))
+              n = length (array (get "telescope" alias))
+          guard (length patterns == n && get "body" alias /= Null
+            && and [get "tag" p == String "variable" && get "index" p == toJSON i
+              | (p,i) <- zip patterns (reverse [0..n-1])])
+          let tree = object ["tag" .= ("done" :: Text),"binders" .= replicate n Null,"body" .= get "body" alias]
+          (value,steps) <- runTree (fuel-1) tree (array (get "eliminations" term))
+          (result,more) <- whnf (fuel-1) value
+          pure (result,s:steps ++ more)
+        else if get "kind" d /= String "function" || not (terminationChecked inv d)
           || get "abstract" d /= Bool False || get "opaque" d /= Bool False then pure (term,[]) else do
           tree <- fld "compiled" d
           case runTree (fuel-1) tree (array (get "eliminations" term)) of
@@ -96,6 +108,18 @@ reduceHead inv original = do
             Just (value,steps) -> do
               (result,more) <- whnf (fuel-1) value
               pure (result,s:steps ++ more)
+    -- Module-copy constructor terms omit their module arguments. Agda's
+    -- canonical head identifies the original constructor with the same payload;
+    -- guessing the alias's phantom type parameters would be unsound.
+    whnf fuel term | get "tag" term == String "constructor"
+      ,Just d <- definition (string (get "symbol" term))
+      ,get "moduleInstanceCopy" d == Bool True, get "abstract" d == Bool False
+      ,Just (String canonical) <- fld "canonicalConstructor" d
+      ,canonical /= "",String canonical /= get "symbol" term = do
+        original <- definition canonical
+        guard (get "kind" original == String "constructor" && get "abstract" original == Bool False)
+        (result,steps) <- whnf (fuel-1) (set "symbol" (String canonical) term)
+        pure (result,string (get "symbol" term):canonical:steps)
     whnf fuel term | get "tag" term == String "constructor" = do
       let es = array (get "eliminations" term); (args,rest) = span ((== String "apply") . get "tag") es
       case rest of
@@ -193,8 +217,11 @@ freeVariables = S.toAscList . collect 0
 -- Replay checked case bindings under a simultaneous substitution. env is in
 -- source telescope order, while its terms inhabit the target telescope of n
 -- variables. Static and closure arguments need no target binder.
-rewriteTree :: Int -> [Value] -> Value -> Maybe Value
-rewriteTree n env tree = case string (get "tag" tree) of
+rewriteTree :: Inventory -> Int -> [Value] -> Value -> Maybe Value
+rewriteTree inv n env tree = case string (get "tag" tree) of
+  "absurd" -> do
+    guard (length (array (get "binders" tree)) <= length env)
+    pure $ set "binders" (toJSON (replicate n Null)) tree
   "done" -> do
     let count = length (array (get "binders" tree))
     guard (count <= length env)
@@ -205,12 +232,29 @@ rewriteTree n env tree = case string (get "tag" tree) of
     i <- int (get "value" (get "argument" tree))
     guard (i == length env)
     branches <- traverse (\b -> do
-      child <- rewriteTree n env (get "tree" (get "branch" b))
+      child <- rewriteTree inv n env (get "tree" (get "branch" b))
       pure (set "branch" (set "tree" child (get "branch" b)) b)) (array (get "constructors" tree))
     pure $ set "argument" (set "value" (toJSON n) (get "argument" tree)) $ set "constructors" (toJSON branches) tree
   "case" -> do
     i <- int (get "value" (get "argument" tree))
-    selected <- at i env
+    source <- at i env
+    let selected = maybe source fst (reduceHead inv source)
+    if get "tag" selected == String "constructor" then do
+      guard (null (array (get "literals" tree)) && get "fallThrough" tree == Bool False)
+      values <- traverse argument (array (get "eliminations" selected))
+      let matching = filter ((== get "symbol" selected) . get "symbol") (array (get "constructors" tree))
+          eta = get "eta" tree
+      b <- case matching of
+        [b] -> Just (get "branch" b)
+        [] | get "constructor" eta == get "symbol" selected -> Just (get "branch" eta)
+        _ -> Nothing
+      guard (get "arity" b == toJSON (length values))
+      rewriteTree inv n (take i env ++ values ++ drop (i+1) env) (get "tree" b)
+    else do
+      rewriteDynamic i selected
+  _ -> Nothing
+  where
+   rewriteDynamic i selected = do
     guard (get "tag" selected == String "variable" && null (array (get "eliminations" selected)))
     index <- int (get "index" selected)
     let targetPosition = n-1-index
@@ -224,7 +268,7 @@ rewriteTree n env tree = case string (get "tag" tree) of
                        | k == index = reconstructed
                        | otherwise = variable (k+arity-1)
           transported <- traverse (substituteTerms [rebase k | k <- [0..n-1]]) env
-          body <- rewriteTree n' (take i transported ++ fields ++ drop (i+1) transported) (get "tree" b)
+          body <- rewriteTree inv n' (take i transported ++ fields ++ drop (i+1) transported) (get "tree" b)
           pure (set "tree" body b)
     branches <- traverse (\b -> do
       child <- branch (get "symbol" b) (get "branch" b)
@@ -233,8 +277,7 @@ rewriteTree n env tree = case string (get "tag" tree) of
       let e = get "eta" tree
       child <- branch (get "constructor" e) (get "branch" e)
       pure (set "branch" child e)
-    fallback <- if get "catchall" tree == Null then pure Null else rewriteTree n env (get "catchall" tree)
+    fallback <- if get "catchall" tree == Null then pure Null else rewriteTree inv n env (get "catchall" tree)
     guard (null (array (get "literals" tree)))
     pure $ set "argument" (set "value" (toJSON targetPosition) (get "argument" tree))
       $ set "constructors" (toJSON branches) $ set "eta" eta $ set "catchall" fallback tree
-  _ -> Nothing

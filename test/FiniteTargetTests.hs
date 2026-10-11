@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text.IO as Text
-import System.Environment (getEnv)
+import System.Environment (getArgs, getEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (callProcess)
@@ -65,25 +65,28 @@ main = do
   check (isLeft (F.domain bad datatype)) "payload constructor collapsed to an enum"
   let generated = T.generate inv
   check (T.complete generated) (show (T.diagnostics generated))
-  root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
-  java <- getEnv "AGDA2SYSML_TEST_JAVA"
-  withSystemTempDirectory "finite-target" $ \directory -> do
-    let file = directory </> "model.sysml"
-        library = root </> "share/agda2sysml-validator/sysml"
-    Text.writeFile file (T.modelText generated)
-    callProcess (root </> "bin/agda2sysml-validate") [file]
-    callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
-      ,"test/TargetEvaluation.java",library </> "sysml.library",file
-      ,"'rotate'('Domain'::'a') == 'Domain'::'c'","true"
-      ,"'rotate'('Domain'::'b') == 'Domain'::'a'","true"
-      ,"'rotate'('Domain'::'c') == 'Domain'::'b'","true"
-      ,"'Domain'::'a' == 'Domain'::'b'","false"
-      ,"'advance'('Domain'::'a', 'Domain'::'b')","true"
-      ,"'advance'('Domain'::'b', 'Domain'::'a')","false"
-      ,"'stay'('Domain'::'c', 'Domain'::'c', 'Domain'::'c')","true"
-      ,"'stay'('Domain'::'a', 'Domain'::'b', 'Domain'::'c')","false"
-      ,"'Step'('Domain'::'a', 'Domain'::'b')","true"]
-  putStrLn "finite-domain rejection and native evaluation checks passed"
+  options <- getArgs
+  unless (options `elem` [[],["--compiler-only"]]) (fail "Expected --compiler-only or no test options")
+  unless (options == ["--compiler-only"]) $ do
+    root <- getEnv "AGDA2SYSML_TEST_VALIDATOR"
+    java <- getEnv "AGDA2SYSML_TEST_JAVA"
+    withSystemTempDirectory "finite-target" $ \directory -> do
+      let file = directory </> "model.sysml"
+          library = root </> "share/agda2sysml-validator/sysml"
+      Text.writeFile file (T.modelText generated)
+      callProcess (root </> "bin/agda2sysml-validate") [file]
+      callProcess java ["--class-path",library </> "jupyter-sysml-kernel-0.58.0-all.jar"
+        ,"test/TargetEvaluation.java",library </> "sysml.library",file
+        ,"'rotate'('Domain'::'a') == 'Domain'::'c'","true"
+        ,"'rotate'('Domain'::'b') == 'Domain'::'a'","true"
+        ,"'rotate'('Domain'::'c') == 'Domain'::'b'","true"
+        ,"'Domain'::'a' == 'Domain'::'b'","false"
+        ,"'advance'('Domain'::'a', 'Domain'::'b')","true"
+        ,"'advance'('Domain'::'b', 'Domain'::'a')","false"
+        ,"'stay'('Domain'::'c', 'Domain'::'c', 'Domain'::'c')","true"
+        ,"'stay'('Domain'::'a', 'Domain'::'b', 'Domain'::'c')","false"
+        ,"'Step'('Domain'::'a', 'Domain'::'b')","true"]
+  putStrLn (if options == ["--compiler-only"] then "finite-domain compiler checks passed; Pilot skipped" else "finite-domain rejection and native evaluation checks passed")
 
 -- Exercise every layout up to five arguments and every finite value tuple.
 -- Equal witness types deliberately prevent carrier checking from masking a
