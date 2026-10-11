@@ -282,6 +282,7 @@ main = do
   indexedChecks inv
   computedChecks inv
   indexedLookupChecks inv
+  admittedIndexChecks inv
   unusedParameterChecks inv
   emptyCarrierChecks inv
   callbackModel <- callableFieldChecks inv
@@ -1678,6 +1679,99 @@ indexedLookupChecks base = do
         ,("more",2,done 3 (call "buildLookup" [v 1,v 0] []))])) "buildLookup" (declarations inv)}
   check (isLeft (A.functions wrong M.empty (fst (A.discover wrong M.empty)) M.! "buildLookup"))
     "unknown computed index equality was guessed"
+
+-- Once carriers are established, an independently admitted calculation can
+-- also appear in a dependent contract. Its use must retain the same complete
+-- dependency and termination checks as an ordinary call.
+admittedIndexChecks :: Inventory -> IO ()
+admittedIndexChecks base = forM_ [("Ribbon","Bool",False),("Buffer","Tone",True)] $ \(prefix,element,leading) -> do
+  let name suffix = prefix <> suffix
+      chain = name "Chain"; leaf = name "Leaf"; step = name "Step"
+      observe = name "Observe"; peer = name "Peer"; token = name "Token"; tagged = name "Tagged"
+      keep = name "Keep"; relay = name "Relay"; via = name "Via"
+      v i = variable i []
+      ty s args = object ["term" .= call s args []]
+      safe = set "opaque" (Bool False) . set "terminates" (Bool True) . set "sourceModule" (String "CheckedAdmission")
+      inductive = set "induction" (String "Inductive") . set "sourceModule" (String "CheckedAdmission")
+      ctor s owner ins out = set "family" (String owner) $ declaration s "constructor" (signature ins out)
+      op s ins out body = safe $ set "type" (signature ins out) $ operation s [] element body
+      optional = [named "Bool" | leading]
+      offset = length optional
+      prefixArgs depth = [v (depth-1) | leading]
+      inspect s = op s [named chain] (named element) (split 0
+        [(leaf,1,done 1 (v 0)),(step,1,done 1 (call (if s == observe then peer else observe) [v 0] []))])
+      additions =
+        [inductive $ set "constructors" (toJSON [leaf,step]) $ declaration chain "datatype" (universeAt (level 0))
+        ,ctor leaf chain [named element] (named chain),ctor step chain [named chain] (named chain)
+        ,inductive $ set "constructors" (toJSON [tagged]) $ declaration token "datatype"
+          (signature [named element] (universeAt (level 0)))
+        ,ctor tagged token [named element] (ty token [v 0]),inspect observe,inspect peer
+        ,op keep (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (ty token [call observe [v 1] []]) (done (offset+2) (v 0))
+        ,op relay (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (named element) (done (offset+2) (call observe [v 1] []))
+        ,op via (optional ++ [named chain,ty token [call observe [v 0] []]])
+          (ty token [call relay (prefixArgs (offset+2) ++ [v 1,v 0]) []])
+          (done (offset+2) (call keep (prefixArgs (offset+2) ++ [v 1,v 0]) []))]
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- additions]) (declarations base)
+        ,document = set "checking" (toJSON [object ["module" .= ("CheckedAdmission" :: Text),"safe" .= True
+            ,"terminationCheck" .= True,"positivityCheck" .= True]]) (document base)
+        ,modelRequirements = M.singleton "admission" (S.fromList [(string (get "name" d),
+            if get "kind" d == String "function" then "behavior" else "structure") | d <- additions])}
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover inv finite)
+      results context = A.functions context finite shapes
+      payloads = if element == "Bool" then [B False,B True] else [E "Tone" "red",E "Tone" "blue"]
+      value x 0 = R chain (M.fromList [("constructor",E (chain <> ".constructor-tag") leaf),(leaf <> ".payload0",x)])
+      value x n = R chain (M.fromList [("constructor",E (chain <> ".constructor-tag") step),(step <> ".payload0",value x (n-1))])
+      taggedValue x = R token (M.fromList [("constructor",E (token <> ".constructor-tag") tagged)
+        ,(token <> ".index0",x),(tagged <> ".payload0",x)])
+      refused context = do
+        let table = results context
+        check (all (maybe True isLeft . (`M.lookup` table)) [keep,relay,via])
+          "unadmitted calculation justified a dependent contract"
+  check (all (`M.member` shapes) [chain,token]) "independent carrier discovery failed"
+  -- The helper bodies must already work independently of their dependent users.
+  forM_ [observe,peer] $ \s -> check (either (const False) (const True) (results inv M.! s))
+    "ordinary safely recursive helper was not admitted"
+  table <- traverse (either (fail . show) pure) (results inv)
+  forM_ payloads $ \x -> forM_ [0..5 :: Int] $ \depth -> do
+    let args = [B True | leading] ++ [value x depth,taggedValue x]
+    forM_ [keep,via] $ \s -> check (evalWith table args (A.body (table M.! s)) == taggedValue x)
+      "dependent helper admission changed the complete indexed value"
+    check (evalWith table args (A.body (table M.! relay)) == x) "dependent helper chain changed its result"
+  check (S.member observe (A.dependencies (table M.! keep)) && S.member relay (A.dependencies (table M.! via)))
+    "index-only dependencies disappeared from admitted calculations"
+  forM_ [set "opaque" (Bool True),set "terminates" (Bool False),set "compiled" Null
+      ,set "compiled" (done 1 (call "UnavailableHelper" [v 0] []))] $ \change ->
+    refused inv {declarations = M.adjust change peer (declarations inv)}
+  refused inv {document = set "checking" (toJSON ([] :: [Value])) (document inv)}
+  -- A helper precondition cannot silently disappear when the helper is used
+  -- only in a type. Conditional helpers require a separate applicability rule.
+  refused inv {declarations = M.adjust (set "closureIndexEquations" (toJSON [object
+    ["domain" .= named "Bool","left" .= constructor "true" [],"right" .= constructor "false" []]])) observe (declarations inv)}
+  let wrong = inv {declarations = M.adjust (set "type" (signature (optional ++ [named chain,named element])
+        (ty token [call observe [v 0] []]))) keep (declarations inv)}
+  check (isLeft (results wrong M.! keep)) "computed helper accepted the wrong argument carrier"
+  let unrelated = name "Unrelated"
+      badEquality = inv {declarations = M.insert unrelated (inspect unrelated) $
+          M.adjust (set "type" (signature (optional ++ [named chain,ty token [call observe [v 0] []]])
+            (ty token [call unrelated [v 1] []]))) keep (declarations inv)
+        ,modelRequirements = M.map (S.insert (unrelated,"behavior")) (modelRequirements inv)}
+  check (isLeft (results badEquality M.! keep)) "distinct opaque recursive computations were equated"
+  -- Discovery cannot bootstrap a carrier from the helper that consumes it.
+  let cyclic = name "Cyclic"; create = name "CyclicValue"; readCyclic = name "ReadCyclic"
+      cycleDefs = [inductive $ set "constructors" (toJSON [create]) $ declaration cyclic "datatype"
+          (signature [named element] (universeAt (level 0)))
+        ,ctor create cyclic [ty cyclic [constructor (if element == "Bool" then "true" else "red") []]]
+          (ty cyclic [call readCyclic [v 0] []])
+        ,op readCyclic [ty cyclic [constructor (if element == "Bool" then "true" else "red") []]]
+          (named element) (done 1 (constructor (if element == "Bool" then "true" else "red") []))]
+      circular = inv {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- cycleDefs]) (declarations inv)
+        ,modelRequirements = M.map (`S.union` S.fromList [(cyclic,"structure"),(create,"structure"),(readCyclic,"behavior")]) (modelRequirements inv)}
+      circularShapes = fst (A.discover circular finite)
+  check (M.notMember cyclic circularShapes && isLeft (A.functions circular finite circularShapes M.! readCyclic))
+    "a helper justified admission of its own unsupported carrier"
 
 -- Computed finite indices require checked bodies, not merely signatures.
 indexClosureChecks :: Inventory -> IO ()
