@@ -292,6 +292,7 @@ main = do
   contextualModel <- contextualMembershipChecks inv
   moduleAliasChecks inv
   moduleConstructorRootChecks inv
+  moduleCarrierRootChecks inv
   interleavedParameterChecks inv
   indexClosureChecks inv
   let generated = T.generate callInventory
@@ -1135,15 +1136,16 @@ moduleAliasChecks base = do
       "unanchored or unsupported module alias was accepted"
   -- A copied proper projection forwards its actual record field, including
   -- when no generic declaration otherwise activates specialization.
-  forM_ [("readFlag","flag","Bool"),("readTone","tone","Tone")] $ \(s,f,ty) -> do
+  forM_ [("readFlag","flag","Bool"),("readTone","tone","Tone")] $ \(s,f,ty) -> forM_ [False,True] $ \lambda -> do
     let copiedField = set "moduleInstanceCopy" (Bool True) $ set "projection"
-          (object ["proper" .= ("Pair" :: Text),"original" .= f,"index" .= (1 :: Int)]) $
-          operation s ["Pair"] ty (done 1 (variable 0 [f]))
-        selected = base {declarations = M.insert s copiedField (declarations base)
+          (object ["proper" .= ("CopiedPair" :: Text),"original" .= f,"index" .= (1 :: Int)]) $
+          operation s ["CopiedPair"] ty (if lambda then done 0 (object ["tag" .= ("lambda" :: Text)
+            ,"abstraction" .= object ["binds" .= True,"body" .= variable 0 [f]]]) else done 1 (variable 0 [f]))
+        selected = base {declarations = M.insert s copiedField (declarations inv)
           ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
             set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)]
-              ,"definitions" .= [copiedField]]]) (document base)
-          ,modelRequirements = M.map (S.insert (s,"behavior")) (modelRequirements base)}
+              ,"definitions" .= [alias,copiedField]]]) (document base)
+          ,modelRequirements = M.map (S.insert ("CopiedPair","structure") . S.insert (s,"behavior")) (modelRequirements base)}
         prepared = P.prepare selected
         expanded = P.inventory prepared
         finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
@@ -1156,6 +1158,9 @@ moduleAliasChecks base = do
       check (eval [R "Pair" (M.fromList [("flag",B b),("tone",E "Tone" color)])] (A.body calculation)
         == if f == "flag" then B b else E "Tone" color) "copied projection read another field"
     forM_ [set "abstract" (Bool True),set "compiled" (done 1 (variable 0 ["missing"]))
+        ,set "compiled" (done 0 (object ["tag" .= ("lambda" :: Text)
+            ,"abstraction" .= object ["binds" .= False,"body" .= variable 0 [f]]]))
+        ,set "projection" (object ["proper" .= ("Tone" :: Text),"original" .= f,"index" .= (1 :: Int)])
         ,set "projection" (object ["proper" .= ("Pair" :: Text),"index" .= (1 :: Int)])
         ,set "type" (signature [named "Pair"] (named (if ty == "Bool" then "Tone" else "Bool")))] $ \change ->
       check (not (T.complete (T.generate selected {declarations = M.adjust change s (declarations selected)})))
@@ -1212,6 +1217,65 @@ moduleConstructorRootChecks base = forM_ ["Parcel","Envelope"] $ \prefix -> do
       ,set "type" (generic (piType (named "Tone") (piType (v 0) (applied [named "Bool",v 0]))))] $ \change -> do
     let invalid = inv {declarations = M.adjust change (name "Bool") (declarations inv)}
     check (not (T.complete (T.generate invalid))) "unproved or incompatible constructor alias was admitted"
+
+-- Alias equations, not copied constructor lists, determine selected carrier
+-- identity. Exercise fixed/reordered parameters and dependent runtime indices
+-- under two unrelated naming schemes.
+moduleCarrierRootChecks :: Inventory -> IO ()
+moduleCarrierRootChecks base = forM_ ["Cargo","Packet"] $ \prefix -> do
+  let name suffix = prefix <> suffix
+      family = name "Indexed"; ctor = name "Value"
+      v i = object ["term" .= variable i []]
+      applied s xs = object ["term" .= call s (map (get "term") xs) []]
+      universe = universeAt (level 0)
+      canonical = set "parameters" (Number 2) $ set "constructors" (toJSON [ctor]) $
+        declaration family "datatype" (signature [universe,universe,named "Bool"] universe)
+      original = set "parameters" (Number 2) $ set "family" (String family) $
+        declaration ctor "constructor" (signature [universe,universe,named "Bool",v 2,v 2]
+          (applied family [v 4,v 3,v 2]))
+      equation s body = set "moduleInstanceCopy" (Bool True) $ set "moduleAlias"
+        (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]],"body" .= body]) $
+        set "parameters" (Number 1) $ set "constructors" (toJSON [ctor]) $
+        declaration s "datatype" (signature [universe,named "Bool"] universe)
+      alias suffix fixed swap = equation (name suffix) (call family
+        (if swap then [variable 0 [],get "term" (named fixed)] else [get "term" (named fixed),variable 0 []]) [])
+      aliases = [alias "Bool" "Bool" False,alias "Tone" "Tone" False,alias "Again" "Bool" False,alias "Swap" "Bool" True]
+      ds = canonical:original:aliases
+      inv = base {declarations = M.union (M.fromList [(string (get "name" d),d) | d <- ds]) (declarations base)
+        ,document = set "selectionProfile" (String "declarations") $ set "library" (String "fixture") $
+          set "modules" (toJSON [object ["source" .= object ["library" .= ("fixture" :: Text)],"definitions" .= aliases]]) (document base)
+        ,modelRequirements = M.singleton "copy" (S.insert ("Tone","structure")
+            (S.fromList [(string (get "name" d),"structure") | d <- aliases]))}
+      prepared = P.prepare inv
+      expanded = P.inventory prepared
+      open = P.Open 0 (P.LevelExpr 0 M.empty)
+      finite = M.singleton "Tone" (F.Domain "Tone" ["red","blue"])
+      shapes = fst (A.discover expanded finite)
+      calculations = M.fromList [(A.calculationSymbol c,c) | c <- A.constructorCalculations expanded shapes]
+  check (M.null (P.failures prepared)) (show (P.failures prepared))
+  forM_ [("Bool","Bool",False,B False),("Tone","Tone",False,E "Tone" "red")
+        ,("Again","Bool",False,B True),("Swap","Bool",True,B True)] $ \(suffix,fixed,swap,value) -> do
+    let args = if swap then [open,P.Named fixed []] else [P.Named fixed [],open]
+        key s = P.typeKey (P.Named s args)
+    check (M.lookup (name suffix) (P.openRoots prepared) == Just (key family)
+      && M.member (key family) (declarations expanded)) "copied carrier did not resolve its actual canonical arguments"
+    calculation <- maybe (fail "canonical carrier constructor is absent") pure (M.lookup (key ctor) calculations)
+    forM_ [False,True] $ \index -> forM_ [B False,R "Opaque" (M.singleton "payload" (Z (10^40)))] $ \payload -> do
+      let values = if swap then [payload,value] else [value,payload]
+      check (eval (B index:values) (A.body calculation) == R (key family) (M.fromList
+        [("constructor",E (key family <> ".constructor-tag") (key ctor)),(key family <> ".index0",B index)
+        ,(key ctor <> ".payload0",B index),(key ctor <> ".payload1",head values),(key ctor <> ".payload2",last values)]))
+        "canonical carrier changed its index or ordered complete payload"
+  check (T.complete (T.generate inv)) (show (T.diagnostics (T.generate inv)))
+  forM_ [set "moduleAlias" Null,set "abstract" (Bool True)
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= constructor "true" []]]
+          ,"body" .= call family [get "term" (named "Bool"),variable 0 []] []])
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]]
+          ,"body" .= call "missingCarrier" [] []])
+      ,set "moduleAlias" (object ["telescope" .= [Null],"patterns" .= [object ["value" .= variable 0 []]]
+          ,"body" .= call family [get "term" (named "Bool")] []])] $ \change ->
+    check (not (T.complete (T.generate inv {declarations = M.adjust change (name "Bool") (declarations inv)})))
+      "unproved or ill-applied module carrier equation was admitted"
 
 emptyCarrierChecks :: Inventory -> IO ()
 emptyCarrierChecks base = do

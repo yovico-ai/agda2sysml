@@ -1350,8 +1350,11 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
     active = not (null statementSeeds) || any (\(s,r) -> r `elem` ["structure","behavior"] && generic s
       || r == "behavior" && callbackSignature s
       || r == "structure" && moduleConstructor s
+      || r == "structure" && moduleCarrier s
       || r `elem` ["structure","behavior"] && moduleProjection s) (S.toList needs)
     moduleConstructor s = maybe False (\d -> get "kind" d == String "constructor"
+      && get "moduleInstanceCopy" d == Bool True) (M.lookup s (declarations inv))
+    moduleCarrier s = maybe False (\d -> get "kind" d `elem` map String ["record","datatype"]
       && get "moduleInstanceCopy" d == Bool True) (M.lookup s (declarations inv))
     moduleProjection s = maybe False (\d -> get "kind" d == String "function"
       && get "moduleInstanceCopy" d == Bool True
@@ -1413,6 +1416,7 @@ prepare source | not active = Result source [] M.empty roots S.empty M.empty M.e
               LevelKind -> pure (Level (openLevel i))
             pure (prior ++ [arg])) [] (zip [0..] kinds)
         if moduleConstructor s then ensureConstructorRoot inv s args
+        else if moduleCarrier s then ensureCarrierRoot inv s args
         else if moduleProjection s then ensureProjectionRoot inv s args else do
           case string (get "kind" d) of
             "record" -> ensureType inv [] (Named s args)
@@ -1838,6 +1842,36 @@ isDynamic :: Binding -> Bool
 isDynamic Dynamic{} = True
 isDynamic _ = False
 
+-- Root selection supplies static arguments only. Reconstruct the remaining
+-- checked family telescope before reducing a module equation, so its runtime
+-- indices retain their domains and order. The resulting canonical family is
+-- materialized by the same path used for ordinary type references.
+canonicalCarrierRoot :: Inventory -> Text -> [Type] -> Either Refusal Type
+canonicalCarrierRoot inv s args = do
+  d <- maybe (refuse Syntax "Missing module carrier") Right (M.lookup s (declarations inv))
+  (kinds,indices,_) <- familySignature inv d
+  validateArguments inv kinds args
+  domains <- traverse (substitute args) indices
+  let values = zipWith Runtime domains (map IndexInput [0..])
+      context = reverse (map Just values)
+      term = get "term" (sourceTypeTerm inv (length domains) (Named s (args ++ values)))
+  readType inv context term
+
+ensureCarrierRoot :: Inventory -> Text -> [Type] -> Build Text
+ensureCarrierRoot inv s args = do
+  carrier <- liftEither (canonicalCarrierRoot inv s args)
+  case carrier of
+    Named owner _ -> do
+      d <- definition inv owner
+      unless (get "kind" d `elem` map String ["record","datatype"])
+        (abort Semantics "Module carrier equation does not resolve to an algebraic carrier")
+    _ -> abort Semantics "Module carrier equation does not resolve to an algebraic carrier"
+  ensureType inv [] carrier
+  let key = typeKey carrier
+  present <- gets (M.member key . ready)
+  unless present (abort Representation "Canonical module carrier was not materialized")
+  pure key
+
 -- A module copy's parameter slots need not match its canonical constructor's
 -- slots. Recover the latter from the checked result family, materialize that
 -- family, and verify the whole instantiated telescope before redirecting a
@@ -1882,16 +1916,25 @@ ensureProjectionRoot inv s args = do
   let canonical = string (get "original" p)
       forwarded = object ["tag" .= ("variable" :: Text),"index" .= (0 :: Int)
         ,"eliminations" .= [object ["tag" .= ("project" :: Text),"symbol" .= canonical]]]
+      body = get "body" tree
+      equation = case array (get "binders" tree) of
+        [_] -> body
+        [] | get "tag" body == String "lambda", get "binds" (get "abstraction" body) == Bool True ->
+          get "body" (get "abstraction" body)
+        _ -> Null
   unless (get "abstract" d == Bool False && not (T.null canonical)
-    && get "tag" tree == String "done" && length (array (get "binders" tree)) == 1
-    && Reduction.canonicalTerm (get "body" tree) == Reduction.canonicalTerm forwarded)
+    && get "tag" tree == String "done"
+    && Reduction.canonicalTerm equation == Reduction.canonicalTerm forwarded)
     (abort Semantics "Module projection lacks a checked field-forwarding equation")
   (receiver,owner,ownerArgs) <- case ins of
     [ty@(Named owner actual)] -> pure (ty,owner,actual)
     _ -> abort Representation "Module projection needs a single record receiver"
   ownerDef <- definition inv owner
   fields <- map string . array <$> liftEither (field inv "fields" ownerDef)
-  unless (get "kind" ownerDef == String "record" && get "proper" p == String owner && canonical `elem` fields)
+  declaredOwner <- case get "proper" p of
+    String sourceOwner -> liftEither (canonicalCarrierRoot inv sourceOwner args)
+    _ -> abort Semantics "Module projection has no checked owner"
+  unless (get "kind" ownerDef == String "record" && typeKey declaredOwner == typeKey receiver && canonical `elem` fields)
     (abort Semantics "Module projection does not name a field of its receiver")
   ensureType inv [] receiver
   let key = instanceKey canonical (staticArguments ownerArgs)

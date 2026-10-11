@@ -134,6 +134,14 @@ def verify_symbolic_levels(output):
     alias_empty, alias_prepend = (next(iter(aliases[name])) for name in ('empty', 'prepend'))
     alias_type = model.results[alias_empty]
     assert alias_type == model.results[alias_prepend]
+    carrier_rows = [r for r in report['obligations']
+                    if r['symbol'].startswith('Agda2SysML.SchemaConcatenation._#')
+                    and '.Sequence#' in r['symbol'] and '@' not in r['symbol']
+                    and r['sourceKind'] == 'structure']
+    assert carrier_rows
+    for row in carrier_rows:
+        assert row['status'] == 'discharged' and target_name(row['target']) == alias_type
+        assert row['source']['checkedDefinition'] == row['symbol']
     alias_slot = model.calculations[alias_empty][0][0][0]
     assert alias_slot != slot, 'module parameter telescope was not instantiated'
     alias_comparisons = 0
@@ -215,6 +223,7 @@ def verify_symbolic_levels(output):
     return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': rejected,
             'nativeStatementsExercised': len(sequence_laws), 'bodyMutationDetected': True,
             'constructorAliasRoots': len(alias_rows), 'constructorAliasComparisons': alias_comparisons,
+            'carrierAliasRoots': len(carrier_rows),
             'constructorAliasMutationDetected': True,
             'completeValuesAndEvidencePreserved': True, 'source': 'parsed emitted SysML'}
 

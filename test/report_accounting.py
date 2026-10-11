@@ -51,6 +51,7 @@ def verify_report_accounting(output):
             return
         raise AssertionError('invalid accounting input admitted')
 
+    carrier_roots = {}
     reasons_a = tuple(Record('BeforeReason', (('code', n), ('detail', (n, n)))) for n in range(2))
     reasons_b = tuple(Record('AfterReason', (('code', n), ('detail', (n, n)))) for n in range(2))
     for side, count_name, sources_name, reasons in (
@@ -62,6 +63,14 @@ def verify_report_accounting(output):
         empty = constructor(report_type, 'Report.empty')
         entry = constructor(report_type, 'Report.entry')
         entry_type = model.calculations[entry][0][-2][1]
+        for suffix, typ in (('Report', report_type), ('Entry', entry_type)):
+            name = side.title() + '.' + suffix
+            rows = [o for o in report['obligations'] if o['symbol'].startswith(prefix + name + '#')
+                    and '@' not in o['symbol'] and o['sourceKind'] == 'structure']
+            assert len(rows) == 1 and rows[0]['status'] == 'discharged'
+            assert target_name(rows[0]['target']) == typ, 'copied carrier lost its module arguments'
+            assert rows[0]['source']['checkedDefinition'] == rows[0]['symbol']
+            carrier_roots[name] = typ
         translated = constructor(entry_type, 'Entry.translated')
         textual = constructor(entry_type, 'Entry.textual')
         evidence_type = model.calculations[translated][0][-1][1]
@@ -114,5 +123,8 @@ def verify_report_accounting(output):
                 (evidence_index, identities[0]), (evidence_value, Record('UnknownEvidence', ()))))
             refuse(lambda: call(translated, [identities[0], wrong_member]))
 
+    assert carrier_roots['Before.Entry'] != carrier_roots['After.Entry']
+    assert carrier_roots['Before.Report'] != carrier_roots['After.Report']
     return {'operations': len(roots), 'comparisons': comparisons, 'invalidCasesRejected': refusals,
+            'carrierAliasRoots': len(carrier_roots), 'distinctInstantiationsPreserved': True,
             'repeatedIdentitiesPreserved': True, 'unusedRuntimeInputs': 0}
