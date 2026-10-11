@@ -131,8 +131,8 @@ dependent computation, and parts of source correspondence remain unfinished.
 The output format and translation coverage may evolve.
 
 The default self model has 423 native calculation functions out of 722 (58.6%)
-and 245 native equality statements, including compiler-generated or module-copied helpers.
-Twenty-seven functions have both representations: 641/722 function declarations (88.8%)
+and 247 native equality statements, including compiler-generated or module-copied helpers.
+Twenty-seven functions have both representations: 643/722 function declarations (89.1%)
 have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
 There are still 174 unresolved requirements. Source-only proof retention is

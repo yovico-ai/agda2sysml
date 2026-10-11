@@ -745,7 +745,23 @@ checkedIndexNormalForm inv = indexNormalFormWith (constructorProjection inv)
 indexNormalFormWith :: (Text -> [Type] -> IndexExpr -> IndexExpr) -> Type -> Type
 indexNormalFormWith project = normal . canonicalFamilies
   where
-    normal = mapIndices index
+    normal (Named s xs) = Named s (map normal xs)
+    normal (Callable xs out) = Callable (map normal xs) (normal out)
+    normal (SchemaValue xs level) = SchemaValue (map normal xs) level
+    normal (SelectedFamily value) = SelectedFamily (normal value)
+    normal (FamilyApplication family xs) = FamilyApplication (normal family) (map normal xs)
+    normal (OpenFamily slot xs level) = OpenFamily slot (map normal xs) level
+    normal (FamilyExpression domain slot body level) = FamilyExpression (normal domain) slot (normal body) level
+    normal (Runtime domain value) =
+      let actual = normal domain
+          checked = index value
+      -- Only a redundant annotation at an already checked value boundary is
+      -- transparent. Applied callback heads still need their type evidence;
+      -- a different annotation must not justify equality of the two domains.
+      in Runtime actual (case checked of
+        IndexTyped annotation expression | annotation == actual -> expression
+        _ -> checked)
+    normal ty = ty
     index (IndexTyped ty x) = typedIndex (normal ty) (index x)
     index (IndexLambda slots ty x) = IndexLambda slots (normal ty) (index x)
     index (IndexApply f x) = beta (IndexApply (index f) (index x))

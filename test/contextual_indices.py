@@ -23,7 +23,7 @@ def verify_contextual_indices(output):
             assert len(rows) == 1 and rows[0]['status'] == 'discharged' and rows[0]['target'], name
             roots[name] = target_name(rows[0]['target'])
     laws = {}
-    for name in ('constructor-index', 'constructor-result-reflects'):
+    for name in ('constructor-index', 'constructor-result-reflects', 'decode-encode', 'dispatch-preserves'):
         rows = [s for s in report['nativeStatements'] if s['symbol'].startswith('Agda2SysML.IndexedValues.Family.' + name + '#')]
         assert len(rows) == 1 and rows[0]['status'] == 'translated', name
         laws[name] = target_name(rows[0]['target'])
@@ -180,6 +180,10 @@ def verify_contextual_indices(output):
     identity = callback('contextResultIndex', index_sig, 'if a0 ? 7 else ' + key)
     equivalent = callback('contextEquivalentResultIndex', index_sig, 'if ' + key + ' == 0 ? 0 else 7')
     wrong = callback('contextWrongResultIndex', index_sig, '7')
+    branch_sig = runtime(laws['dispatch-preserves'])[1][1]
+    dispatch_payload = callback('contextDispatchPayload', branch_sig, 'a1.' + quote(member_value))
+    dispatch_tag = callback('contextDispatchTag', branch_sig, 'a0')
+    dispatch_wrong = callback('contextDispatchWrong', branch_sig, '7')
     refresh()
     tags = (False, True)
     bindings.update(typeArgument3=indices, typeArgument4=tags)
@@ -203,10 +207,19 @@ def verify_contextual_indices(output):
                 expect(call(root(module, operation), identity, t, m, selected, proof), proof)
             expect(call(laws['constructor-index'], identity, t, m), True)
             expect(call(laws['constructor-result-reflects'], identity, t, m, selected, proof), True)
+            expect(call(laws['decode-encode'], identity, selected, source), True)
+            for branch, result_extent in ((dispatch_payload, tuple(payloads.values())), (dispatch_tag, tags)):
+                bindings['typeArgument7'] = result_extent
+                expect(call(laws['dispatch-preserves'], identity, branch, selected, source), True)
             samples[t, i] = source, expected, carrier, proof
     source, expected, carrier, proof = samples[False, 0]
     expect(call(encode, equivalent, 0, source), expected)
     expect(call(decode, equivalent, 0, expected), source)
+    expect(call(laws['decode-encode'], equivalent, 0, source), True)
+    expect(call(laws['dispatch-preserves'], equivalent, dispatch_tag, 0, source), True)
+    refuse(lambda: call(laws['decode-encode'], wrong, 0, source))
+    refuse(lambda: call(laws['dispatch-preserves'], wrong, dispatch_tag, 0, source))
+    refuse(lambda: call(laws['dispatch-preserves'], identity, dispatch_wrong, 0, source))
     refuse(lambda: call(encode, wrong, 0, source))
     refuse(lambda: call(decode, wrong, 0, expected))
     refuse(lambda: call(admit, wrong, 0, carrier, proof))
@@ -224,7 +237,9 @@ def verify_contextual_indices(output):
     refuse(lambda: call(refuses, identity, False, m, 7, impossible, proof))
     refuse(lambda: call(refuses, identity, False, m, 0, impossible, proof))
     for name, values in (('constructor-index', [identity, False, m]),
-                         ('constructor-result-reflects', [identity, False, m, 0, proof])):
+                         ('constructor-result-reflects', [identity, False, m, 0, proof]),
+                         ('decode-encode', [identity, 0, source]),
+                         ('dispatch-preserves', [identity, dispatch_tag, 0, source])):
         symbol = laws[name]
         saved = model.calculations[symbol]
         model.calculations[symbol] = saved[0], ('literal', False), saved[2]
