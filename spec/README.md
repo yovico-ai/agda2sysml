@@ -40,9 +40,9 @@ library descriptor declares this directory as its include path. Generated
 interface files are ignored. A separately installed Agda 2.8.0 can also run the
 aggregate directly.
 
-The aggregate command is the formal gate. The Nix check also runs the Haskell
+The aggregate command checks the complete formal specification. The Nix check also runs the Haskell
 and CLI integration suites and the independent target evaluator. Passing the
-formal gate alone does not imply that a SysML emitter has been tested.
+Agda check alone does not imply that a SysML emitter has been tested.
 
 ## Proof coverage
 
@@ -107,7 +107,7 @@ reason. The inventory can represent the inspected corpus or the required
 semantic closure; those must remain separately identified in output. Display
 roles such as supporting lemma are orthogonal to representation status.
 
-`Evidence : Id → Set` is deliberately a parameter. The completeness gate proves
+`Evidence : Id → Set` is deliberately a parameter. The completeness theorem proves
 that evidence is carried, not that an arbitrary producer chose a sufficiently
 strong evidence predicate. An implementation correspondence argument must
 connect this predicate to the actual source and target semantics. Instantiating
@@ -183,7 +183,10 @@ fibre use must satisfy the required index equality.
 `DependentRecords` extends the family/fibre correspondence to records whose
 members depend on arbitrary preceding field tuples. It proves both round trips,
 unchanged prefix values, dependent field preservation, and operation preservation.
-The accepted compiler fragment restricts the projected indices to finite domains.
+The accepted compiler fragment includes supported finite, natural, structured,
+and callback-computed indices; see the [translation rules](../docs/translation-rules.md)
+for its current admission conditions. These laws are more general than the
+implemented fragment.
 
 `SpecializedFamilies` composes static interpretation equality with native fibre
 encoding inside dependent records. It quantifies over arbitrary static keys,

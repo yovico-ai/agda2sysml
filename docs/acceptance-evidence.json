@@ -3,7 +3,7 @@
   "date": "2026-10-07",
   "implementationTree": "a552b29c9cbb52dca80fb91e62200535abfefb2b",
   "generatorBinaryDigest": "d69cc036096d519e253df4c7c9facd5c0545b43eeed638391b4591fc931b8604",
-  "method": "generate --diagnostic for every contracts/*.yaml; successful complete bundles satisfy the semantic strict gate, while provenance is separately measured; repeat-counted across artifacts",
+  "method": "generate --diagnostic for every contracts/*.yaml; successful complete bundles satisfy the strict semantic completion criteria, while provenance is separately measured; repeat-counted across artifacts",
   "commandTemplate": "agda2sysml generate --mapping contracts/NAME.yaml --output OUTPUT/NAME --diagnostic",
   "mappings": [
     {

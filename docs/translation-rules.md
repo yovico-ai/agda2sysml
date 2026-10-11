@@ -6,6 +6,11 @@ boundary. A declaration outside these boundaries remains visible with an
 undischarged requirement; this catalogue does not narrow the project's eventual
 acceptance criteria.
 
+For measured coverage and the remaining problem classes in the current
+implementation, see the [checkpoint](current-state.md). This catalogue describes
+individual rules; their existence does not guarantee that every composition of
+supported constructs translates.
+
 ## Boolean values and finite constructor cases
 
 `native.boolean` maps Agda's registered builtin Boolean type and its two
@@ -496,7 +501,7 @@ extents independently of order. Ordered list contents remain finite and
 nonunique, separately from the unrestricted extent.
 
 The adapter substitutes distinct symbolic parameter slots into the checked
-signature and case tree, then applies the existing native first-order gates.
+signature and case tree, then applies the existing native first-order checks.
 Calls and constructions pass the corresponding extents. Static checking keeps
 parameter positions and family identities distinct; a function cannot inspect
 an unknown parameter's constructors. An open root is discharged only by its
@@ -566,7 +571,7 @@ types. Only resolved type binders are removed. A missing parameter, inconsistent
 inference, unsupported dropped value argument, or runtime use of a type parameter is refused.
 
 Instantiation precedes the existing finite/algebraic carrier and first-order
-call gates. Cyclic carriers remain unsupported except for the builtin list rule.
+call checks. Cyclic carriers remain unsupported except for the builtin list rule.
 Recursive helpers must retain the same static instantiation and pass the
 termination and dependency checks below. Open mapping roles cannot be justified by
 unrelated concrete uses of the same template. Constructor parameters omitted by
@@ -701,7 +706,7 @@ payloads. Case expansion substitutes projections of the selected constructor's
 slots into each payload type before nested matching. Matching either an earlier
 finite value or a dependent member refines the same branch environment; those
 refinements must survive helper calls and reconstruction. The existing checked
-case-coverage and arity gates remain mandatory. Concrete type/universe
+case-coverage and arity checks remain mandatory. Concrete type/universe
 specialization retains these relationships before native admission.
 
 `DependentSums` quantifies over constructor tags, preceding payload tuples,
@@ -722,7 +727,7 @@ families and dependent record fields. A static family instance has one native
 carrier for all its runtime indices. Specialization preserves ordered runtime
 telescopes, constructor result indices, and receiver-specific projection types;
 it removes only static binders. Proper field ownership is checked again by the
-native record gate after specialized projection identities are substituted.
+native record checks after specialized projection identities are substituted.
 
 Static inference matches carrier structure to recover type/universe arguments.
 Symbolic family arguments retain their lexical identity, index domains and
@@ -947,7 +952,11 @@ datatype contains callbacks that have no admitted native carrier.
 The checked case tree selects the known constructor, retaining runtime cases
 and specializing recursive calls at their remaining known containers. Every
 free runtime value inside the container becomes an explicit capture input;
-capture values do not enter the specialization identity. Helpers retain the
+capture values do not enter the specialization identity. Binding metadata
+retains types attached to index expressions even when identity serialization
+omits redundant annotations. This includes intermediate domains in composed
+callbacks: every referenced type or family extent must be declared and passed
+in the enclosing native scope. Helpers retain the
 type bindings needed by their captures, ordinary inputs, and full results.
 First-order container indices may refer to earlier explicit inputs. Their
 positions are transported into the generated telescope. A known constructor

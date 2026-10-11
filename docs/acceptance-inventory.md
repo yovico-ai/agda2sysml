@@ -1,5 +1,10 @@
 # Implementation acceptance inventory
 
+**Historical snapshot: 2026-10-07.** For the current self-specification coverage,
+generated models, Pilot results, and remaining problems, see the
+[current implementation checkpoint](current-state.md). The measurements below
+remain evidence for their recorded implementation, not current branch results.
+
 The native generator works for a substantial finite, first-order fragment, but
 full acceptance under the [project specification](../SPECIFICATION.md#acceptance-criteria)
 is not established. Remaining work includes semantic capability limits, incomplete
@@ -23,7 +28,7 @@ were validated for every bundle.
 
 | Measure | Result | Interpretation |
 |---|---:|---|
-| Complete public mappings | 11/13, **84.6%** | The current semantic completion gate passed for these mapped scopes |
+| Complete public mappings | 11/13, **84.6%** | These mapped scopes satisfied the semantic completion criteria |
 | Source-derived target occurrences | 612/2,271, **26.9%** | Marked emitted occurrences with validated source derivation chains |
 | Source-derived calculations | 38/207, **18.4%** | Whole marked calculations whose required origin histories are ready |
 | Discharged behavior obligations | 159/163 | Counted across all bundles, including repeated imported definitions |
@@ -75,10 +80,10 @@ The seven criteria retain their meaning from the specification.
 | Independently authored projects using both encodings map without project-specific branches | Partial | Both profiles are implemented and public finite function/relation contracts translate. General `Guarded` and `Relational` remain incomplete. Establish acceptance on independently authored projects with an explicit required scope; the maintained public suite alone does not establish independent authorship. See [contracts](../contracts/README.md), [Compiler](../src/Agda2SysML/Compiler.hs), and [RelationTarget](../src/Agda2SysML/RelationTarget.hs). |
 | Missing, ambiguous, incompatible, and dependent role references are handled without guessing | Demonstrated for supported profiles | [Mapping](../src/Agda2SysML/Mapping.hs), `Compiler.validateModel`, [mapping tests](../test/MappingTests.hs), and [CLI tests](../test/integration.py) cover parsing, resolution, selectors, conversion, and refusals. Unsupported signatures remain explicit. |
 | Commands, payloads, conditions, effects, refusal precedence, and relation alternatives have exact source correspondence | Partial | Native lowering covers the admitted fragment. Source correspondence remains partial at the measured rates above; elaboration and generated structure still lack complete evidence. See [source correspondence](source-correspondence.md), [Derivation](../src/Agda2SysML/Derivation.hs), and [SourceAlignment](../src/Agda2SysML/SourceAlignment.hs). |
-| Unsupported dependencies block strict success and all inspected declarations remain accounted for | Demonstrated for reviewed paths | `Inventory.requirementsFor` computes role-sensitive closure; `Target.discharge` refuses unsupported requirements. The integration gate checks inventory accounting, incomplete `Guarded` output, and matching strict/diagnostic refusals. See [Inventory](../src/Agda2SysML/Inventory.hs) and [Target](../src/Agda2SysML/Target.hs). |
+| Unsupported dependencies block strict success and all inspected declarations remain accounted for | Demonstrated for reviewed paths | `Inventory.requirementsFor` computes role-sensitive closure; `Target.discharge` refuses unsupported requirements. The integration suite checks inventory accounting, incomplete `Guarded` output, and matching strict/diagnostic refusals. See [Inventory](../src/Agda2SysML/Inventory.hs) and [Target](../src/Agda2SysML/Target.hs). |
 | Valid SysML and source/inventory references without unexplained omissions | Partial | Every measured bundle passes the pinned validator and reference/interval checks. Unavailable source relationships are explicit, but complete correspondence is not attained. Validator acceptance also applies to incomplete diagnostic output. See [Workflow](../src/Agda2SysML/Workflow.hs) and [validator](../validator/README.md). |
 | Identical inputs produce stable semantic artifacts | Demonstrated by public regression | [Integration tests](../test/integration.py) compare repeated generation, canonical identities, and semantic bytes after source-line movement. Stable hashes do not supply missing semantic or provenance evidence. |
-| Safe formal aggregate and documented implementation correspondence | Demonstrated with stated limits | The aggregate and all eight Haskell suites pass the native gate. [Proof coverage](../spec/README.md) and [implementation correspondence](correspondence.md) state abstract laws and trusted adapter boundaries. These are not an end-to-end mechanized proof of the Haskell compiler and SysML semantics. |
+| Safe formal aggregate and documented implementation correspondence | Demonstrated with stated limits | The aggregate and all eight Haskell suites pass the native validation checks. [Proof coverage](../spec/README.md) and [implementation correspondence](correspondence.md) state abstract laws and trusted adapter boundaries. These are not an end-to-end mechanized proof of the Haskell compiler and SysML semantics. |
 
 Four criteria have supporting evidence for the reviewed scope and three remain
 partial. This is an acceptance checklist, not seven equally sized work units.
@@ -129,12 +134,12 @@ change to compatibility, strict-mode behavior, or the release scope.
    accumulated implementation diff, and verify the intended committed snapshot
    before publication. For example, the opening of `docs/correspondence.md` still
    calls checked/target catalogs proposals, while its later section and the code
-   implement them. The CLI supports Agda 2.8.0 and the native Linux gate passed;
+   implement them. The CLI supports Agda 2.8.0 and the native Linux checks passed;
    declared flake outputs alone do not verify every platform. The MIT license and
    build metadata exist. Publication remains a separate authorized action.
 
-The present strict gate uses discharged semantic obligations. It does not require
-all `sourcePrecision` values to be ready. Changing that gate is a compatibility
+The strict completion criterion uses discharged semantic obligations. It does not require
+all `sourcePrecision` values to be ready. Changing that criterion is a compatibility
 and acceptance-policy decision, already identified in the
 [source-correspondence plan](source-correspondence.md#reporting-and-compatibility).
 
@@ -143,8 +148,8 @@ and acceptance-policy decision, already identified in the
 The implementation tree recorded in the dataset passed
 `nix flake check --print-build-logs` on `x86_64-linux`: the safe Agda aggregate,
 eight Haskell suites, public artifact/refusal/reproducibility checks, and target
-evaluation completed successfully. Other platform checks were not run by that
-native gate. This audit adds documentation and measurement data only.
+evaluation completed successfully. Other platforms were not checked in that
+run. This audit adds documentation and measurement data only.
 
 For each `contracts/*.yaml`, run the following in the pinned development
 environment, choosing a fresh output directory for each mapping:

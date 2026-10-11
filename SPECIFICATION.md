@@ -13,11 +13,12 @@ of the source. Agda supplies behavior. A project mapping supplies modeling roles
 
 ## Scope and authority
 
-The generator will be implemented in Haskell using an explicitly supported Agda
-compiler version. It will target SysML 2.0 textual notation. Exact compiler API
-and SysML validator dependencies must be pinned before implementing their
-adapters. The formal core currently checks with Agda 2.8.0 and uses only Agda
-builtins; this does not establish a generator compatibility matrix.
+The generator is implemented in Haskell against the pinned Agda 2.8.0 API and
+targets SysML 2.0 textual notation. The validator is SysML Pilot release 2026-03,
+kernel 0.58.0, with matching libraries. The formal core uses only Agda builtins;
+this does not establish a generator compatibility matrix. The
+[implementation checkpoint](docs/current-state.md) distinguishes implemented
+behavior and remaining limitations from the requirements below.
 
 The [project mapping contract](docs/project-mapping.md) specifies configuration
 version 1. The [formal specification](spec/README.md) defines general laws and

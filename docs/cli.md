@@ -35,6 +35,12 @@ and conflicting annotation roots fail before producing a bundle.
 
 All relative project paths are interpreted relative to the mapping file.
 The output directory must not already exist. Input source is never edited.
+
+Generation emits one `model.sysml` and one `correspondence.json` for the selected
+scope. Detailed source-to-target tracing is always computed and included;
+there is currently no option to omit it or split these artifacts by module.
+The full self-specification report can be hundreds of megabytes. See the
+[current checkpoint](current-state.md) for measured sizes and runtime limits.
 Commands perform no publication or upload. They operate on the configured local
 libraries and pinned validator installation.
 

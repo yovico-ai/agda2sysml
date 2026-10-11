@@ -5,10 +5,19 @@ source-aware exploration, and a SysML environment for inspecting declarations,
 visualizing model elements, and evaluating supported calculations. Both use the
 same `model.sysml`; validation does not imply universal execution support.
 
+The [register workflow](examples/register-workflow.sysml) is a small complete
+example; the [self model](examples/self.sysml.gz) contains the much larger partial
+translation. Both passed the pinned validator. Each defines its own
+`AgdaModel` package; use separate fresh kernels.
+The [checkpoint](current-state.md) records the exact validation and execution
+evidence for these files. Regenerate a full bundle for the browser review.
+
 ## Browser review: no additional installation
 
-Generate the self-model as described in the [alpha walkthrough](alpha.md), then
-open `/tmp/agda2sysml-alpha-self/review.html` in a browser.
+Generate a bundle as described in the [alpha walkthrough](alpha.md), then open
+`/tmp/agda2sysml-alpha-self/review.html` or
+`/tmp/agda2sysml-alpha-register/review.html` in a browser. A failed validation
+does not produce a completed bundle or review.
 
 Search by name, checked source, or diagnostic text. Filter by module and by
 **Has native SysML**, **Retained proof contracts**, or **Needs translation**.
@@ -32,7 +41,8 @@ a full Java 21+ JDK/JRE with font support, Python 3 with `venv`/pip, `curl`,
 `unzip`, and Graphviz's `dot` on your path. A headless Java package can suffice
 for validation but lack the font libraries needed for diagrams. These
 interactive tools are optional; the generator already includes its own
-validator through Nix.
+validator through the [Cabal/Java or Nix installation](installation.md).
+Python and Jupyter are optional interactive tooling, not generator dependencies.
 
 On Linux or macOS, outside the application checkout:
 
@@ -69,6 +79,12 @@ in a text editor, copy its complete contents into the first notebook cell,
 and run that cell with **Shift+Enter**. For the self-model, use
 `/tmp/agda2sysml-alpha-self/model.sysml`. The cell defines the `AgdaModel`
 package. Wait for parsing and validation before running further cells.
+
+For planning, allow roughly 30 seconds to one minute for the small register
+model and tens of minutes for the full self model's validation. The exact
+notebook import time can differ from the headless validator. See the
+[timing estimates](../validator/README.md#runtime-estimates) and recorded
+checkpoint measurements. These estimates do not describe calculation execution.
 
 Keep the whole file together: copied fragments can depend on generated types
 or helpers declared elsewhere in the bundle. Start a fresh kernel when switching

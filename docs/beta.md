@@ -7,3 +7,6 @@ expected results, and the [interactive SysML guide](interactive-sysml.md).
 
 This path is retained for links from earlier development documentation. It does
 not designate a beta release.
+
+Development since alpha, current generated files, verification, and unresolved
+work are recorded in the [implementation checkpoint](current-state.md).

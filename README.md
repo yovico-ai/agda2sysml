@@ -22,6 +22,11 @@ generator on **its own Agda specification**, what output to expect, and how to
 explore it. The [interactive SysML guide](docs/interactive-sysml.md) covers the
 browser review and the official SysML notebook tools.
 
+The [current implementation checkpoint](docs/current-state.md) records coverage,
+remaining problems, verification results, and downloadable generated models.
+The original alpha release and the current development snapshot have different
+capabilities; the checkpoint identifies the measured implementation.
+
 ## Implemented functionality
 
 - Check an Agda library and its entry modules; inventory the checked import
@@ -89,36 +94,39 @@ also have supported representations.
 
 ## Quick start: this project's specification
 
-Install Nix with flakes enabled and Git, then:
+Install the application and pinned validator using the
+[build instructions](docs/installation.md). Nix is an optional reproducible
+build environment; generation itself is a Haskell application invoking Java.
+With the installed executables on `PATH`, run from this checkout:
 
 ```sh
-git clone https://github.com/yovico-ai/agda2sysml.git
-cd agda2sysml
-nix build
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --library spec/agda2sysml-spec.agda-lib \
   --root Agda2SysML \
   --diagnostic \
   --output /tmp/agda2sysml-alpha-self
 ```
 
-The Nix shell supplies an empty Agda dependency registry for this builtin-only
-specification. Use an output directory that does not already exist. **Exit 2 is expected for
-this example**: the whole self-specification is only partially translated.
-The diagnostic bundle still contains validated SysML and identifies the
-unresolved requirements. Exit 0 means the requested scope is complete; exit 1
-means configuration, checking, validation, or I/O failed.
+On Unix, `/dev/null` supplies an empty Agda dependency registry for this builtin-only
+specification. Use an output directory that does not already exist.
+The self specification still contains unsupported constructs. A partial
+translation whose model passes validation exits **2** and retains its diagnostic
+bundle. See the [checkpoint results](docs/current-state.md) for measured coverage
+and validation evidence.
+Exit 0 means the requested scope is complete; exit 1 means configuration,
+checking, validation, or I/O failed.
 
-Open `/tmp/agda2sysml-alpha-self/review.html` in a browser. For a small, complete
+Explore a generated bundle through `review.html`. For a small, complete
 state-update model, run:
 
 ```sh
-nix develop --command ./result/bin/agda2sysml generate \
+AGDA2SYSML_LIBRARIES_FILE=/dev/null agda2sysml generate \
   --mapping contracts/register-workflow.yaml \
   --output /tmp/agda2sysml-alpha-register
 ```
 
-This mapped example should exit 0. See the
+This mapped example exits 0; open `/tmp/agda2sysml-alpha-register/review.html`
+in a browser. See the
 [full walkthrough](docs/alpha.md) for commands, expected artifacts, and examples
 of native and untranslated self-specification declarations.
 
@@ -137,6 +145,9 @@ have a native calculation or statement constraint. This is declaration
 coverage, not a percentage of application behavior or a correctness claim.
 There are still 174 unresolved requirements. Source-only proof retention is
 excluded from native coverage.
+See the [checkpoint](docs/current-state.md) for the exact uncovered declarations
+and the distinction between declaration coverage, requirement completion, and
+Pilot validation.
 
 SysML validation checks parsing, names, and types. It does not prove
 equivalence or guarantee that a downstream tool can execute every calculation.

@@ -237,7 +237,7 @@ coordinate conversion, and SysML renderer correctness remain adapter obligations
 with implementation tests. Concrete contract cases belong in those tests, not
 in Agda proof modules.
 
-## Implementation sequence and acceptance gates
+## Implementation sequence and acceptance criteria
 
 The first three rows describe the implemented stages. Additional elaboration
 rules and acceptance-policy changes require their own approval. The original design
@@ -245,12 +245,12 @@ stage contained no generator or formal-model implementation.
 
 | Stage | Work and affected areas | Observable completion and verification |
 |---|---|---|
-| 1. Source occurrence catalog | Extend `Source` and `Compiler` to catalog function clauses, supported expression syntax, datatype/record signatures, constructors, and fields. Preserve interval sets, checked-text digests, structural paths, parent ownership, and explicit missing anchors. Add the origin/identity formal laws. | Existing source groups remain available. Catalog slices resolve to the checked text; Unicode, tabs, line shifts, repeated expressions, nested with-clauses, and absent ranges are tested. No target-exact claims or semantic admission changes. Run the relevant source regressions and the full Nix gate. |
-| 2. Checked-to-target derivations | Add checked occurrence references and derivation records through native lowerers and specialization. Annotate rendering to return target spans and preserve existing model bytes. Extend formal composition/rendering laws. | Every emitted semantic target occurrence has checked/rule origins or an explicit boundary. Repeated calls and shared values retain distinct use paths. Validate all target slices and compare model bytes, declaration identities, and semantic counts. Run target regressions and the full Nix gate. |
-| 3. Source-to-checked alignment | Implement a bounded, verified bridge for direct first-order clauses/RHS forms; use resolved source contexts and checked binder transformations. Report unhandled elaboration precisely. | `ComputedIndex.nextPhase` and ordinary finite/payload clauses have validated chains. Reordered branches, identical RHSs, nested binders, hidden arguments, shadowed names, and ambiguous matches cannot produce false exact links. Unsupported with/rewrite paths remain explicit. Run formal, adapter, and public CLI checks through the full Nix gate. |
-| 4. Transformed source and acceptance policy | Design and admit additional bridge rules for with/rewrite, eta, dependent patterns, and specialization as justified. Decide strict-mode compatibility and publishable schema policy before changing those interfaces. | General derivation laws and compiler/native evidence cover each newly admitted bridge. Source completeness cannot be claimed for unresolved paths. Review combined acceptance and rerun the full Nix gate after implementation. |
+| 1. Source occurrence catalog | Extend `Source` and `Compiler` to catalog function clauses, supported expression syntax, datatype/record signatures, constructors, and fields. Preserve interval sets, checked-text digests, structural paths, parent ownership, and explicit missing anchors. Add the origin/identity formal laws. | Existing source groups remain available. Catalog slices resolve to the checked text; Unicode, tabs, line shifts, repeated expressions, nested with-clauses, and absent ranges are tested. No target-exact claims or semantic admission changes. Run the relevant source regressions and the full Nix checks. |
+| 2. Checked-to-target derivations | Add checked occurrence references and derivation records through native lowerers and specialization. Annotate rendering to return target spans and preserve existing model bytes. Extend formal composition/rendering laws. | Every emitted semantic target occurrence has checked/rule origins or an explicit boundary. Repeated calls and shared values retain distinct use paths. Validate all target slices and compare model bytes, declaration identities, and semantic counts. Run target regressions and the full Nix checks. |
+| 3. Source-to-checked alignment | Implement a bounded, verified bridge for direct first-order clauses/RHS forms; use resolved source contexts and checked binder transformations. Report unhandled elaboration precisely. | `ComputedIndex.nextPhase` and ordinary finite/payload clauses have validated chains. Reordered branches, identical RHSs, nested binders, hidden arguments, shadowed names, and ambiguous matches cannot produce false exact links. Unsupported with/rewrite paths remain explicit. Run formal, adapter, and public CLI checks through the full Nix checks. |
+| 4. Transformed source and acceptance policy | Design and admit additional bridge rules for with/rewrite, eta, dependent patterns, and specialization as justified. Decide strict-mode compatibility and publishable schema policy before changing those interfaces. | General derivation laws and compiler/native evidence cover each newly admitted bridge. Source completeness cannot be claimed for unresolved paths. Review combined acceptance and rerun the full Nix checks after implementation. |
 
-Stage 3's feasibility gate demonstrated that the pinned compiler retains
+Stage 3's feasibility investigation demonstrated that the pinned compiler retains
 `Aspects.definitionSite` for local and global uses and `PatOVar` binding sites
 in checked patterns, including loaded interfaces. These support the implemented
 explicit first-order fragment. Constructor branch replay and a checked binder
@@ -278,4 +278,8 @@ four inventoried contracts above against their checked source snapshots, verifie
 inventory digests, and reviewed the proposed cases against available and missing
 metadata. Local document links and patch whitespace are checked before completion.
 That document-only stage changed no generator, test, dependency, or Agda source.
-All implementation stages are subject to the full Nix acceptance gate above.
+The full Nix checks above describe the original acceptance plan. Current
+development uses compiler and independent emitted-model checks per stage, with
+Pilot runs at explicitly selected integration/publication checkpoints. The
+[current checkpoint](current-state.md) records which checks actually ran;
+neither the plan nor an earlier successful run is evidence for untested changes.
