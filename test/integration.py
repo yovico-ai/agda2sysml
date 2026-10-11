@@ -400,10 +400,11 @@ models:
     check(multi_callback_evidence['operations'] == 7
           and multi_callback_evidence['comparisons'] >= 230
           and multi_callback_evidence['invalidBindingsRejected'] >= 11
-          and multi_callback_evidence['bodyMutationsDetected'] == 7
+          and multi_callback_evidence['bodyMutationsDetected'] == 8
           and multi_callback_evidence['dependentArguments']
           and multi_callback_evidence['completeResultsAndOriginsPreserved'],
-          'multiargument callbacks lack complete behavior, dependent binding or mutation checks')
+          'multiargument callbacks lack complete behavior, dependent binding or mutation checks: '
+          + json.dumps(multi_callback_evidence, sort_keys=True))
     check(dependent_callback_evidence == {'operations': 6, 'comparisons': 360,
           'evidenceCallbacksExercised': 12, 'invalidBindingsRejected': 15,
           'bodyMutationsDetected': 6},
