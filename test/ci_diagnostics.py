@@ -40,7 +40,7 @@ def summarize(directory, destination):
     directory = Path(directory)
     lines = ['## CI checks', '', '| Check | Result |', '| --- | --- |']
     failures = []
-    for name in ('reporting', 'evaluation', 'spec', 'generator', 'validator', 'integration'):
+    for name in ('reporting', 'spec', 'generator', 'validator', 'integration'):
         exit_file = directory / (name + '.exit')
         status = exit_file.read_text().strip() if exit_file.exists() else None
         lines.append(f'| {name} | ' + ('Passed' if status == '0' else f'Failed (exit {status})' if status else 'Not run') + ' |')

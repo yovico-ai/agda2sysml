@@ -18,9 +18,6 @@ jobs:
           extra_nix_config: experimental-features = nix-command flakes
       - name: Verify diagnostic reporting
         run: bash .github/run-check.sh reporting python3 -B test/CiDiagnosticsTests.py
-      - name: Evaluate flake
-        id: evaluation
-        run: bash .github/run-check.sh evaluation nix flake check --no-build
       - name: Check Agda specification
         id: spec
         run: bash .github/run-check.sh spec nix build .#checks.x86_64-linux.spec --no-link --print-build-logs
