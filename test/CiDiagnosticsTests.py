@@ -227,6 +227,79 @@ class CaseRunnerTests(unittest.TestCase):
         self.assertEqual(statuses['workflow'], 'failed')
         self.assertEqual(statuses['relational-inspection'], 'passed')
 
+    def test_test_modules_do_not_rebind_shared_helpers_as_values(self):
+        helpers, stores = {}, {}
+        class SharedBindings(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):
+                helpers[node.name] = node.lineno
+            visit_AsyncFunctionDef = visit_FunctionDef
+            visit_ClassDef = visit_FunctionDef
+            def visit_Lambda(self, node):
+                pass
+            def visit_Import(self, node):
+                for alias in node.names:
+                    helpers[alias.asname or alias.name.split('.')[0]] = node.lineno
+            def visit_ImportFrom(self, node):
+                for alias in node.names:
+                    helpers[alias.asname or alias.name] = node.lineno
+            def visit_Name(self, node):
+                if isinstance(node.ctx, ast.Store):
+                    stores.setdefault(node.id, []).append(node.lineno)
+            def visit_comprehension(self, node):
+                # Comprehension iteration targets inhabit a separate scope.
+                self.visit(node.iter)
+                for condition in node.ifs:
+                    self.visit(condition)
+        for path in sorted((REPOSITORY / 'test').glob('*.py')):
+            helpers.clear()
+            stores.clear()
+            SharedBindings().visit(ast.parse(path.read_text()))
+            collisions = {name: {'definition': helpers[name], 'assignments': stores[name]}
+                          for name in helpers.keys() & stores.keys()}
+            self.assertEqual(collisions, {}, str(path) + ' overwrites shared helpers/imports')
+
+    def test_register_expressions_preserve_later_record_formatters(self):
+        tree = ast.parse((REPOSITORY / 'test/integration.py').read_text())
+        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                     and node.name in ('check', 'record_value')]
+        self.assertEqual(len(functions), 2)
+        namespace = {'sys': sys, 'assertion_failure': assertion_failure, 'record_expressions': []}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'integration-formatters', 'exec'), namespace)
+        def case_node(name):
+            matches = [node for node in ast.walk(tree) if isinstance(node, ast.With)
+                       and isinstance(node.items[0].context_expr, ast.Call)
+                       and node.items[0].context_expr.args
+                       and isinstance(node.items[0].context_expr.args[0], ast.Constant)
+                       and node.items[0].context_expr.args[0].value == name]
+            self.assertEqual(len(matches), 1, name)
+            return matches[0]
+        loops = [node for node in ast.walk(case_node('register')) if isinstance(node, ast.For)
+                 and isinstance(node.target, ast.Name) and node.target.id == 'value']
+        self.assertEqual(len(loops), 1)
+        # Execute the actual Register expression construction in the same scope
+        # used by later cases; no generator or validator substitutes for it.
+        helper = namespace['record_value']
+        exec(compile(ast.Module(body=loops, type_ignores=[]), 'register-expressions', 'exec'), namespace)
+        self.assertIs(namespace['record_value'], helper)
+        self.assertTrue(namespace['record_expressions'])
+        for case, argument, fields, bindings in [
+                ('specialized-indexed', 'carrier', ['enabled', 'evidence', 'phase_value', 'permit'],
+                 {'enabled': 'false', 'evidence': 'ev', 'phase_value': 'phase', 'permit': 'permit'}),
+                ('dependent-payload:behavior', 'lift_carrier', ['value'], {'value': 'true'}),
+                ('computed-index:behavior', 'packet_index', ['enabled', 'evidence'],
+                 {'enabled': 'false', 'evidence': 'ev'})]:
+            calls = [node for node in ast.walk(case_node(case)) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == 'record_value'
+                     and isinstance(node.args[0], ast.Name) and node.args[0].id == argument]
+            self.assertGreaterEqual(len(calls), 1, case)
+            target = "'Test." + argument + "'"
+            namespace[argument] = {'target': target, 'constructors': [{'payload':
+                [{'target': "'Test'::'" + field + "'"} for field in fields]}]}
+            namespace.update(bindings)
+            actual = eval(compile(ast.Expression(calls[0]), 'later-record-expression', 'eval'), namespace)
+            expected = 'new ' + target + '(' + ', '.join("'" + field + "'=" + bindings[field] for field in fields) + ')'
+            self.assertEqual(actual, expected, case)
+
     def test_real_evidence_and_completion_checks_preserve_requirements(self):
         tree = ast.parse((REPOSITORY / 'test/integration.py').read_text())
         helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef)

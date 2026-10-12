@@ -936,17 +936,17 @@ models:
             record_expressions = []
             for value in ("false", "true"):
                 for enabled in ("false", "true"):
-                    record_value = (f"new 'Register.State'('Register.State.value'={value},"
+                    register_state_value = (f"new 'Register.State'('Register.State.value'={value},"
                                     f"'Register.State.enabled'={enabled})")
-                    record_expressions += [f"'Register.State.value'({record_value})", value,
-                                           f"'Register.State.enabled'({record_value})", enabled]
+                    record_expressions += [f"'Register.State.value'({register_state_value})", value,
+                                           f"'Register.State.enabled'({register_state_value})", enabled]
                     for tag in ("retain", "replace"):
-                        payload = record_value if tag == "replace" else "null"
+                        payload = register_state_value if tag == "replace" else "null"
                         command = (f"new 'Register.Command'('constructor'='Register.Command.constructor-tag'::"
                                    f"'Register.Command.{tag}', 'Register.Command.write.payload0'=null, "
                                    f"'Register.Command.enable.payload0'=null, 'Register.Command.replace.payload0'={payload})")
                         record_expressions += [f"'Register.Command.payload-valid'({command})", "true",
-                                               f"'Register.State.value'('Register.step'({command}, {record_value}))", value]
+                                               f"'Register.State.value'('Register.step'({command}, {register_state_value}))", value]
             subprocess.run([java, "--class-path", str(validator / "jupyter-sysml-kernel-0.58.0-all.jar"),
                             str(repository / "test/TargetEvaluation.java"), str(validator / "sysml.library"),
                             str(work / "register/model.sysml"), *record_expressions], check=True)
@@ -1019,15 +1019,15 @@ models:
                 for name in ("Box", "Box.contents", "Choice", "Choice.first", "Choice.second",
                              "box", "choose", "replace", "retain"):
                     instance("Parameterized." + name, domain)
-            def carrier(name, domain):
+            def parameterized_carrier(name, domain):
                 key = instance(name, domain)["instance"]
                 return next(c for c in specialized["algebraicCarriers"] if c["symbol"] == key)
             specialized_expressions = []
             for domain, values in (("Agda.Builtin.Bool.Bool", ("false", "true")),
                                    ("Parameterized.Colour", ("'Parameterized.Colour'::'Parameterized.Colour.red'",
                                                               "'Parameterized.Colour'::'Parameterized.Colour.blue'"))):
-                box = carrier("Parameterized.Box", domain)
-                choice = carrier("Parameterized.Choice", domain)
+                box = parameterized_carrier("Parameterized.Box", domain)
+                choice = parameterized_carrier("Parameterized.Choice", domain)
                 field = box["constructors"][0]["payload"][0]["target"].rsplit("::", 1)[1]
                 retain = instance("Parameterized.retain", domain)["targets"][0]
                 choose = instance("Parameterized.choose", domain)["targets"][0]
